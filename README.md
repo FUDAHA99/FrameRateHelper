@@ -7,7 +7,7 @@
 
 面向《三角洲行动》玩家的 Windows 画面与帧率优化工具，支持 AI Agent 调用 Skill，完成系统检测、优化执行与一键还原。
 
-网址：https://upstream-host.invalid/
+网址：upstream-site.invalid
 
 工具覆盖电源计划、进程与 IO 优先级、HAGS、后台录制、系统服务和显卡层设置。所有写入操作都会先保存原值，支持一键还原；不修改游戏目录内的文件，不注入游戏进程，也不与反作弊交互。
 
