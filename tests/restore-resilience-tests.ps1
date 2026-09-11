@@ -189,6 +189,45 @@ try {
   Assert-True ((@($script:LegacyRootWarnings) -join ' ') -like '*类型或权限异常*') 'ACL 不合格时没有给出原因'
   function Test-ProtectedFileAcl([string]$Path) { $true }
 
+  # ---------- 5c. 坏的还原凭证：目录照常打开，但执行必须被拦住 ----------
+  #
+  # 这一条和上面几条**方向相反**，别改错。凭证读不到时不能"跳过继续"：
+  # 已消费集合不完整 = 早已还原过的 op 会被重新列为可复原并重放，
+  # 用旧值覆盖用户之后的手动修改。所以是 fail-closed。
+  #
+  # 但 fail-closed 的正确形态是「面板能打开 + 按钮禁用 + 说清是哪个文件」，
+  # 不是「三条入口一起抛一句看不懂的底层异常」。两半都要验。
+
+  [IO.File]::WriteAllText($script:LegacyRootsFile, '{"SchemaVersion":1,"Roots":[]}', (New-Object Text.UTF8Encoding($false)))
+  $receiptPath = Join-Path $script:BackupDir ('restore-receipt-' + [guid]::NewGuid().ToString('D') + '.json')
+  [IO.File]::WriteAllText($receiptPath, '{"SchemaVersion":1,"ConsumedOps":[]}', (New-Object Text.UTF8Encoding($false)))
+
+  $consumed = Get-ConsumedRestoreOpSet
+  Assert-True ([bool]$consumed.Blocked) '读不了的还原凭证没有触发 fail-closed —— 已消费集合不完整时还原会重放旧值'
+  Assert-True (@($consumed.Unreadable).Count -eq 1) '读不了的凭证份数不对'
+  Assert-True ((Get-ConsumedRestoreBlockReason $consumed) -like "*$(Split-Path -Leaf $receiptPath)*") `
+    '拦截原因里没有指出是哪个凭证文件，用户不知道该删哪个'
+  Assert-True ((Get-ConsumedRestoreBlockReason $consumed) -like '*覆盖你之后的手动调整*') `
+    '拦截原因没有解释为什么要拦，用户只会觉得工具坏了'
+
+  # 前一半：目录照常构建，用户看得见清单和原因
+  $blockedCatalog = $null
+  try { $blockedCatalog = Get-RestoreItemCatalog }
+  catch { throw "ASSERT: 一份读不了的凭证让整个还原目录抛了异常：$($_.Exception.Message)" }
+  $script:Assertions++
+  Assert-True ([bool]$blockedCatalog.RestoreBlocked) '目录没有把 RestoreBlocked 带给界面'
+  Assert-True ([int]$blockedCatalog.UnreadableReceiptCount -eq 1) '目录没有回报读不了的凭证份数'
+  Assert-True ((@($blockedCatalog.Notes) -join ' ') -like "*$(Split-Path -Leaf $receiptPath)*") `
+    '目录的 Notes 里没有凭证文件名'
+
+  # 后一半：执行入口确实被拦住，且报的是人话
+  Assert-Throws { Invoke-Restore } "$(Split-Path -Leaf $receiptPath)" `
+    '凭证读不了时「全部复原」没有被拦住，或报的不是带文件名的人话'
+
+  Remove-Item -LiteralPath $receiptPath -Force
+  $script:Assertions++
+  if ((Get-ConsumedRestoreOpSet).Blocked) { throw 'ASSERT: 删掉坏凭证之后仍然处于拦截状态' }
+
   # ---------- 6. 目录本身也必须把这些信息带给界面 ----------
 
   $catalog = Get-RestoreItemCatalog
@@ -210,5 +249,7 @@ Assert-True ($guiRaw.Contains('foreach ($n in @($Catalog.Notes))')) '界面没�
 Assert-True ($guiRaw.Contains('$Catalog.UnreadableBackupCount')) '界面没有显示读取失败的备份份数'
 Assert-True ($guiRaw.Contains('@($Catalog.SearchedRoots)')) '空列表时没有显示搜索过的目录'
 Assert-True ($guiRaw.Contains('已搜索：')) '空态文案没有把搜索范围写出来'
+Assert-True ($guiRaw.Contains('$Catalog.RestoreBlocked')) '界面没有读取 RestoreBlocked'
+Assert-True ($guiRaw.Contains('$script:InlineRestoreCatalog.RestoreBlocked')) '界面没有用 RestoreBlocked 禁用还原按钮 —— 用户点下去只会吃一个底层异常'
 
 Write-Host "restore resilience tests passed: $script:Assertions assertions"

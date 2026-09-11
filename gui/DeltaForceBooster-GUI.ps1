@@ -7528,7 +7528,10 @@ function Update-InlineRestoreSelection {
   $checks = $(if ($script:InlineRestoreChecks) { @($script:InlineRestoreChecks.ToArray()) } else { @() })
   $selectedCount = @($checks | Where-Object IsChecked).Count
   $selectableCount = @($checks | Where-Object IsEnabled).Count
-  $ready = (-not $script:Busy -and -not (Test-TuningExperimentActive))
+  # 还原凭证读不了时禁用两个执行按钮。清单仍然照常显示 —— 用户要能看见自己
+  # 改过哪些东西、以及是哪个文件挡住了还原；让他点下去再吃一个底层异常没有意义。
+  $blocked = [bool]($script:InlineRestoreCatalog -and $script:InlineRestoreCatalog.RestoreBlocked)
+  $ready = (-not $script:Busy -and -not (Test-TuningExperimentActive) -and -not $blocked)
   $ui.InlineRestoreSelectedText.Text = "已选择 $selectedCount 项"
   $ui.InlineRestoreSelectedBtn.IsEnabled = ($ready -and $selectedCount -gt 0)
   $ui.InlineRestoreAllBtn.IsEnabled = ($ready -and $script:InlineRestoreCatalog -and
@@ -7602,6 +7605,11 @@ function Initialize-InlineRestorePanel($Catalog) {
   # 用户以为没改过东西，而实际上是备份读不了 —— 这个工具最不该有的失败方式。
   foreach ($n in @($Catalog.Notes)) {
     if ("$n".Trim()) { $restoreNotices += "$n" }
+  }
+  if ([bool]$Catalog.RestoreBlocked) {
+    # 还原凭证读不了时目录照常显示（用户要能看见清单、看见是哪个文件坏了），
+    # 但执行必须拦住：已消费集合不完整就还原，等于拿旧值覆盖用户之后的手动修改。
+    $restoreNotices += "$($Catalog.RestoreBlockReason)"
   }
   if ([int]$Catalog.UnreadableBackupCount -gt 0) {
     $restoreNotices += "有 $($Catalog.UnreadableBackupCount) 份备份无法读取（原因见上一条与运行日志）。它们记录的改动无法用本工具回退，请勿删除备份文件。"

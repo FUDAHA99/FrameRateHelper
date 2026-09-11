@@ -3858,15 +3858,53 @@ function Read-ValidatedRestoreReceipt([string]$Path) {
   $receipt
 }
 
+# 已消费集合决定「哪些 op 已经还原过、不要再还原」。它和别处的"坏数据"不同：
+# **读不到凭证不能当作没消费过**。集合不完整 = 早已还原的 op 会被重新列为可复原
+# 并重放，用旧值覆盖用户之后的手动修改 —— 比不还原严重得多。
+#
+# 所以这里是 fail-closed：单份凭证读不了只淘汰它自己（不再像原先那样 throw 掉
+# 三条入口），但只要有任何一份读不了，就把 Blocked 标志带出去，
+# 让上层拒绝执行还原。区别在于：面板照常打开、原因照常显示、用户知道该删哪个文件，
+# 而不是三个按钮一起报一句看不懂的底层异常。
 function Get-ConsumedRestoreOpSet {
   $set = @{}
-  if (-not (Test-Path -LiteralPath $script:BackupDir -PathType Container)) { return $set }
-  foreach ($path in @(Get-ChildItem -LiteralPath $script:BackupDir -Filter 'restore-receipt-*.json' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)) {
-    $receipt = Read-ValidatedRestoreReceipt $path
-    if ("$($receipt.UserSid)" -ine $script:TargetUserSid) { continue }
-    foreach ($op in @($receipt.ConsumedOps)) { $set[("$($op.BackupId)|$($op.OpId)".ToLowerInvariant())] = $true }
+  $unreadable = @()
+  $enumerationFailed = $false
+  $files = @()
+  if (Test-Path -LiteralPath $script:BackupDir -PathType Container) {
+    # 原先是 -ErrorAction SilentlyContinue：枚举失败会静默返回空集合，
+    # 也就是"什么都没消费过"——正是上面说的那种最危险的推断。
+    try {
+      $files = @(Get-ChildItem -LiteralPath $script:BackupDir -Filter 'restore-receipt-*.json' -File -ErrorAction Stop |
+                 Select-Object -ExpandProperty FullName)
+    } catch { $enumerationFailed = $true }
   }
-  $set
+  foreach ($path in $files) {
+    try {
+      $receipt = Read-ValidatedRestoreReceipt $path
+      if ("$($receipt.UserSid)" -ine $script:TargetUserSid) { continue }
+      foreach ($op in @($receipt.ConsumedOps)) { $set[("$($op.BackupId)|$($op.OpId)".ToLowerInvariant())] = $true }
+    } catch {
+      $unreadable += [pscustomobject]@{ Name = (Split-Path -Leaf $path); Reason = "$($_.Exception.Message)" }
+    }
+  }
+  [pscustomobject]@{
+    Set = $set; Unreadable = @($unreadable); EnumerationFailed = [bool]$enumerationFailed
+    Blocked = [bool]($unreadable.Count -gt 0 -or $enumerationFailed)
+  }
+}
+
+# 把 Blocked 翻译成用户能照着做的一句话：哪个文件、什么原因、在哪、为什么要拦。
+function Get-ConsumedRestoreBlockReason($Consumed) {
+  if (-not $Consumed.Blocked) { return '' }
+  $where = "该文件位于 $script:BackupDir。"
+  $why = '为避免把已经还原过的旧值重复写回、覆盖你之后的手动调整，本次还原已暂停。'
+  if ($Consumed.EnumerationFailed) {
+    return "无法枚举还原凭证文件。$where$why"
+  }
+  $first = $Consumed.Unreadable[0]
+  $more = $(if ($Consumed.Unreadable.Count -gt 1) { "（另有 $($Consumed.Unreadable.Count - 1) 份同样读不了）" } else { '' })
+  "$($first.Name)：$($first.Reason)$more。$where$why"
 }
 
 function Get-ValidatedRestoreRecords([string]$File, [bool]$AllowEmpty) {
@@ -3993,8 +4031,10 @@ function Test-RegOperationMatchesApplied($Op) {
 function Get-RestoreItemCatalog {
   if (-not (Test-Admin)) { throw '读取受保护还原目录需要管理员权限' }
   $state = Get-ValidatedRestoreRecords $null $true
-  $consumedSet = Get-ConsumedRestoreOpSet
-  $active = @(Get-ActiveV3RestoreOps $state.Records $consumedSet)
+  $consumed = Get-ConsumedRestoreOpSet
+  $catalogNotes = @()
+  if ($consumed.Blocked) { $catalogNotes += (Get-ConsumedRestoreBlockReason $consumed) }
+  $active = @(Get-ActiveV3RestoreOps $state.Records $consumed.Set)
   $supported = @(Get-SelectiveRestoreItemIds)
   $shared = @{}
   foreach ($target in @($active | Group-Object { Get-RestoreOpKey $_.Op })) {
@@ -4037,10 +4077,16 @@ function Get-RestoreItemCatalog {
     ActiveOpCount = $active.Count + @($legacyRecords | ForEach-Object { @($_.Document.Ops) }).Count
     PendingBackupCount = $pendingRecords.Count
     ConflictItemCount = @($items.ToArray() | Where-Object { $_.Status -in 'conflict','shared_target','unsupported' }).Count
-    HasActiveChanges = [bool]($active.Count -gt 0 -or $legacyRecords.Count -gt 0); Notes = @($state.Notes)
+    HasActiveChanges = [bool]($active.Count -gt 0 -or $legacyRecords.Count -gt 0)
+    Notes = @(@($state.Notes) + @($catalogNotes))
     # 把「搜了哪些目录」和「有几份读不了」一并回传：界面显示空列表时，
     # 用户必须能自己判断是「确实没有可还原的」还是「有但工具没找到/读不了」。
     SearchedRoots = @($state.SearchedRoots); UnreadableBackupCount = [int]$state.UnreadableCount
+    # 凭证读不了时目录**照常构建并返回** —— 用户要能看见清单、看见是哪个文件坏了。
+    # 但执行入口会被 Blocked 拦住，界面据此禁用按钮。
+    RestoreBlocked = [bool]$consumed.Blocked
+    RestoreBlockReason = (Get-ConsumedRestoreBlockReason $consumed)
+    UnreadableReceiptCount = @($consumed.Unreadable).Count
   }
 }
 
@@ -4097,7 +4143,9 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
     $unsupported = @($ItemIds | Where-Object { (Get-SelectiveRestoreItemIds) -notcontains $_ })
     if ($unsupported.Count -gt 0) { throw "以下项目暂不支持按项目复原：$($unsupported -join '、')" }
     $state = Get-ValidatedRestoreRecords $null $false
-    $active = @(Get-ActiveV3RestoreOps $state.Records (Get-ConsumedRestoreOpSet))
+    $consumed = Get-ConsumedRestoreOpSet
+    if ($consumed.Blocked) { throw (Get-ConsumedRestoreBlockReason $consumed) }
+    $active = @(Get-ActiveV3RestoreOps $state.Records $consumed.Set)
     $itemResults = New-Object System.Collections.Generic.List[object]
     $successes = New-Object System.Collections.Generic.List[object]
     $failed = New-Object System.Collections.Generic.List[string]
@@ -4191,7 +4239,9 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
       RebootItemIds=@(); ApplyIds=@(); Receipt=$null }
   }
   $restoreNotes = @($state.Notes)
-  $consumedSet = Get-ConsumedRestoreOpSet
+  $consumed = Get-ConsumedRestoreOpSet
+  if ($consumed.Blocked) { throw (Get-ConsumedRestoreBlockReason $consumed) }
+  $consumedSet = $consumed.Set
   $activeV3 = @(Get-ActiveV3RestoreOps $state.Records $consumedSet)
   $activeV3Backups = @($activeV3 | ForEach-Object BackupId | Select-Object -Unique)
   $records = @($state.Records | Where-Object {
