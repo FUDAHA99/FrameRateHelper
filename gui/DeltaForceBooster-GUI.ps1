@@ -1264,7 +1264,7 @@ $xaml = @'
                     <StackPanel x:Name="InlineRestoreItemsPanel" Margin="9,3,9,7"/>
                   </ScrollViewer>
                   <TextBlock x:Name="InlineRestoreEmptyText" Visibility="Collapsed"
-                             Text="当前没有支持按项目精确复原的记录。" Foreground="{DynamicResource TextMut}" Margin="11,9"/>
+                             Text="当前没有支持按项目精确复原的记录。" Foreground="{DynamicResource TextMut}" Margin="11,9" TextWrapping="Wrap"/>
                 </StackPanel>
               </Border>
               <Button x:Name="InlineRestoreSelectedBtn" Content="复原所选项目" Style="{StaticResource Primary}"
@@ -7584,10 +7584,28 @@ function Initialize-InlineRestorePanel($Catalog) {
     [void]$script:InlineRestoreChecks.Add($cb)
   }
   if ($script:InlineRestoreChecks.Count -eq 0) {
+    # 空列表必须把「搜过哪里」写出来。只说「当前没有记录」的话，用户没有任何
+    # 办法分辨这是「本来就没改过」还是「改过但工具没找到备份」——
+    # 而他手工去 %ProgramData% 是能看见 backup 目录里有文件的。
+    $roots = @(@($Catalog.SearchedRoots) | Where-Object { "$_".Trim() })
+    $ui.InlineRestoreEmptyText.Text = $(if ($roots.Count -gt 0) {
+      "当前没有支持按项目精确复原的记录。`n已搜索：$($roots -join '；')"
+    } else {
+      '当前没有支持按项目精确复原的记录。'
+    })
     $ui.InlineRestoreEmptyText.Visibility = 'Visible'
   }
 
   $restoreNotices = @()
+  # 引擎回传的 Notes 原先传过来就被丢掉了。里面装的正是用户最需要知道的东西：
+  # 哪份备份读不了、为什么，哪个已登记的旧安装根不见了。空列表 + 沉默 =
+  # 用户以为没改过东西，而实际上是备份读不了 —— 这个工具最不该有的失败方式。
+  foreach ($n in @($Catalog.Notes)) {
+    if ("$n".Trim()) { $restoreNotices += "$n" }
+  }
+  if ([int]$Catalog.UnreadableBackupCount -gt 0) {
+    $restoreNotices += "有 $($Catalog.UnreadableBackupCount) 份备份无法读取（原因见上一条与运行日志）。它们记录的改动无法用本工具回退，请勿删除备份文件。"
+  }
   if ([int]$Catalog.LegacyBackupCount -gt 0) {
     $restoreNotices += "检测到 $($Catalog.LegacyBackupCount) 份旧版本备份，缺少项目归属信息，仅支持下方「全部复原」。"
   }

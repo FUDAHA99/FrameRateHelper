@@ -370,13 +370,27 @@ function Get-LegacyRoots {
   $roots = @($doc.Roots)
   if ($roots.Count -gt 16) { throw 'legacy-roots.json 的 Roots 超过 16 项上限' }
   $valid = @()
+  # 单条条目的问题只淘汰它自己。这里**没有放宽校验** —— 不合格的条目照样被拒绝，
+  # 只是不再株连其余条目和整个还原入口。原先前两项 throw、后两项 warn+continue，
+  # 同一个循环里两种处置本身就是信号：一条陈旧或手工写坏的 legacy-roots 条目
+  # 会让 Get-LegacyBackupDirs 抛异常，进而让「还原设置」整页打不开。
   foreach ($raw in $roots) {
     if ("$raw" -notmatch '^[A-Za-z]:\\' -or (Split-Path -Leaf "$raw") -notmatch '^\.DeltaForceBooster\.migrated-[0-9A-Fa-f]{32}$') {
-      throw "旧安装根路径格式无效：$raw"
+      $script:LegacyRootWarnings += "已登记的旧安装根路径格式无效，已跳过：$raw"
+      continue
     }
-    $root = [IO.Path]::GetFullPath("$raw").TrimEnd('\')
-    $drive = New-Object IO.DriveInfo([IO.Path]::GetPathRoot($root))
-    if ($drive.DriveType -ne [IO.DriveType]::Fixed) { throw "旧安装根不在本地固定磁盘：$root" }
+    $root = $null
+    try { $root = [IO.Path]::GetFullPath("$raw").TrimEnd('\') } catch { }
+    if (-not $root) {
+      $script:LegacyRootWarnings += "已登记的旧安装根无法规范化，已跳过：$raw"
+      continue
+    }
+    $driveType = [IO.DriveType]::Unknown
+    try { $driveType = (New-Object IO.DriveInfo([IO.Path]::GetPathRoot($root))).DriveType } catch { }
+    if ($driveType -ne [IO.DriveType]::Fixed) {
+      $script:LegacyRootWarnings += "已登记的旧安装根不在本地固定磁盘，已跳过：$root"
+      continue
+    }
     if (-not (Test-Path -LiteralPath $root -PathType Container)) {
       $script:LegacyRootWarnings += "已登记的旧安装根已不存在，已跳过：$root"
       continue
@@ -3865,7 +3879,30 @@ function Get-ValidatedRestoreRecords([string]$File, [bool]$AllowEmpty) {
     $detail = $(if ($notes.Count -gt 0) { "（$($notes -join '；')）" } else { '' })
     throw "未找到任何备份文件，无法还原$detail"
   }
-  $readRecords = @($sourceFiles | ForEach-Object { Read-ValidatedBackup $_ $legacyDirs })
+  # 【影响范围】Read-ValidatedBackup 抛异常是**正确**的安全响应：HMAC 不符、
+  # op 不在白名单、schema 不认识，这几种情况下拒绝那份备份完全应该。
+  # 这里要修的不是校验，是株连 —— 原先一份坏备份会 throw 掉整次枚举
+  # （文件头 $ErrorActionPreference='Stop'，ForEach-Object 里没有 per-item 兜底），
+  # 于是用户的「还原设置」整页报错，另外十几份完好的备份一起用不了。
+  #
+  # 改成逐份 try/catch 之后，坏的那份仍然被拒绝，但只淘汰它自己。
+  # 绝不静默：每一份读不了的都要带着原因进 $notes，否则用户会以为它不存在 ——
+  # 那正是这个工具最不该出现的那种失败（看起来没事，其实回不去了）。
+  $readRecords = @(); $unreadable = @()
+  foreach ($sourceFile in $sourceFiles) {
+    try { $readRecords += @(Read-ValidatedBackup $sourceFile $legacyDirs) }
+    catch { $unreadable += [pscustomobject]@{ Path = "$sourceFile"; Reason = "$($_.Exception.Message)" } }
+  }
+  if ($File -and $unreadable.Count -gt 0) {
+    # 用户指名要还原这一份。读不了就如实报错，绝不能降级成「没找到备份」。
+    throw "指定备份无法读取：$($unreadable[0].Reason)"
+  }
+  foreach ($bad in @($unreadable | Select-Object -First 5)) {
+    $notes += "已跳过读取失败的备份 $(Split-Path -Leaf $bad.Path)：$($bad.Reason)"
+  }
+  if ($unreadable.Count -gt 5) {
+    $notes += "另有 $($unreadable.Count - 5) 份备份读取失败，完整原因见运行日志"
+  }
   $consumed = @($readRecords | Where-Object Consumed)
   if ($consumed.Count -gt 0) { $notes += "已跳过 $($consumed.Count) 份早已迁移并还原的旧备份" }
   $records = @(Sort-BackupRecordsNewestFirst @($readRecords | Where-Object { -not $_.Consumed } | Group-Object Path | ForEach-Object { $_.Group[0] }))
@@ -3876,8 +3913,20 @@ function Get-ValidatedRestoreRecords([string]$File, [bool]$AllowEmpty) {
   if ($File -and $mismatch.Count -gt 0) { throw '指定备份属于另一个 Windows 用户，已拒绝跨用户还原' }
   if ($mismatch.Count -gt 0) { $notes += "已跳过 $($mismatch.Count) 份属于其他 Windows 用户的备份" }
   $records = @($records | Where-Object { $mismatch -notcontains $_ })
-  if ($records.Count -eq 0 -and -not $AllowEmpty) { throw '未找到属于当前目标用户的备份文件，无法还原' }
-  [pscustomobject]@{ Records = $records; Notes = $notes; AlreadyConsumed = $alreadyConsumed }
+  if ($records.Count -eq 0 -and -not $AllowEmpty) {
+    # 「一份都没有」和「有但全读不了」对用户是完全不同的两件事：前者说明本来就
+    # 没改过，后者说明改过但回不去了。绝不能用同一句话打发。
+    if ($unreadable.Count -gt 0) {
+      throw "找到 $($sourceFiles.Count) 份备份，但全部无法读取，已拒绝还原：$($unreadable[0].Reason)"
+    }
+    throw '未找到属于当前目标用户的备份文件，无法还原'
+  }
+  [pscustomobject]@{
+    Records = $records; Notes = $notes; AlreadyConsumed = $alreadyConsumed
+    # 下面两项只为可发现性：用户看到空列表时，得能分清「确实没有」和「找了但没找到」。
+    SearchedRoots = @(@($script:BackupDir) + @($legacyDirs) | Select-Object -Unique)
+    UnreadableCount = $unreadable.Count
+  }
 }
 
 function Get-ActiveV3RestoreOps($Records, $ConsumedSet) {
@@ -3964,6 +4013,9 @@ function Get-RestoreItemCatalog {
     PendingBackupCount = $pendingRecords.Count
     ConflictItemCount = @($items.ToArray() | Where-Object { $_.Status -in 'conflict','shared_target','unsupported' }).Count
     HasActiveChanges = [bool]($active.Count -gt 0 -or $legacyRecords.Count -gt 0); Notes = @($state.Notes)
+    # 把「搜了哪些目录」和「有几份读不了」一并回传：界面显示空列表时，
+    # 用户必须能自己判断是「确实没有可还原的」还是「有但工具没找到/读不了」。
+    SearchedRoots = @($state.SearchedRoots); UnreadableBackupCount = [int]$state.UnreadableCount
   }
 }
 
