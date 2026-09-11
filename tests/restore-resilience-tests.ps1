@@ -153,6 +153,42 @@ try {
   $script:Assertions++
   Assert-True ($dirs.Count -ge 1) 'legacy 备份目录枚举丢掉了合法的旧安装根'
 
+  # ---------- 5b. legacy-roots.json 整份不合格：拒绝全部旧根，但不得 throw ----------
+  # 「这份清单坏了」和「受保护目录里的备份没了」是两件毫不相干的事。
+  # 原先文档级校验一律 throw，于是前者会连累后者 —— 而后者才是绝大多数用户
+  # 唯一的回退依据（旧根只有从上游迁移过来的人才有）。
+
+  $goodC = New-GoodBackup 'mpo-off'
+  foreach ($bad in @(
+    @{ Name = '非 JSON';        Body = 'not json at all' }
+    @{ Name = '结构多字段';      Body = '{"SchemaVersion":1,"Roots":[],"Extra":1}' }
+    @{ Name = '版本不支持';      Body = '{"SchemaVersion":99,"Roots":[]}' }
+  )) {
+    [IO.File]::WriteAllText($script:LegacyRootsFile, $bad.Body, (New-Object Text.UTF8Encoding($false)))
+    $r = $null
+    try { $r = @(Get-LegacyRoots) }
+    catch { throw "ASSERT: legacy-roots.json「$($bad.Name)」让 Get-LegacyRoots 抛了异常：$($_.Exception.Message)" }
+    $script:Assertions++
+    Assert-True ($r.Count -eq 0) "legacy-roots.json「$($bad.Name)」时仍然信任了旧根 —— 不合格必须一条都不信"
+    Assert-True ((@($script:LegacyRootWarnings) -join ' ') -like '*已拒绝读取全部旧备份位置*') `
+      "legacy-roots.json「$($bad.Name)」被静默丢弃，没有告诉用户"
+
+    $st = Get-ValidatedRestoreRecords $null $true
+    Assert-True (@($st.Records | ForEach-Object { "$($_.Path)" }) -contains $goodC) `
+      "legacy-roots.json「$($bad.Name)」连累了受保护目录里完好的备份"
+  }
+
+  # ACL 校验的回归网。这条测试在修好括号之前根本写不出来 ——
+  # 原写法 `Test-PathHasReparsePoint $f -or -not (Test-ProtectedFileAcl $f)` 被
+  # PowerShell 当成命令调用，-or / -not / (ACL 结果) 全变成参数被丢弃，
+  # ACL 返回什么都不影响判定。
+  [IO.File]::WriteAllText($script:LegacyRootsFile, '{"SchemaVersion":1,"Roots":[]}', (New-Object Text.UTF8Encoding($false)))
+  function Test-ProtectedFileAcl([string]$Path) { $false }
+  $aclRejected = @(Get-LegacyRoots)
+  Assert-True ($aclRejected.Count -eq 0) 'legacy-roots.json 的 ACL 校验没有参与判定'
+  Assert-True ((@($script:LegacyRootWarnings) -join ' ') -like '*类型或权限异常*') 'ACL 不合格时没有给出原因'
+  function Test-ProtectedFileAcl([string]$Path) { $true }
+
   # ---------- 6. 目录本身也必须把这些信息带给界面 ----------
 
   $catalog = Get-RestoreItemCatalog

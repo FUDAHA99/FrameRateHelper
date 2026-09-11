@@ -358,17 +358,38 @@ function Get-LegacyRoots {
   $script:LegacyRootWarnings = @()
   if (-not (Test-Path -LiteralPath $script:LegacyRootsFile -PathType Leaf)) { return @() }
   if (-not (Test-Admin)) { return @() }
-  if (Test-PathHasReparsePoint $script:LegacyRootsFile -or -not (Test-ProtectedFileAcl $script:LegacyRootsFile)) {
-    throw 'legacy-roots.json 类型或权限异常，已拒绝读取旧备份位置'
+  # 【安全不变式】这份清单只要有任何一项不合格，就**一条旧根都不信任**（返回空集），
+  # 绝不是"跳过校验继续读"。变的只是它不合格时不再 throw ——
+  # 这个文件坏掉和 %ProgramData%\...\backup 里那些完好的备份没有任何关系，
+  # 不该让用户连受保护目录里的备份一起用不了。
+  #
+  # 下面这行原先写成 `Test-PathHasReparsePoint $f -or -not (Test-ProtectedFileAcl $f)`，
+  # 少了一对括号。PowerShell 会把它当成命令调用：-or、-not、(ACL 调用结果)
+  # 全部变成 Test-PathHasReparsePoint 的**参数**被丢弃，if 只测了前半截。
+  # 结果是 ACL 校验从加进来那天起就没有参与过判定 —— 它被求值，然后返回值被扔掉。
+  # （这一层是纵深防御：该文件所在目录本来就锁成 Admin+SYSTEM，
+  #   普通用户写不进去。但失效就是失效。）
+  $rejectRoots = {
+    param([string]$Why)
+    $script:LegacyRootWarnings += "$Why，已拒绝读取全部旧备份位置（受保护目录中的备份不受影响）"
   }
-  $f = Get-Item -LiteralPath $script:LegacyRootsFile -Force
-  if ($f.Length -gt 64KB) { throw 'legacy-roots.json 超过 64KB 上限' }
+  if ((Test-PathHasReparsePoint $script:LegacyRootsFile) -or -not (Test-ProtectedFileAcl $script:LegacyRootsFile)) {
+    & $rejectRoots 'legacy-roots.json 类型或权限异常'; return @()
+  }
+  $f = $null
+  try { $f = Get-Item -LiteralPath $script:LegacyRootsFile -Force } catch { }
+  if (-not $f) { & $rejectRoots 'legacy-roots.json 无法读取'; return @() }
+  if ($f.Length -gt 64KB) { & $rejectRoots 'legacy-roots.json 超过 64KB 上限'; return @() }
+  $doc = $null
   try { $doc = [IO.File]::ReadAllText($script:LegacyRootsFile, [Text.Encoding]::UTF8) | ConvertFrom-Json -ErrorAction Stop }
-  catch { throw "legacy-roots.json 格式损坏：$($_.Exception.Message)" }
-  Assert-ExactProperties $doc @('SchemaVersion','Roots') @() 'legacy-roots.json'
-  if ([int]$doc.SchemaVersion -ne 1) { throw "不支持的 legacy-roots.json 版本：$($doc.SchemaVersion)" }
+  catch { & $rejectRoots "legacy-roots.json 格式损坏（$($_.Exception.Message)）"; return @() }
+  try { Assert-ExactProperties $doc @('SchemaVersion','Roots') @() 'legacy-roots.json' }
+  catch { & $rejectRoots "legacy-roots.json 结构不符（$($_.Exception.Message)）"; return @() }
+  if ([int]$doc.SchemaVersion -ne 1) {
+    & $rejectRoots "不支持的 legacy-roots.json 版本：$($doc.SchemaVersion)"; return @()
+  }
   $roots = @($doc.Roots)
-  if ($roots.Count -gt 16) { throw 'legacy-roots.json 的 Roots 超过 16 项上限' }
+  if ($roots.Count -gt 16) { & $rejectRoots 'legacy-roots.json 的 Roots 超过 16 项上限'; return @() }
   $valid = @()
   # 单条条目的问题只淘汰它自己。这里**没有放宽校验** —— 不合格的条目照样被拒绝，
   # 只是不再株连其余条目和整个还原入口。原先前两项 throw、后两项 warn+continue，
@@ -429,7 +450,11 @@ function Get-LegacyBackupDirs {
     if (Test-TrustedProgramBackupDir $script:LegacyBackupDir) { $dirs += [IO.Path]::GetFullPath($script:LegacyBackupDir).TrimEnd('\') }
     else { $script:LegacyBackupWarnings += "程序目录中的旧备份目录不是受信的只读 Program Files 路径，已跳过：$script:LegacyBackupDir" }
   }
-  $roots = @(Get-LegacyRoots)
+  # 兜底：Get-LegacyRoots 现在不再 throw，但它以后可能被人加回去。旧备份位置读不到
+  # 绝不该让受保护目录里的备份一起用不了 —— 后者才是绝大多数用户唯一的回退依据。
+  $roots = @()
+  try { $roots = @(Get-LegacyRoots) }
+  catch { $script:LegacyRootWarnings += "读取旧备份位置清单失败，已跳过全部旧位置：$($_.Exception.Message)" }
   $script:LegacyBackupWarnings += @($script:LegacyRootWarnings)
   $dirs += @(($roots) | ForEach-Object {
     $d = [IO.Path]::GetFullPath((Join-Path $_ 'backup'))
