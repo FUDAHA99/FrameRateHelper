@@ -150,8 +150,8 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: AssemblyTitle("三角洲行动优化助手")]
-[assembly: AssemblyDescription("DeltaForceBooster 安全启动器")]
+[assembly: AssemblyTitle("帧率优化助手")]
+[assembly: AssemblyDescription("帧率优化助手 安全启动器")]
 [assembly: AssemblyProduct("DeltaForceBooster")]
 [assembly: AssemblyCompany("DeltaForceBooster 开源项目")]
 [assembly: AssemblyCopyright("DeltaForceBooster MIT 开源项目")]
@@ -164,7 +164,10 @@ static class Launcher {
     // 会话隔离，其他用户/远程会话的实例不会再挡住本会话第一次启动。
     const string ActiveMarkerName = @"Global\DeltaForceBooster.LaunchSession";
     const string InstanceMarkerName = @"Local\DeltaForceBooster.LaunchInstance";
-    const string MainWindowTitle = "三角洲行动 · 画面优化助手";
+    const string MainWindowTitle = "帧率优化助手";
+    // 旧标题必须继续认：升级期间用户机器上可能还开着旧版主窗口，
+    // 只认新标题会让「激活已有窗口」退化成「再开一个」。
+    const string LegacyMainWindowTitle = "三角洲行动 · 画面优化助手";
     const int MaxBrokerPayloadBytes = 24 * 1024 * 1024;
     static readonly string[][] RequiredFiles = new string[][] {
 $hashRowsText
@@ -404,7 +407,8 @@ $hashRowsText
         foreach (Process process in Process.GetProcesses()) {
             try {
                 if (process.Id == self || process.SessionId != session ||
-                    !String.Equals(process.MainWindowTitle, MainWindowTitle, StringComparison.Ordinal))
+                    (!String.Equals(process.MainWindowTitle, MainWindowTitle, StringComparison.Ordinal) &&
+                     !String.Equals(process.MainWindowTitle, LegacyMainWindowTitle, StringComparison.Ordinal)))
                     continue;
                 IntPtr window = process.MainWindowHandle;
                 if (window == IntPtr.Zero) continue;
@@ -617,7 +621,7 @@ $hashRowsText
             MessageBox.Show(
                 "当前电脑只允许直接提升已签名程序。软件将使用 Windows 自带的已签名 PowerShell 启动已校验的管理员助手。\n\n" +
                 "本次 UAC 窗口会显示 Windows PowerShell；确认一次后，本次软件会话不会再次询问。",
-                "三角洲行动优化助手", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                "帧率优化助手", MessageBoxButtons.OK, MessageBoxIcon.Information);
             string command = "& " + QuotePowerShellLiteral(hostPath) +
                 " --launch-pipe " + QuotePowerShellLiteral(pipeName) +
                 " --launcher-pid " + Process.GetCurrentProcess().Id.ToString(System.Globalization.CultureInfo.InvariantCulture) +
@@ -773,7 +777,7 @@ $hashRowsText
                     Thread.Sleep(100);
                 }
                 MessageBox.Show("软件正在启动。请查看任务栏中的已有窗口；如果屏幕上有管理员授权提示，请先点击“是”。",
-                    "三角洲行动优化助手", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    "帧率优化助手", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -782,7 +786,7 @@ $hashRowsText
             if (validationError != null) {
                 MessageBox.Show("程序文件不完整或已被修改：" + validationError +
                     "\n\n为避免运行异常文件，启动已停止。请从官网重新安装完整版本。",
-                    "三角洲行动优化助手", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    "帧率优化助手", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
             LaunchEngineHost(root, repairOnly);
@@ -795,7 +799,7 @@ $hashRowsText
                 reason = "运行过程中出现问题：" + ex.Message + "\n\n软件已退出，可以重新打开试试。";
             else
                 reason = "启动失败：" + ex.Message;
-            MessageBox.Show(reason, "三角洲行动优化助手", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(reason, "帧率优化助手", MessageBoxButtons.OK, MessageBoxIcon.Error);
         } finally {
             if (instanceMarker != null) instanceMarker.Dispose();
             if (activeMarker != null) activeMarker.Dispose();

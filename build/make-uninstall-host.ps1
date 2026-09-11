@@ -46,8 +46,8 @@ using System.Reflection;
 [assembly: AssemblyFileVersion("$ver4")]
 "@
   $hostAttributes = @'
-[assembly: AssemblyTitle("三角洲行动优化助手 卸载助手")]
-[assembly: AssemblyDescription("三角洲行动优化助手 卸载助手")]
+[assembly: AssemblyTitle("帧率优化助手 卸载助手")]
+[assembly: AssemblyDescription("帧率优化助手 卸载助手")]
 '@
   $hostRaw = ([IO.File]::ReadAllText((Join-Path $build 'uninstall-host.cs'), [Text.Encoding]::UTF8)).Replace('__SCRIPT_SHA256__', $scriptSha)
   $hostSource = $hostRaw.Replace('using Microsoft.Win32;',
@@ -63,8 +63,8 @@ using System.Reflection;
 
   $hostSha = (Get-FileHash -LiteralPath $hostOut -Algorithm SHA256).Hash.ToUpperInvariant()
   $launcherAttributes = @'
-[assembly: AssemblyTitle("三角洲行动优化助手 卸载")]
-[assembly: AssemblyDescription("三角洲行动优化助手 卸载入口")]
+[assembly: AssemblyTitle("帧率优化助手 卸载")]
+[assembly: AssemblyDescription("帧率优化助手 卸载入口")]
 '@
   $launcherRaw = ([IO.File]::ReadAllText((Join-Path $build 'uninstall-launcher.cs'), [Text.Encoding]::UTF8)).Replace('__SCRIPT_SHA256__', $scriptSha).Replace('__HOST_SHA256__', $hostSha)
   $launcherSource = $launcherRaw.Replace('using Microsoft.Win32;',

@@ -209,7 +209,7 @@ static class UninstallHost {
             }
             return 0;
         } catch (Exception ex) {
-            MessageBox.Show("卸载助手已停止：" + ex.Message, "三角洲行动优化助手 卸载助手", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1;
+            MessageBox.Show("卸载助手已停止：" + ex.Message, "帧率优化助手 卸载助手", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1;
         }
     }
 }

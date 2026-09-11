@@ -46,14 +46,20 @@ static class UninstallLauncher {
     static void DeleteShortcut(string path) { try { if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0) File.Delete(path); } catch { } }
     static void CleanUserShortcuts(bool medium) {
         if (!medium) return;
-        string menu = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "DeltaForceBooster");
-        try {
-            if (Directory.Exists(menu) && (File.GetAttributes(menu) & FileAttributes.ReparsePoint) == 0) {
-                DeleteShortcut(Path.Combine(menu, "三角洲行动优化助手.lnk")); DeleteShortcut(Path.Combine(menu, "卸载优化助手.lnk"));
-                if (Directory.GetFileSystemEntries(menu).Length == 0) Directory.Delete(menu, false);
-            }
-        } catch { }
-        DeleteShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "三角洲行动优化助手.lnk"));
+        // 新旧名字都要清。旧名字的快捷方式已经在用户机器上了，只清新名字会留死链。
+        foreach (string dirName in new string[] { "帧率优化助手", "DeltaForceBooster" }) {
+            string menu = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), dirName);
+            try {
+                if (Directory.Exists(menu) && (File.GetAttributes(menu) & FileAttributes.ReparsePoint) == 0) {
+                    foreach (string lnkName in new string[] { "帧率优化助手.lnk", "三角洲行动优化助手.lnk", "卸载优化助手.lnk" })
+                        DeleteShortcut(Path.Combine(menu, lnkName));
+                    if (Directory.GetFileSystemEntries(menu).Length == 0) Directory.Delete(menu, false);
+                }
+            } catch { }
+        }
+        string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        foreach (string lnkName in new string[] { "帧率优化助手.lnk", "三角洲行动优化助手.lnk" })
+            DeleteShortcut(Path.Combine(desktop, lnkName));
     }
     [STAThread] static int Main() {
         try {
@@ -87,7 +93,7 @@ static class UninstallLauncher {
             return 0;
         } catch (Exception ex) {
             string message = ex is System.ComponentModel.Win32Exception && ((System.ComponentModel.Win32Exception)ex).NativeErrorCode == 1223 ? "已取消管理员授权，卸载未开始。" : "卸载程序启动失败：" + ex.Message;
-            MessageBox.Show(message, "三角洲行动优化助手 卸载", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1;
+            MessageBox.Show(message, "帧率优化助手 卸载", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1;
         }
     }
 }

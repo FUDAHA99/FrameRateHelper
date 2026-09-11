@@ -103,7 +103,7 @@ Assert-True ($launcherBuild -match 'QuotePowerShellLiteral\(hostPath\)' -and
   $launcherBuild -match 'QuotePowerShellLiteral\(pipeName\)' -and
   $launcherBuild -match 'QuotePowerShellLiteral\(session\)') `
   'signed-policy fallback does not quote all fixed EngineHost launch values'
-Assert-True ($hostBuild -match 'AssemblyTitle\("三角洲行动优化助手 管理员助手"\)') `
+Assert-True ($hostBuild -match 'AssemblyTitle\("帧率优化助手 管理员助手"\)') `
   'EngineHost UAC product description missing'
 Assert-True ($launcherBuild.IndexOf('if (!createdNew)', [StringComparison]::Ordinal) -lt
   $launcherBuild.IndexOf('string validationError = ValidateFiles(root)', [StringComparison]::Ordinal)) `
@@ -227,7 +227,7 @@ foreach ($needle in 'PermanentAnchor','EnsureExactAnchorDirectory','EnsureHighIn
     $launcherBuild.Contains('DfbRuntimeRoot.Validate')) "runtime protected-root contract missing: $needle"
 }
 Assert-True ($uninstallBuild -match 'requestedExecutionLevel level="requireAdministrator"' -and
-  $uninstallBuild -match 'AssemblyDescription\("三角洲行动优化助手 卸载助手"\)' -and
+  $uninstallBuild -match 'AssemblyDescription\("帧率优化助手 卸载助手"\)' -and
   $installerBuild -match 'make-uninstall-host\.ps1' -and $installerBuild -match 'UninstallHost\.exe') `
   'dedicated UninstallHost is not built into the installer payload'
 Assert-True ($installerBuild -notmatch 'Start-Process \$psExe -Verb RunAs' -and
@@ -301,8 +301,8 @@ Assert-True ($LASTEXITCODE -eq 0) 'production launcher rebuild after second-laun
 
 $hostInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $root 'EngineHost.exe'))
 $launcherInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $root '启动优化工具.exe'))
-Assert-True ($hostInfo.FileDescription -eq '三角洲行动优化助手 管理员助手') 'EngineHost FileDescription is not the UAC-facing product name'
-Assert-True ($launcherInfo.FileDescription -eq '三角洲行动优化助手') 'launcher FileDescription changed unexpectedly'
+Assert-True ($hostInfo.FileDescription -eq '帧率优化助手 管理员助手') 'EngineHost FileDescription is not the UAC-facing product name'
+Assert-True ($launcherInfo.FileDescription -eq '帧率优化助手') 'launcher FileDescription changed unexpectedly'
 
 # Behavior regression for the managed RunAs boundary: before ShellExecuteEx/AppInfo receives
 # the launch request, every caller-controlled CLR/PowerShell variable is absent and the helper

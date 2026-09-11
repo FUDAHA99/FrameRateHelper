@@ -144,4 +144,41 @@ foreach ($spec in @(
   @{ File = 'DISCLAIMER.md';                 Literal = '《三角洲行动》';                      Why = '免责声明必须点明与腾讯及官方无关' }
 )) { Assert-Frozen $spec.Literal $spec.Why @($spec.File) }
 
+# ---------- 12. 显示层改名之后，读取侧必须继续认旧名 ----------
+# 窗口标题是跨进程 Ordinal 比对的：启动器靠它激活已有窗口，安装器靠它在覆盖
+# 文件之前关掉正在跑的旧实例。只认新标题的后果不是"少激活一个窗口"，而是
+# 安装器认为"没有实例需要关"，然后在旧引擎正在改系统的途中覆盖文件 ——
+# setup-wizard.cs 的 CloseRunningBooster 上方那段注释说的正是绝不能发生这种事。
+$launcherSrc = Get-Source 'build\make-launcher.ps1'
+$wizard = Get-Source 'build\setup-wizard.cs'
+Assert-True ($launcherSrc.Contains('const string MainWindowTitle = "帧率优化助手";')) '启动器的主窗口标题没有切到新名字'
+Assert-True ($launcherSrc.Contains('const string LegacyMainWindowTitle = "三角洲行动 · 画面优化助手";')) '启动器丢掉了旧窗口标题 —— 升级期间会认不出还开着的旧版主窗口'
+Assert-True ($launcherSrc.Contains('LegacyMainWindowTitle, StringComparison.Ordinal)')) '启动器定义了旧标题却没有真的拿它做比对'
+Assert-True ($wizard.Contains('t != "帧率优化助手" && t != "三角洲行动 · 画面优化助手"')) '安装器的 CloseRunningBooster 不再同时匹配新旧标题 —— 用户开着旧版装新版时会被静默覆盖'
+
+# GUI 两个窗口的标题必须逐字一致：上面两个消费方都是精确比对。
+Assert-True ((([regex]::Matches($gui, [regex]::Escape('Title="帧率优化助手"'))).Count) -eq 2) 'GUI 的主窗口与对话框标题不再都是"帧率优化助手" —— 跨进程比对是精确匹配'
+
+# 快捷方式：创建侧用新名，删除侧必须是新旧并集，否则用户机器上会留死链和双份图标。
+Assert-True ($wizard.Contains('MainLnkNames = { "帧率优化助手.lnk", "三角洲行动优化助手.lnk" }')) '快捷方式清理清单丢掉了旧名字'
+Assert-True ($wizard.Contains('MenuDirNames = { "帧率优化助手", "DeltaForceBooster" }')) '开始菜单目录清理清单丢掉了旧目录名'
+Assert-True ($wizard.Contains('Shortcut.ReadTarget(lnk)')) '清理旧快捷方式时没有解析目标 —— 按名字盲删等于替用户赌桌面上没有同名的别的东西'
+$mkInstaller = Get-Source 'build\make-installer.ps1'
+Assert-True ($mkInstaller.Contains("'帧率优化助手.lnk','三角洲行动优化助手.lnk','卸载优化助手.lnk'")) '卸载器的开始菜单清理清单不是新旧并集'
+Assert-True ($mkInstaller.Contains("'帧率优化助手','DeltaForceBooster' | ForEach-Object")) '卸载器的开始菜单目录清理清单不是新旧并集'
+$uninstLauncher = Get-Source 'build\uninstall-launcher.cs'
+Assert-True ($uninstLauncher.Contains('"帧率优化助手.lnk", "三角洲行动优化助手.lnk"')) '原用户卸载入口的快捷方式清理清单不是新旧并集'
+
+# AssemblyProduct 冻结但 AssemblyTitle/Description 必须已切换 —— UAC 同意框显示的是
+# FileDescription，它必须和用户刚点的那个窗口同名，否则就是反钓鱼断言失守。
+Assert-True ($launcherSrc.Contains('[assembly: AssemblyTitle("帧率优化助手")]')) '启动器的 AssemblyTitle 没切到新名字'
+Assert-True ((Get-Source 'build\make-engine-host.ps1').Contains('[assembly: AssemblyDescription("帧率优化助手 管理员助手")]')) 'EngineHost 的 FileDescription 没切到新名字 —— 这是 UAC 同意框上显示的文字'
+
+# 安装向导必须有免责声明：改名后产品自称里不再有游戏名，这是用户安装前唯一的正式说明。
+foreach ($needle in '与腾讯公司及《三角洲行动》官方没有任何关系', '不是官方产品') {
+  Assert-True ($wizard.Contains($needle)) "安装向导缺少免责声明：$needle"
+}
+# DumpStrings 是硬编码副本，不从控件读；漏改不会报错，只会静默产出说谎的自检文件。
+Assert-True ($wizard.Contains('sb.AppendLine("欢迎标题=欢迎安装 帧率优化助手");')) 'DumpStrings 里的欢迎标题副本与实际控件文案脱钩了'
+
 Write-Host "identity freeze tests passed: $script:Assertions assertions"

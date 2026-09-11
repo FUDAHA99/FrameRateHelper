@@ -57,8 +57,8 @@ using Microsoft.Win32;
 using WShapes = System.Windows.Shapes;
 using WinForms = System.Windows.Forms;
 
-[assembly: AssemblyTitle("三角洲行动优化助手 安装向导")]
-[assembly: AssemblyDescription("DeltaForceBooster 安装向导（可选择安装磁盘）")]
+[assembly: AssemblyTitle("帧率优化助手 安装向导")]
+[assembly: AssemblyDescription("帧率优化助手 安装向导（可选择安装磁盘）")]
 [assembly: AssemblyProduct("DeltaForceBooster")]
 [assembly: AssemblyCompany("DeltaForceBooster 开源项目")]
 [assembly: AssemblyCopyright("DeltaForceBooster MIT 开源项目")]
@@ -382,7 +382,7 @@ static class Program {
                 "更新安装失败：" + reason +
                 "\r\n\r\n安装位置：" + (dest ?? "(未确定)") +
                 "\r\n\r\n" + state + "。如需帮助请前往 https://github.com/FUDAHA99/FrameRateHelper/releases 下载安装包手动更新。",
-                "三角洲行动优化助手 · 更新失败",
+                "帧率优化助手 · 更新失败",
                 WinForms.MessageBoxButtons.OK, WinForms.MessageBoxIcon.Error);
         } catch (Exception) { }
     }
@@ -390,7 +390,7 @@ static class Program {
     // 与 FailBox 区分：更新被主动取消/部分收尾未完成，不是“失败”，用警告级弹框
     static void WarnBox(string msg) {
         try {
-            WinForms.MessageBox.Show(msg, "三角洲行动优化助手 · 更新未完成",
+            WinForms.MessageBox.Show(msg, "帧率优化助手 · 更新未完成",
                 WinForms.MessageBoxButtons.OK, WinForms.MessageBoxIcon.Warning);
         } catch (Exception) { }
     }
@@ -2885,7 +2885,10 @@ static class Installer {
                 try {
                     if (p.Id == self) continue;
                     string t = p.MainWindowTitle;
-                    if (string.IsNullOrEmpty(t) || t != "三角洲行动 · 画面优化助手") continue;
+                    // 新旧标题都要认。只认新标题的话，用户开着旧版跑新安装器时
+                    // 这里会认为「没有实例需要关」，然后在旧引擎正在改系统的
+                    // 途中覆盖文件 —— 而上面那段注释说的正是绝不能发生这种事。
+                    if (string.IsNullOrEmpty(t) || (t != "帧率优化助手" && t != "三角洲行动 · 画面优化助手")) continue;
                     p.CloseMainWindow();
                     if (!p.WaitForExit(3000)) allClosed = false;
                 } catch (Exception) { }
@@ -2928,34 +2931,48 @@ static class Installer {
         string full = Path.GetFullPath(dest.Trim());
         string mainExe = Path.Combine(full, "启动优化工具.exe");
         string target = File.Exists(mainExe) ? mainExe : Path.Combine(full, "启动优化工具.bat");
-        string lnk = Path.Combine(DesktopDir(), "三角洲行动优化助手.lnk");
+        string lnk = Path.Combine(DesktopDir(), "帧率优化助手.lnk");
         Shortcut.Create(lnk, target, full, File.Exists(mainExe) ? mainExe : null, 0,
-            "三角洲行动 画面/帧率优化助手");
+            "帧率优化助手 · 为《三角洲行动》做 Windows 优化（非官方）");
+        // 改名前留在桌面上的旧图标：只有指向本安装目录的才删，删失败不影响安装
+        LegacyShortcuts.RemoveStaleMain(DesktopDir(), lnk, full);
         return lnk;
     }
 
     public static string CreateShortcuts(string dest) {
-        string menu = Path.Combine(ProgramsDir(), "DeltaForceBooster");
+        string menu = Path.Combine(ProgramsDir(), LegacyShortcuts.MenuDirName);
         Directory.CreateDirectory(menu);
         LastMenuDir = menu;
         string systemDir = Environment.SystemDirectory;
         if (string.IsNullOrEmpty(systemDir)) throw new InvalidOperationException("系统未提供受信 System32 路径");
         string mainExe = Path.Combine(dest, "启动优化工具.exe");
         if (File.Exists(mainExe)) {
-            Shortcut.Create(Path.Combine(menu, "三角洲行动优化助手.lnk"),
-                mainExe, dest, mainExe, 0, "三角洲行动 画面/帧率优化助手");
+            Shortcut.Create(Path.Combine(menu, "帧率优化助手.lnk"),
+                mainExe, dest, mainExe, 0, "帧率优化助手 · 为《三角洲行动》做 Windows 优化（非官方）");
         } else {
             // 老包或残缺包里没有 exe 时退回 bat 入口，保证覆盖安装不炸
-            Shortcut.Create(Path.Combine(menu, "三角洲行动优化助手.lnk"),
+            Shortcut.Create(Path.Combine(menu, "帧率优化助手.lnk"),
                 Path.Combine(dest, "启动优化工具.bat"), dest, Path.Combine(systemDir, "imageres.dll"), 262,
-                "三角洲行动 画面/帧率优化助手");
+                "帧率优化助手 · 为《三角洲行动》做 Windows 优化（非官方）");
         }
         string uninstallExe = Path.Combine(dest, "卸载.exe");
         Shortcut.Create(Path.Combine(menu, "卸载优化助手.lnk"),
             File.Exists(uninstallExe) ? uninstallExe : Path.Combine(dest, "卸载.bat"), dest,
             File.Exists(uninstallExe) ? uninstallExe : Path.Combine(systemDir, "imageres.dll"),
             File.Exists(uninstallExe) ? 0 : 271,
-            "卸载 DeltaForceBooster");
+            "卸载帧率优化助手");
+        // 旧开始菜单目录（DeltaForceBooster）里的旧图标：同样只删指向本安装目录的，
+        // 清空后连目录一起删；留着会让用户在开始菜单里看到两份入口
+        foreach (string legacyDir in LegacyShortcuts.MenuDirNames) {
+            try {
+                string old = Path.Combine(ProgramsDir(), legacyDir);
+                if (string.Equals(old, menu, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!Directory.Exists(old)) continue;
+                if ((File.GetAttributes(old) & FileAttributes.ReparsePoint) != 0) continue;
+                LegacyShortcuts.RemoveStaleMain(old, null, dest);
+                if (Directory.GetFileSystemEntries(old).Length == 0) Directory.Delete(old, false);
+            } catch (Exception) { }
+        }
         return menu;
     }
 }
@@ -2986,7 +3003,49 @@ interface IShellLinkW {
     void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
 }
 
+// 改名前后的快捷方式名字都集中在这里。删除侧永远用并集：
+// 旧名字已经在用户的桌面和开始菜单里了，只认新名字等于留一堆死链和双份图标。
+static class LegacyShortcuts {
+    public const string MenuDirName = "帧率优化助手";
+    // 历史开始菜单目录名，永久保留在清理清单里
+    public static readonly string[] MenuDirNames = { "帧率优化助手", "DeltaForceBooster" };
+    public static readonly string[] MainLnkNames = { "帧率优化助手.lnk", "三角洲行动优化助手.lnk" };
+
+    // 只删「确实指向本次安装目录」的旧快捷方式。不解析目标就按名字删，等于赌
+    // 用户桌面上没有同名的别的东西——安装器不该替用户做这个赌。
+    public static void RemoveStaleMain(string folder, string keepLnkPath, string installDir) {
+        string dir;
+        try { dir = Path.GetFullPath(installDir).TrimEnd(Path.DirectorySeparatorChar); }
+        catch (Exception) { return; }
+        foreach (string name in MainLnkNames) {
+            string lnk;
+            try { lnk = Path.Combine(folder, name); } catch (Exception) { continue; }
+            if (string.Equals(lnk, keepLnkPath, StringComparison.OrdinalIgnoreCase)) continue;
+            try {
+                if (!File.Exists(lnk)) continue;
+                if ((File.GetAttributes(lnk) & FileAttributes.ReparsePoint) != 0) continue;
+                string target = Shortcut.ReadTarget(lnk);
+                if (string.IsNullOrEmpty(target)) continue;
+                string targetDir = Path.GetDirectoryName(Path.GetFullPath(target));
+                if (string.IsNullOrEmpty(targetDir)) continue;
+                if (!string.Equals(targetDir.TrimEnd(Path.DirectorySeparatorChar), dir, StringComparison.OrdinalIgnoreCase)) continue;
+                File.Delete(lnk);
+            } catch (Exception) { }
+        }
+    }
+}
+
 static class Shortcut {
+    public static string ReadTarget(string lnkPath) {
+        try {
+            IShellLinkW link = (IShellLinkW)new CShellLink();
+            ((IPersistFile)link).Load(lnkPath, 0);
+            StringBuilder sb = new StringBuilder(1024);
+            link.GetPath(sb, sb.Capacity, IntPtr.Zero, 0);
+            return sb.ToString();
+        } catch (Exception) { return null; }
+    }
+
     public static void Create(string lnkPath, string target, string workDir, string iconPath, int iconIndex, string desc) {
         IShellLinkW link = (IShellLinkW)new CShellLink();
         link.SetPath(target);
@@ -3102,7 +3161,7 @@ class SetupWindow : Window {
 
     public SetupWindow(string presetDir, string originSid) {
         _originSid = originSid;
-        Title = "三角洲行动优化助手 · 安装向导";
+        Title = "帧率优化助手 · 安装向导";
         Width = 700; Height = 600;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         WindowStyle = WindowStyle.None;
@@ -3184,7 +3243,7 @@ class SetupWindow : Window {
         Grid.SetColumn(logo, 0); g.Children.Add(logo);
 
         var t = new TextBlock {
-            Text = "三角洲行动优化助手 · 安装向导",
+            Text = "帧率优化助手 · 安装向导",
             Foreground = Theme.TextMain, FontWeight = FontWeights.SemiBold,
             VerticalAlignment = VerticalAlignment.Center
         };
@@ -3312,11 +3371,11 @@ class SetupWindow : Window {
         var sp = new StackPanel();
         sp.Children.Add(SectionLabel("SETUP WIZARD", "安装向导"));
         sp.Children.Add(new TextBlock {
-            Text = "欢迎安装 三角洲行动优化助手",
+            Text = "欢迎安装 帧率优化助手",
             FontSize = 22, FontWeight = FontWeights.SemiBold, Foreground = Theme.TextMain
         });
         sp.Children.Add(new TextBlock {
-            Text = "DELTA FORCE BOOSTER · 画面 / 帧率一键优化",
+            Text = "FRAME RATE HELPER · 画面 / 帧率一键优化",
             Foreground = Theme.TextSub, FontFamily = Theme.Mono, FontSize = 11,
             Margin = new Thickness(0, 4, 0, 14)
         });
@@ -3330,9 +3389,16 @@ class SetupWindow : Window {
             Text = "安装前请知悉", Foreground = Theme.Gold, FontWeight = FontWeights.Bold,
             Margin = new Thickness(0, 0, 0, 6)
         });
+        // 免责声明。改名之后产品自称里不再有游戏名，这里就是用户在安装之前
+        // 唯一能看到「这是什么、和谁没关系」的地方 —— 主程序里的免责声明要等装完才看得到。
+        warnBox.Children.Add(new TextBlock {
+            Text = "· 本工具由个人开发，与腾讯公司及《三角洲行动》官方没有任何关系，不是官方产品，也未获得官方认可或授权。",
+            Foreground = Theme.TextSub, TextWrapping = TextWrapping.Wrap, LineHeight = 19
+        });
         warnBox.Children.Add(new TextBlock {
             Text = "· 本安装包没有代码签名：首次运行时 Windows SmartScreen 可能显示「未知发布者」拦截页，需点「更多信息 → 仍要运行」。",
-            Foreground = Theme.TextSub, TextWrapping = TextWrapping.Wrap, LineHeight = 19
+            Foreground = Theme.TextSub, TextWrapping = TextWrapping.Wrap, LineHeight = 19,
+            Margin = new Thickness(0, 4, 0, 0)
         });
         warnBox.Children.Add(new TextBlock {
             Text = "· 优化会修改注册表、电源计划，并可禁用部分系统服务：杀毒软件存在误报甚至隔离的可能。所有脚本均为明文，可自行审阅后再用。",
@@ -3629,7 +3695,7 @@ class SetupWindow : Window {
         };
         sp.Children.Add(menuRow);
         _deskMark = MakeCheckMark();
-        var deskRow = MakeCheckRow(_deskMark, "创建桌面快捷方式（三角洲行动优化助手）", new Thickness(0, 10, 0, 0));
+        var deskRow = MakeCheckRow(_deskMark, "创建桌面快捷方式（帧率优化助手）", new Thickness(0, 10, 0, 0));
         deskRow.MouseLeftButtonUp += delegate {
             _deskChecked = !_deskChecked;
             _deskMark.Visibility = _deskChecked ? Visibility.Visible : Visibility.Collapsed;
@@ -3640,7 +3706,7 @@ class SetupWindow : Window {
         };
         _runRow.Children.Add(box);
         _runLabel = new TextBlock {
-            Text = "立即运行 三角洲行动优化助手", Foreground = Theme.TextMain,
+            Text = "立即运行 帧率优化助手", Foreground = Theme.TextMain,
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0)
         };
         _runRow.Children.Add(_runLabel);
@@ -3888,11 +3954,12 @@ class SetupWindow : Window {
         var sb = new StringBuilder();
         sb.AppendLine("窗口标题=" + Title);
         sb.AppendLine("步骤=" + string.Join("/", StepNames));
-        sb.AppendLine("欢迎标题=欢迎安装 三角洲行动优化助手");
+        sb.AppendLine("欢迎标题=欢迎安装 帧率优化助手");
+        sb.AppendLine("免责=与腾讯公司及《三角洲行动》官方没有任何关系");
         sb.AppendLine("硬件传感器=不分发（温度由 nvidia-smi 或用户自装的监控软件提供）");
         sb.AppendLine("按钮=上一步/取消/下一步/开始安装/完成");
         sb.AppendLine("安装磁盘说明=选择要安装到的磁盘，安装器会自动创建安全目录");
-        sb.AppendLine("完成页勾选=创建开始菜单快捷方式（含「卸载优化助手」入口）/创建桌面快捷方式（三角洲行动优化助手）/立即运行 三角洲行动优化助手");
+        sb.AppendLine("完成页勾选=创建开始菜单快捷方式（含「卸载优化助手」入口）/创建桌面快捷方式（帧率优化助手）/立即运行 帧率优化助手");
         sb.AppendLine("默认路径=" + Installer.DefaultDir());
         sb.AppendLine("当前选择磁盘=" + (_selectedDriveRoot ?? ""));
         sb.AppendLine("实际安装位置=" + _pathBox.Text);

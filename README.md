@@ -1,4 +1,6 @@
-# 三角洲行动画面优化助手
+# 帧率优化助手
+
+> 面向《三角洲行动》的 Windows 帧率优化工具。**非官方**，与腾讯公司及《三角洲行动》官方没有任何关系。
 
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0A1512)](#环境要求)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1-0A1512)](#环境要求)

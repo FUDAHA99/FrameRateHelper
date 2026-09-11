@@ -73,7 +73,7 @@ Assert-True (-not $raw.Contains('Test-RecommendedGpuSpoofModel') -and
   'the GPU model spoof selector is back in the GUI'
 Assert-True ($raw.Contains("'Local\DeltaForceBooster.GUI'") -and
   -not $raw.Contains("'Global\DeltaForceBooster.GUI'") -and
-  $raw.Contains('Title="三角洲行动 · 画面优化助手" Width="620" Height="640"')) `
+  $raw.Contains('Title="帧率优化助手" Width="620" Height="640"')) `
   'GUI single-instance scope still crosses Windows sessions or the first-run disclaimer cannot be activated'
 Assert-True ($raw.Contains("Get-XmpBiosTutorial `$script:HardwareInfo") -and
   $raw.Contains("New-HwCard 'SYSTEM' `$systemName") -and

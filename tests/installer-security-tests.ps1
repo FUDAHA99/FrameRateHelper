@@ -405,7 +405,7 @@ try {
     $uninstallText -match '\[Parameter\(Mandatory\)\]\[string\]\$InstallRoot') `
     'uninstall script still creates a PowerShell UAC boundary or runs from the product root'
   $uninstallHostInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $dest 'UninstallHost.exe'))
-  Assert-True ($uninstallHostInfo.FileDescription -eq '三角洲行动优化助手 卸载助手') `
+  Assert-True ($uninstallHostInfo.FileDescription -eq '帧率优化助手 卸载助手') `
     'UninstallHost FileDescription is not the UAC-facing product name'
   $lines = [IO.File]::ReadAllLines($identity)
   $sha = (Get-FileHash (Join-Path $dest '启动优化工具.exe') -Algorithm SHA256).Hash

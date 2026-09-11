@@ -486,7 +486,7 @@ $createdNew = $false
 $script:InstanceMutex = [Threading.Mutex]::new($true, 'Local\DeltaForceBooster.GUI', [ref]$createdNew)
 if (-not $createdNew) {
   Add-Type -AssemblyName PresentationFramework
-  [Windows.MessageBox]::Show('当前 Windows 会话已有主窗口，请使用任务栏中的现有窗口。', '三角洲行动 · 画面优化助手', 'OK', 'Information') | Out-Null
+  [Windows.MessageBox]::Show('当前 Windows 会话已有主窗口，请使用任务栏中的现有窗口。', '帧率优化助手', 'OK', 'Information') | Out-Null
   $script:InstanceMutex.Dispose()
   exit
 }
@@ -641,7 +641,7 @@ Add-Type -AssemblyName PresentationFramework
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="三角洲行动 · 画面优化助手" Width="780" Height="1200" MinHeight="640"
+        Title="帧率优化助手" Width="780" Height="1200" MinHeight="640"
         WindowStartupLocation="CenterScreen" WindowStyle="None" ResizeMode="CanResize"
         BorderBrush="{DynamicResource Line}" BorderThickness="1"
         FontFamily="Microsoft YaHei UI" FontSize="12">
@@ -984,12 +984,12 @@ $xaml = @'
       <Grid>
         <StackPanel Orientation="Horizontal" Margin="14,10">
           <Path Data="M 9,0 L 18,15 L 12,15 L 9,9 L 6,15 L 0,15 Z" Fill="{DynamicResource Green}" VerticalAlignment="Center"/>
-          <TextBlock Text="DELTA FORCE" Foreground="{DynamicResource TextPri}" FontSize="13"
+          <TextBlock Text="帧率优化助手" Foreground="{DynamicResource TextPri}" FontSize="13"
                      FontWeight="Bold" Margin="10,0,0,0" VerticalAlignment="Center">
             <TextBlock.LayoutTransform><ScaleTransform ScaleX="1.05"/></TextBlock.LayoutTransform>
           </TextBlock>
           <Border Width="1" Height="13" Background="{DynamicResource LineHi}" Margin="11,0"/>
-          <TextBlock Text="画面优化助手" Foreground="{DynamicResource TextSec}" FontSize="12" VerticalAlignment="Center"/>
+          <TextBlock Text="为《三角洲行动》优化" Foreground="{DynamicResource TextSec}" FontSize="12" VerticalAlignment="Center"/>
           <TextBlock Text="[ v0.23.0.13 ]" Style="{StaticResource Mono}" Foreground="{DynamicResource Green}" Margin="9,0,0,0"/>
         </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
@@ -3610,7 +3610,7 @@ function Build-DisclaimerDialog([bool]$ReadOnly) {
   $dxaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="三角洲行动 · 画面优化助手" Width="620" Height="640" WindowStyle="None" ResizeMode="NoResize"
+        Title="帧率优化助手" Width="620" Height="640" WindowStyle="None" ResizeMode="NoResize"
         WindowStartupLocation="CenterScreen" ShowInTaskbar="True"
         Background="{DynamicResource InputSurface}" BorderBrush="{DynamicResource LineHi}" BorderThickness="1"
         FontFamily="Microsoft YaHei UI" FontSize="12">
@@ -8215,7 +8215,7 @@ function Show-UpdateDialog($UpdInfo) {
           Write-Log "安装程序已启动（PID $($proc.Id)）。本次使用了另一管理员账户授权，安装完成后请由原登录用户手动打开新版。"
           [Windows.MessageBox]::Show(
             '更新安装已经开始。由于本次管理员授权使用了另一账户，为避免用错账户，安装完成后不会自动启动。请稍后从桌面或开始菜单手动打开新版。',
-            '三角洲行动 · 画面优化助手', [Windows.MessageBoxButton]::OK,
+            '帧率优化助手', [Windows.MessageBoxButton]::OK,
             [Windows.MessageBoxImage]::Information) | Out-Null
         }
         # 交棒完成，放行关窗：拦截关窗的守卫是拦用户的，别把自己也拦在里面。

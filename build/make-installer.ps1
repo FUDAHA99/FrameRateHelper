@@ -385,7 +385,8 @@ if (-not (Test-ProtectedProgramTree $dest)) {
 }
 # 原交互用户的 per-user 快捷方式由 asInvoker 卸载入口按原 token 清理；high 脚本
 # 只处理公共快捷方式，不以批准管理员的 Known Folder 冒充原用户。
-$menuDirs = @((Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'DeltaForceBooster'))
+# 新旧开始菜单目录名都要清：旧名字的目录已经在用户机器上了，只清新名字会留死链。
+$menuDirs = @('帧率优化助手','DeltaForceBooster' | ForEach-Object { Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $_ })
 $deskDirs = @([Environment]::GetFolderPath('CommonDesktopDirectory')) | Where-Object { $_ }
 # ① 卸载前先还原系统改动（默认是）：有备份记录才问；$restoreDone 三态=成功/失败/没做
 $restoreDone = $null
@@ -447,15 +448,17 @@ foreach ($m in $menuDirs) {
   if (-not (Test-Path -LiteralPath $m -PathType Container)) { continue }
   $menuItem = Get-Item -LiteralPath $m -Force
   if (($menuItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
-  foreach ($name in '三角洲行动优化助手.lnk','卸载优化助手.lnk') {
+  foreach ($name in '帧率优化助手.lnk','三角洲行动优化助手.lnk','卸载优化助手.lnk') {
     $lnk = Join-Path $m $name
     if (Test-Path -LiteralPath $lnk -PathType Leaf) { Remove-Item -LiteralPath $lnk -Force }
   }
   if (@(Get-ChildItem -LiteralPath $m -Force).Count -eq 0) { Remove-Item -LiteralPath $m -Force }
 }
 foreach ($d in $deskDirs) {
-  $lnk = Join-Path $d '三角洲行动优化助手.lnk'
-  if (Test-Path $lnk) { Remove-Item $lnk -Force }
+  foreach ($name in '帧率优化助手.lnk','三角洲行动优化助手.lnk') {
+    $lnk = Join-Path $d $name
+    if (Test-Path $lnk) { Remove-Item $lnk -Force }
+  }
 }
 $customTransactionsRemoved = 0; $customTransactionsPreserved = 0
 if ($customAnchor) {
