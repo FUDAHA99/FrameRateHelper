@@ -63,11 +63,11 @@ Assert-True ($raw.Contains('function Show-DiagnosticFeedbackDialog') -and
   $raw.Contains("Id = 'fps_gain'; Label = '平均帧率提升（涨帧）'") -and
   $raw.Contains("Id = 'one_percent_gain'; Label = '1% Low 提升 / 掉帧减少'")) `
   'diagnostic feedback page is missing required multi-select problem/improvement choices'
-Assert-True ($raw.Contains('New-Object Windows.Controls.ComboBoxItem') -and
-  $raw.Contains('$recommended = Test-RecommendedGpuSpoofModel $model $isLaptop $gpuVendor $gpuName') -and
-  $raw.Contains('★ 为当前笔记本/台式机推荐项') -and
-  $raw.Contains("`$this.SelectedItem.Tag")) `
-  'GPU model selector does not render the form-factor recommendation separately from the registry value'
+# 显卡型号伪装已移除，这里改成反向断言：型号选择器不得回来
+Assert-True (-not $raw.Contains('Test-RecommendedGpuSpoofModel') -and
+  -not $raw.Contains('$script:SelectedGpuSpoofModel') -and
+  -not $raw.Contains('gpu-name-spoof')) `
+  'the GPU model spoof selector is back in the GUI'
 Assert-True ($raw.Contains("'Local\DeltaForceBooster.GUI'") -and
   -not $raw.Contains("'Global\DeltaForceBooster.GUI'") -and
   $raw.Contains('Title="三角洲行动 · 画面优化助手" Width="620" Height="640"')) `
@@ -98,9 +98,11 @@ Assert-True ($raw.Contains('x:Name="FrameFixCacheBtn" Content="清理着色器�
   $raw.Contains('x:Name="FrameFixProgressBar"') -and
   $raw.Contains('x:Name="FrameFixProgressText"')) `
   'frame-drop page still exposes text-only advice without direct software actions'
+# 伪装项已移除，但 risky 分组的基础设施保留（$risky.Count 为 0 时 Expander 自动隐藏），
+# 将来新增 risky 项时「全选」必须仍然覆盖它们。
 Assert-True ($raw.Contains('@($ui.ItemPanel.Children) + @($ui.RiskyPanel.Children)') -and
-  $raw.Contains('包含 ★ 显卡型号伪装 · 执行前二次确认')) `
-  'optimization select-all does not include the GPU model spoof row'
+  $raw.Contains('高风险项单独列出 · 执行前二次确认')) `
+  'optimization select-all no longer covers the risky group'
 Assert-True ($raw.Contains("BulkSelect = [bool](-not `$Item.ContainsKey('BulkSelect') -or `$Item.BulkSelect)") -and
   $raw.Contains('$bulkSelect = [bool]($row.DataContext -and $row.DataContext.BulkSelect)') -and
   $raw.Contains('$bulkSelect -and $row.Tag -ne $true')) `

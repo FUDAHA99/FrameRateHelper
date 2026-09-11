@@ -153,32 +153,12 @@ try {
   $mainPreset = Get-BuiltinPresets | Where-Object Id -eq 'main'
   Assert-True ($mainPreset.Items -notcontains 'nvidia-profile') 'NPI 不得进入主推方案'
   Assert-True ($mainPreset.Items -notcontains 'nv-autoopt-off') '用户可写 NVIDIA 配置文件不得进入提权主推方案'
-  Assert-True ($mainPreset.Items -contains 'gpu-name-spoof') '主推方案应包含显卡型号伪装，执行仍由 -Risky 契约拦截'
-  Assert-True (Test-GpuNameSpoofSupported ([pscustomobject]@{ MainGpuVendor='NVIDIA' })) 'NVIDIA 主显卡应启用显卡型号伪装'
-  Assert-True (Test-GpuNameSpoofSupported ([pscustomobject]@{ MainGpuVendor='AMD' })) 'AMD 主显卡应重新启用显卡型号伪装'
-  Assert-True (-not (Test-GpuNameSpoofSupported ([pscustomobject]@{ MainGpuVendor='Intel' }))) 'Intel 主显卡必须禁用显卡型号伪装'
-  Assert-True (-not (Test-GpuNameSpoofSupported $null)) '显卡未识别时必须禁用显卡型号伪装'
-  $spoofModels = @(Get-GpuSpoofModels)
-  Assert-True ($spoofModels.Count -eq 5 -and
-    $spoofModels[0] -eq 'NVIDIA GeForce GTX 750 Ti' -and
-    $spoofModels[1] -eq 'NVIDIA GeForce GTX 1050 Ti' -and
-    $spoofModels[2] -eq 'NVIDIA GeForce RTX 2050' -and
-    $spoofModels[3] -eq 'NVIDIA GeForce RTX 2060' -and
-    $spoofModels[4] -eq 'AMD Radeon RX560') '显卡型号伪装下拉选项不完整或顺序漂移'
-  Assert-True ((Test-RecommendedGpuSpoofModel $spoofModels[0] $false 'NVIDIA' 'NVIDIA GeForce RTX 4070') -and
-    (-not (Test-RecommendedGpuSpoofModel $spoofModels[1] $false 'NVIDIA' 'NVIDIA GeForce RTX 4070')) -and
-    (-not (Test-RecommendedGpuSpoofModel $spoofModels[0] $true 'NVIDIA' 'NVIDIA GeForce RTX 4060 Laptop GPU')) -and
-    (Test-RecommendedGpuSpoofModel $spoofModels[1] $true 'NVIDIA' 'NVIDIA GeForce RTX 4060 Laptop GPU') -and
-    (Test-RecommendedGpuSpoofModel $spoofModels[4] $false 'AMD' 'AMD Radeon RX 7900 XTX')) `
-    '推荐星标未按台式 750 Ti、笔记本 1050 Ti、AMD RX560 唯一显示'
-  Assert-True ((Get-DefaultGpuSpoofModel 'NVIDIA GeForce RTX 3060 Ti' $false) -eq 'NVIDIA GeForce GTX 750 Ti') 'RTX 30 系台式机默认应伪装为 GTX 750 Ti'
-  Assert-True ((Get-DefaultGpuSpoofModel 'NVIDIA GeForce RTX 4070' $false) -eq 'NVIDIA GeForce GTX 750 Ti') 'RTX 40 系台式机默认应伪装为 GTX 750 Ti'
-  Assert-True ((Get-DefaultGpuSpoofModel 'NVIDIA GeForce RTX 5060' $false) -eq 'NVIDIA GeForce GTX 750 Ti') 'RTX 50 系台式机默认应伪装为 GTX 750 Ti'
-  Assert-True ((Get-DefaultGpuSpoofModel 'NVIDIA GeForce RTX 3060 Laptop GPU' $true) -eq 'NVIDIA GeForce GTX 1050 Ti') 'RTX 30 系笔记本默认应伪装为 GTX 1050 Ti'
-  Assert-True ((Get-DefaultGpuSpoofModel 'NVIDIA GeForce RTX 5060 Laptop GPU' $true) -eq 'NVIDIA GeForce GTX 1050 Ti') 'RTX 50 系笔记本默认应伪装为 GTX 1050 Ti'
-  Assert-True ((Get-DefaultGpuSpoofModel 'NVIDIA GeForce GTX 1660 Ti' $false) -eq 'NVIDIA GeForce GTX 750 Ti') '其他台式 N 卡应伪装为 GTX 750 Ti'
-  Assert-True ((Get-DefaultGpuSpoofModel 'AMD Radeon RX 7900 XTX' $false 'AMD') -eq 'AMD Radeon RX560') 'AMD 默认应伪装为 AMD Radeon RX560'
-  Assert-True ((Get-GpuVendor 'PCI\VEN_1002&DEV_744C\GPU0' 'NVIDIA GeForce RTX 2060') -eq 'AMD') 'AMD 设备伪装成 GeForce 后不得改变真实厂商判定'
+  Assert-True ($mainPreset.Items -notcontains 'gpu-name-spoof') '显卡型号伪装已移除，不得回到主推方案'
+  # 伪装功能已移除，下面的 spoof 函数断言一并删除。
+  # 这一条留着：它守的是「PCI 厂商 ID 必须优先于显示名」这条独立规则 ——
+  # Win32_VideoController.Name 本来就可能被 OEM 或其他调优工具改写，
+  # 按名字判厂商会让双显卡机器的主卡识别退化，进而影响 gpu-pref / gpu-irq-affinity。
+  Assert-True ((Get-GpuVendor 'PCI\VEN_1002&DEV_744C\GPU0' 'NVIDIA GeForce RTX 2060') -eq 'AMD') 'PCI 厂商 ID 必须优先于显示名判定真实厂商'
 
   $originalGetRegValue = ${function:Get-RegValue}
   try {
@@ -193,14 +173,16 @@ try {
       MainGpuVendor='AMD'; MainGpuPnp='PCI\VEN_1002&DEV_744C\GPU0'; MainGpuPciMatched=$false
       Gpus=@([pscustomobject]@{Vendor='AMD';Pnp='PCI\VEN_1002&DEV_744C\GPU0'})
     }
-    Assert-True ((Get-GpuNameEnumPath $amdHw) -eq 'HKLM:\SYSTEM\CurrentControlSet\Enum\PCI\VEN_1002&DEV_744C\GPU0') 'AMD DeviceDesc 必须使用精确主显卡 Enum 路径'
     Assert-True ((Get-GpuDriverDescription $amdHw.MainGpuPnp 'AMD') -eq 'AMD Radeon RX 7900 XTX') 'AMD 真实型号必须从对应显示驱动 Class 键恢复'
-    $script:TestGpuClassGuid = '{4d36e96c-e325-11ce-bfc1-08002be10318}'
-    Assert-True ($null -eq (Get-GpuNameEnumPath $amdHw)) '非显示适配器 ClassGUID 不得进入显卡型号伪装'
   } finally {
     Set-Item -LiteralPath Function:\Get-RegValue -Value $originalGetRegValue
   }
-  Assert-True (Test-AllowedBackupRegTarget ([pscustomobject]@{Path='HKLM:\SYSTEM\CurrentControlSet\Enum\PCI\VEN_1002&DEV_744C\GPU0';Name='DeviceDesc'})) 'AMD DeviceDesc 必须进入签名备份白名单以支持完整还原'
+  # 【绝不能删】伪装功能虽已移除，DeviceDesc 仍必须留在备份白名单里。
+  # 备份校验走 Read-ValidatedBackup -> Assert-BackupDocument -> Assert-BackupOperation，
+  # 任何一条 op 不过白名单就整份 throw，而 Get-ValidatedRestoreRecords 是
+  # ForEach-Object + ErrorActionPreference='Stop' —— 一条炸等于整次还原炸。
+  # 删掉它，从上游迁过来、做过伪装的用户连还原电源计划都会失败。
+  Assert-True (Test-AllowedBackupRegTarget ([pscustomobject]@{Path='HKLM:\SYSTEM\CurrentControlSet\Enum\PCI\VEN_1002&DEV_744C\GPU0';Name='DeviceDesc'})) '旧备份里的 DeviceDesc 记录必须仍能通过备份校验，否则老用户的任何还原都会失败'
   $legacyPriorityPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DeltaForceClient.exe\PerfOptions'
   Assert-True (Test-AllowedBackupRegTarget ([pscustomobject]@{Path=$legacyPriorityPath;Name='CpuPriorityClass'})) `
     '早期版本写入的 DeltaForceClient.exe CPU 优先级必须保留精确还原兼容'

@@ -452,7 +452,9 @@ try {
   Assert-True ($selectiveIds.Count -eq $expectedSelectiveIds.Count -and
     @($expectedSelectiveIds | Where-Object { $selectiveIds -notcontains $_ }).Count -eq 0) `
     '所有纯注册表项目（含历史虚拟内存）必须开放带冲突保护的按项目精确复原'
-  $derivedSelectiveIds = @($pureRegIds + 'pagefile-custom' | Select-Object -Unique)
+  # pagefile-custom 与 gpu-name-spoof 都已停止新应用，但必须继续开放旧备份的按项复原：
+  # 它们不会出现在 $pureRegIds（当前 item 清单）里，所以要显式补进期望集合。
+  $derivedSelectiveIds = @($pureRegIds + 'pagefile-custom' + 'gpu-name-spoof' | Select-Object -Unique)
   Assert-True ($selectiveIds.Count -eq $derivedSelectiveIds.Count -and
     @($derivedSelectiveIds | Where-Object { $selectiveIds -notcontains $_ }).Count -eq 0) `
     '按项目复原白名单与当前全部纯注册表项目不一致'

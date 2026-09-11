@@ -88,9 +88,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booste
   - `main` 主推全套（界面显示为「★ 主推全套」且启动默认选中）：按依赖顺序排列——
     ①电源深度定制 → ②进程/IO 优先级 → ③中断绑核 → ④系统精简 → ⑤显卡驱动层。
     代价要如实告知：鼠标手感变直、休眠/快速启动没了、Windows 搜索变慢、待机功耗升高、
-    笔记本更耗电；其中唯一的 risky 项是「显卡型号伪装」，对 NVIDIA / AMD 主显卡显示，Intel
-    主显卡自动禁用。GUI 会单独二次确认，CLI 套用 `main` 必须显式加 `-Risky`；不含关引导虚拟化，
-    WSL/模拟器不受影响。
+    笔记本更耗电。本分支已移除「显卡型号伪装」，因此 `main` 不再包含任何 risky 项，
+    套用它也不再需要 `-Risky`；不含关引导虚拟化，WSL/模拟器不受影响。
   - `balanced` 均衡推荐（20 项，副作用小）：不改桌面外观和鼠标手感、不禁用服务、不动休眠。
   - `safe-only` 保守：只改当前用户设置、通常不需重启；图形界面沿用软件启动时已确认的管理员
     会话，CLI 仍应在管理员 PowerShell 中执行。
@@ -121,7 +120,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booste
 
 GUI 提供同一设备内的规则版 A/B 测试：先采集三次稳定基线，再依次测试三个内置、低风险、无需重启且可完整回滚的候选组。它会按平均帧率、1% 低帧率、P99 帧时间、卡顿次数、温度和功耗决定保留或只还原当前候选；样本不足、游戏退出、失去前台、环境变化或基线不稳定时不形成结论。
 
-Agent 只负责向用户解释需要保持同一地图、画质、分辨率和路线，并提示在 GUI 中逐轮确认采样。不要用 CLI 手工模拟实验状态、不要替实验规则挑项目，也不要把 `gpu-name-spoof` 或任何 risky / 需重启项目加入候选。
+Agent 只负责向用户解释需要保持同一地图、画质、分辨率和路线，并提示在 GUI 中逐轮确认采样。不要用 CLI 手工模拟实验状态、不要替实验规则挑项目，也不要把任何 risky / 需重启项目加入候选。
 
 ### 第 4 步：显卡驱动部分（手动，念给用户听）
 
@@ -161,8 +160,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booste
 ## 优化项一览（Id 供 -Items 使用）
 
 所有项分两档：`safe`（下表全部）与 `risky`。**不带 `-Items` 且不指定预设时只执行 safe
-档默认项**；risky 档必须显式加 `-Risky` 才会执行。「显卡型号伪装」是唯一由内置
-`main` 预设明确包含的 risky 项；直接用 `-Items` 调它时同样必须加 `-Risky`。
+档默认项**；risky 档必须显式加 `-Risky` 才会执行。本分支移除「显卡型号伪装」后，
+内置预设不再包含任何 risky 项；`-Risky` 机制保留，以备将来新增。
 
 | Id | 作用 | 默认 | 管理员 |
 |---|---|---|---|
@@ -200,9 +199,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booste
 
 risky 档（默认不勾；`main` 会选中但仍要求独立确认 / `-Risky`）：
 
-| Id | 作用 | 风险 |
-|---|---|---|
-| gpu-name-spoof | 显卡型号伪装（`Enum\PCI\VEN_10DE/1002&...\DeviceDesc`）：NVIDIA 笔记本默认并标 ★ GTX 1050 Ti，台式机默认并标 ★ GTX 750 Ti，AMD 默认并标 ★ RX560；GUI 仍可手动选择 GTX 750 Ti、GTX 1050 Ti、RTX 2050、RTX 2060、RX560 | 有实测反例：有人改完帧数不升反降；重装/更新显卡驱动后失效；系统上报型号与真实硬件不一致，反作弊如何对待未知。支持 NVIDIA / AMD，原值完整备份、还原逐字节写回 |
+（本分支已移除唯一的 risky 项「显卡型号伪装」，当前没有 risky 档项目。）
 
 `power-tuning` 涉及的电源项默认被 Windows 隐藏，脚本会先用 `powercfg -attributes`
 解除隐藏再写入，原隐藏状态一并进备份；CPU 不支持的项（如非大小核 CPU 的调度策略）

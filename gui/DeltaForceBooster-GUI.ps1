@@ -1214,14 +1214,14 @@ $xaml = @'
           <Border BorderBrush="{DynamicResource Line}" BorderThickness="1" Background="{DynamicResource PanelDeep}">
             <StackPanel>
               <!-- 全选行（实机诉求）：三态仅作展示——部分选中显示第三态，点击只在
-                   全选/全不选之间切换；包含单独分组的显卡型号伪装，执行前仍保留二次确认 -->
+                   全选/全不选之间切换；包含单独分组的高风险项，执行前仍保留二次确认 -->
               <Border Background="{DynamicResource TableHeader}" BorderBrush="{DynamicResource LineSoft}"
                       BorderThickness="0,0,0,1" Padding="10,3">
                 <Grid>
                   <CheckBox x:Name="SelAllChk" Style="{StaticResource TacCheck}" VerticalAlignment="Center">
                     <TextBlock Text="全选" Foreground="{DynamicResource TextPri}" FontSize="12" FontWeight="Bold"/>
                   </CheckBox>
-                  <TextBlock Text="包含 ★ 显卡型号伪装 · 执行前二次确认" FontFamily="Consolas" FontSize="10"
+                  <TextBlock Text="高风险项单独列出 · 执行前二次确认" FontFamily="Consolas" FontSize="10"
                              Foreground="{DynamicResource TextMut}" HorizontalAlignment="Right"
                              VerticalAlignment="Center"/>
                 </Grid>
@@ -1233,8 +1233,8 @@ $xaml = @'
           <Expander x:Name="RiskyGroup" Margin="0,10,0,0" Visibility="Collapsed" IsExpanded="True" Foreground="{DynamicResource TextPri}">
             <Expander.Header>
               <StackPanel Orientation="Horizontal">
-                  <TextBlock Text="★ 显卡型号伪装" Foreground="{DynamicResource TextPri}" FontSize="12"/>
-                <TextBlock Text="按显卡代际推荐 · 可手动选择目标型号" Style="{StaticResource Mono}" Margin="10,0,0,0"/>
+                  <TextBlock Text="★ 高风险项" Foreground="{DynamicResource TextPri}" FontSize="12"/>
+                <TextBlock Text="默认不勾选 · 执行前单独二次确认" Style="{StaticResource Mono}" Margin="10,0,0,0"/>
               </StackPanel>
             </Expander.Header>
             <Border BorderBrush="{DynamicResource Line}" BorderThickness="1" Background="{DynamicResource PanelDeep}" Margin="0,6,0,0">
@@ -1337,7 +1337,7 @@ $xaml = @'
           <Border Background="{DynamicResource AccentPanel}" BorderBrush="{DynamicResource GreenLine}" BorderThickness="1" Padding="11,8" Margin="0,0,0,9">
             <StackPanel>
               <TextBlock Text="固定目标：提高 1% 低帧率和流畅度" Foreground="{DynamicResource Green}" FontSize="13" FontWeight="Bold"/>
-              <TextBlock Text="这是确定性规则实验，不是 AI。候选仅来自内置低风险库，显卡型号伪装等 risky 项永不会自动加入。" Foreground="{DynamicResource TextSec}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+              <TextBlock Text="这是确定性规则实验，不是 AI。候选仅来自内置低风险库，risky 与需重启项永不会自动加入。" Foreground="{DynamicResource TextSec}" TextWrapping="Wrap" Margin="0,4,0,0"/>
               <TextBlock Text="个体内规则实验，不代表全局最优。" Foreground="{DynamicResource Gold}" FontWeight="Bold" Margin="0,3,0,0"/>
             </StackPanel>
           </Border>
@@ -3000,37 +3000,6 @@ function New-ItemRow($Item, $State, [bool]$Last) {
           else { New-Pill '待定' $script:C.Gray '#00000000' $script:C.Line }
   $tail = New-Object Windows.Controls.StackPanel
   $tail.Orientation = 'Horizontal'
-  if ($Item.Id -eq 'gpu-name-spoof') {
-    $modelBox = New-Object Windows.Controls.ComboBox
-    $modelBox.Style = $window.FindResource('TacCombo')
-    $modelBox.Width = 220
-    $modelBox.Margin = New-Object Windows.Thickness 0, 0, 8, 0
-    $models = @(Get-GpuSpoofModels)
-    $selectedModel = $(if ($script:SelectedGpuSpoofModel -and $models -contains $script:SelectedGpuSpoofModel) {
-                         $script:SelectedGpuSpoofModel
-                       } else { $Item.SpoofModel })
-    $selectedOption = $null
-    $isLaptop = [bool]$script:HardwareInfo.IsLaptop
-    $gpuVendor = "$($script:HardwareInfo.MainGpuVendor)"
-    $gpuName = "$($script:HardwareInfo.MainGpuName)"
-    foreach ($model in $models) {
-      $option = New-Object Windows.Controls.ComboBoxItem
-      $recommended = Test-RecommendedGpuSpoofModel $model $isLaptop $gpuVendor $gpuName
-      $option.Content = "$(if ($recommended) { '★ ' })$model"
-      $option.Tag = $model
-      [void]$modelBox.Items.Add($option)
-      if ($model -eq $selectedModel) { $selectedOption = $option }
-    }
-    $modelBox.SelectedItem = $selectedOption
-    $script:SelectedGpuSpoofModel = "$selectedModel"
-    $modelBox.ToolTip = '选择要向系统和游戏上报的显卡型号；★ 为当前笔记本/台式机推荐项'
-    $modelBox.Add_SelectionChanged({
-      if ($this.SelectedItem -and $this.SelectedItem.Tag) {
-        $script:SelectedGpuSpoofModel = "$($this.SelectedItem.Tag)"
-      }
-    })
-    $tail.Children.Add($modelBox) | Out-Null
-  }
   # 体检项查出问题时给行内直达入口：不执行优化也能看到教程和下载按钮，
   # 不用等日志（纯文本链接没人会手抄——实机反馈）
   if ($Item.Kind -eq 'check' -and $State.Optimized -eq $false -and $script:CheckHelp.ContainsKey($Item.Id)) {
@@ -6902,7 +6871,7 @@ function New-DiagnosticReport($Feedback) {
 
   $lines.Add('== 优化项状态 ==')
   try {
-    foreach ($it in @(Get-OptItems $script:TargetExe $script:SelectedGpuSpoofModel)) {
+    foreach ($it in @(Get-OptItems $script:TargetExe)) {
       $st = Get-ItemState $it
       $mark = $(if ($st.Optimized -eq $true) { '[√]' } elseif ($st.Optimized -eq $false) { '[×]' } else { '[?]' })
       $lines.Add("$mark $($it.Id) — $($it.Name)")
@@ -7463,7 +7432,7 @@ function Set-FrameFixProgress {
 }
 
 function Get-FrameFixActionItem([string]$Id) {
-  $matches = @(Get-OptItems $script:TargetExe $script:SelectedGpuSpoofModel | Where-Object { $_.Id -eq $Id })
+  $matches = @(Get-OptItems $script:TargetExe | Where-Object { $_.Id -eq $Id })
   if ($matches.Count -ne 1) { throw "掉帧修复操作不存在或不可用：$Id" }
   $matches[0]
 }
@@ -7537,7 +7506,6 @@ function Invoke-FrameFixGpuPreference {
     Set-FrameFixProgress '正在设置 Windows 高性能 GPU 首选项并保存还原备份…' 'start'
     Write-Log '掉帧修复：正在为当前游戏设置高性能 GPU…'
     $reply = Invoke-ElevatedEngineAction -Action Apply -ItemIds @('gpu-pref') -GamePath $script:TargetExe `
-      -GpuSpoofModel $script:SelectedGpuSpoofModel
     $rows = @($reply.Results | Where-Object { $_.Id -eq 'gpu-pref' })
     if ($rows.Count -ne 1) { throw '高性能 GPU 操作没有返回唯一结果' }
     $row = $rows[0]
@@ -7760,7 +7728,6 @@ function Invoke-ElevatedEngineAction {
     [string[]]$ItemIds,
     [string]$GamePath,
     [bool]$AllowRisky = $false,
-    [string]$GpuSpoofModel,
     [string]$BackupFile,
     [switch]$ListRestoreItems,
     [string[]]$RestoreItemIds,
@@ -7812,7 +7779,6 @@ function Invoke-ElevatedEngineAction {
   $request = [ordered]@{
     SchemaVersion = 1; ResultId = $resultId; Action = $Action
     ItemIds = $itemIdsForRequest; GamePath = $normalizedGamePath; AllowRisky = [bool]$AllowRisky
-    GpuSpoofModel = $(if ($GpuSpoofModel) { "$GpuSpoofModel" } else { $null })
     BackupFile = $normalizedBackupFile; ListRestoreItems = [bool]$ListRestoreItems
     RestoreItemIds = $restoreIdsForRequest; UserSid = $userSid
     UserLocalAppData = $userLocalAppData; UserStateRoot = [IO.Path]::GetFullPath($script:ProtectedUserStateRoot)
@@ -8842,7 +8808,7 @@ function Update-ItemList {
   $ui.ItemPanel.Children.Clear()
   $ui.RiskyPanel.Children.Clear()
   # 变量名不能用 $items：引擎被点源进同一作用域，其 [string[]]$Items 参数会把哈希表强制转成字符串
-  $optItems = @(Get-OptItems $script:TargetExe $script:SelectedGpuSpoofModel)
+  $optItems = @(Get-OptItems $script:TargetExe)
   if ($script:NetCafeCompatibilityMode) {
     # repair-only 会话没有可认证的 medium broker；不要把用户目录缓存项交给 high GUI。
     $optItems = @($optItems | Where-Object { $_.Kind -ne 'cache' })
@@ -9336,7 +9302,6 @@ function Start-ManualUpdateCheck {
 $script:TargetExe = $null
 $script:PresetList = @()
 $script:ApplyingPreset = $false
-$script:SelectedGpuSpoofModel = $null
 $script:UpdateInfo = $null
 $script:UpdatePromptedVersion = $null
 $script:UpdateDialogOpen = $false
@@ -9719,13 +9684,13 @@ $ui.ApplyBtn.Add_Click({
       return
     }
     $presetIndex = $(if ($ui.PresetBox) { [int]$ui.PresetBox.SelectedIndex } else { -1 })
-    $optAll = @(Get-OptItems $script:TargetExe $script:SelectedGpuSpoofModel)
+    $optAll = @(Get-OptItems $script:TargetExe)
     if ($riskyIds.Count -gt 0) {
       $riskySel = @($optAll | Where-Object { $riskyIds -contains $_.Id })
-      $rmsg = "将执行以下显卡型号伪装设置：`n`n" +
+      $rmsg = "将执行以下高风险项：`n`n" +
               (@($riskySel | ForEach-Object { "· $($_.Name)`n  $(if ($_.Warn) { $_.Warn } else { $_.Note })" }) -join "`n`n") +
-              "`n`n目标型号：$script:SelectedGpuSpoofModel`n`n确认后将与其余勾选项一起执行（改动前自动备份，可一键还原）。"
-      if (Show-ConfirmDialog '显卡型号伪装' 'GPU MODEL SPOOF' $rmsg '确认执行') {
+              "`n`n确认后将与其余勾选项一起执行（改动前自动备份，可一键还原）。"
+      if (Show-ConfirmDialog '高风险项确认' 'HIGH RISK ITEMS' $rmsg '确认执行') {
         $ids = @($ids + $riskyIds)
       } else {
         Write-Log "已取消 $($riskyIds.Count) 个高风险项，本次不执行它们。"
@@ -9785,7 +9750,7 @@ $ui.ApplyBtn.Add_Click({
       $ui.ProgText.Text = '正在执行系统优化…'
       $window.Dispatcher.Invoke([action]{}, [Windows.Threading.DispatcherPriority]::Render)
       $r = Invoke-ElevatedEngineAction -Action Apply -ItemIds $elevatedIds -GamePath $script:TargetExe `
-           -AllowRisky ($riskyIds.Count -gt 0) -GpuSpoofModel $script:SelectedGpuSpoofModel
+           -AllowRisky ($riskyIds.Count -gt 0)
       $adminBatchReturned = $true
       # 系统批次与受保护备份已经完成，先记日志再进入本地收尾。后续检测、缓存、
       # 遥测或界面刷新即使异常，用户仍能从日志和诊断报告里找到本轮备份。

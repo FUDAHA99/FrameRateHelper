@@ -2,6 +2,19 @@
   DeltaForceBooster 核心脚本 — v0.17.1
   三角洲行动 一键画面/帧率优化：硬件检测 + Windows 系统优化 + 显卡驱动指引。
 
+  【本分支变更】以下条目描述的是 fork 后的改动；再往下是上游的历史变更记录，
+  保持原样不改写（那是事实记录，不是当前行为的说明）。
+    · 移除「显卡型号伪装」（gpu-name-spoof）及 -GpuSpoofModel 参数、四个 spoof 辅助函数、
+      Get-GpuNameEnumPath 与其旧名包装。理由：它只改 Enum\<PnpDeviceId> 下的 DeviceDesc，
+      不改 PCI ID 也不改 DriverDesc，对走 DXGI 的游戏大概率无效；它自己的 Note 就写着
+      「已有实测反例：有人改完帧数不升反降」；而让系统向带 ACE 反作弊的游戏谎报硬件身份，
+      与 NOTICE 里「不与反作弊交互」的声明无法并存。
+      **旧备份仍可还原**：Test-AllowedBackupRegTarget 的 DeviceDesc 白名单与
+      Get-SelectiveRestoreItemIds 里的 'gpu-name-spoof' 刻意保留 —— 删掉它们会让
+      做过伪装的老用户连还原电源计划都失败（备份校验一条 op 不过白名单就整份 throw）。
+    · 移除内置传感器栈（LibreHardwareMonitor 等 9 个二进制）与 PawnIO 内核驱动。
+      温度改由 nvidia-smi 与用户自装的监控软件的 WMI 命名空间提供。
+
   v0.17.1：显卡型号伪装新增 RTX 2050/2060/RX560，并恢复 AMD 主显卡支持；AMD
         驱动指引新增按本机配置推荐方案；新增电脑品牌检测，XMP/EXPO 的 BIOS 进入步骤
         按品牌区分。
@@ -40,7 +53,7 @@
   用法（任意 AI 助手或用户均可直接调用）：
     powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -Detect [-Json]
     powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -Preview
-    powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -Apply [-Items id1,id2] [-GamePath "游戏exe路径"] [-GpuSpoofModel "NVIDIA GeForce GTX 1050 Ti"] [-Risky]
+    powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -Apply [-Items id1,id2] [-GamePath "游戏exe路径"] [-Risky]
     powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -ListRestoreItems [-Json]
     powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -Restore [-RestoreItems id1,id2] [-BackupFile 备份文件]
     powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -ListItems
@@ -76,9 +89,6 @@ param(
   [string]$UserSid,
   [string]$UserLocalAppData,
   [string]$UserStateRoot,
-  [ValidateSet('NVIDIA GeForce GTX 750 Ti', 'NVIDIA GeForce GTX 1050 Ti',
-               'NVIDIA GeForce RTX 2050', 'NVIDIA GeForce RTX 2060', 'AMD Radeon RX560')]
-  [string]$GpuSpoofModel,
   [switch]$Risky,
   [switch]$Json,
   [string]$RequestFile
@@ -1020,30 +1030,6 @@ function Remove-BcdEntryValue([string]$Name) {
   $actual = Get-BcdValue $Name
   if ($null -eq $actual) { throw "删除引导配置后无法回读验证：$Name" }
   if ($actual -ne 'absent') { throw "删除引导配置失败：$Name（退出码 $code，实际仍为 $actual；bcdedit 原话：$(("$out").Trim())）" }
-}
-
-# 独显在 Enum\PCI 下的实例路径。同一厂商 ID 下还挂着音频等非显卡设备，不能只看 VEN。
-# MainGpuPnp 来自 Win32_VideoController 的精确设备实例，再复验厂商 ID 与显示适配器 ClassGUID；
-# NVIDIA 多卡还必须已由 PCI BDF 与 NVML 对齐，避免真实型号恢复后选错同厂商设备。
-# 实测（RTX 3070 Laptop / Win11 26200）：该键 Owner=BUILTIN\Administrators 且管理员组
-# FullControl，管理员可直接读写，无需 takeown/改 ACL——与电源方案键（只有 SYSTEM 可写）不同。
-function Get-GpuNameEnumPath($Hw) {
-  if (-not $Hw -or "$($Hw.MainGpuVendor)" -notin @('NVIDIA','AMD') -or -not $Hw.MainGpuPnp) { return $null }
-  if ($Hw.MainGpuVendor -eq 'NVIDIA') {
-    $sameVendorCount = @($Hw.Gpus | Where-Object Vendor -eq 'NVIDIA').Count
-    if ($sameVendorCount -gt 1 -and -not $Hw.MainGpuPciMatched) { return $null }
-  }
-  $vendorId = $(if ($Hw.MainGpuVendor -eq 'NVIDIA') { '10DE' } else { '1002' })
-  if ("$($Hw.MainGpuPnp)" -notmatch "^PCI\\VEN_$vendorId&") { return $null }
-  $path = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Hw.MainGpuPnp)"
-  if ("$(Get-RegValue $path 'ClassGUID')" -ine '{4d36e968-e325-11ce-bfc1-08002be10318}') { return $null }
-  $path
-}
-
-# 保留旧函数名供既有调用方使用；新逻辑统一由厂商感知的实现完成。
-function Get-NvidiaGpuEnumPath($Hw) {
-  if (-not $Hw -or "$($Hw.MainGpuVendor)" -ne 'NVIDIA') { return $null }
-  Get-GpuNameEnumPath $Hw
 }
 
 # 显卡控制面板入口检测。装了才给按钮，没装只给下载页——按钮点了没反应比没有按钮更糟。
@@ -2141,30 +2127,6 @@ function Clear-ShaderCache {
 $script:SubUsb  = '2a737441-1930-4402-8d77-b2bebba308a3'
 $script:SubProc = '54533251-82be-4824-96c1-47b60b740d00'
 
-function Get-GpuSpoofModels {
-  @('NVIDIA GeForce GTX 750 Ti', 'NVIDIA GeForce GTX 1050 Ti',
-    'NVIDIA GeForce RTX 2050', 'NVIDIA GeForce RTX 2060', 'AMD Radeon RX560')
-}
-
-function Test-GpuNameSpoofSupported($Hw) {
-  [bool]($Hw -and "$($Hw.MainGpuVendor)" -in @('NVIDIA','AMD'))
-}
-
-function Get-DefaultGpuSpoofModel([string]$GpuName, [bool]$IsLaptop, [string]$GpuVendor = '') {
-  if ($GpuVendor -eq 'AMD' -or (-not $GpuVendor -and "$GpuName" -match '(?i)AMD|Radeon')) {
-    return 'AMD Radeon RX560'
-  }
-  # NVIDIA 推荐只按整机形态判断：笔记本统一 1050 Ti，台式机统一 750 Ti。
-  # 界面仍可手动切换全部五种目标型号；AMD 继续使用 RX560。
-  if ($IsLaptop) { return 'NVIDIA GeForce GTX 1050 Ti' }
-  'NVIDIA GeForce GTX 750 Ti'
-}
-
-function Test-RecommendedGpuSpoofModel([string]$Model, [bool]$IsLaptop,
-                                       [string]$GpuVendor = '', [string]$GpuName = '') {
-  $Model -eq (Get-DefaultGpuSpoofModel $GpuName $IsLaptop $GpuVendor)
-}
-
 function Test-TrustedNvidiaProfileInspector([string]$Path) {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
   if ((Split-Path -Leaf $Path) -ine 'nvidiaProfileInspector.exe') { return $false }
@@ -2176,7 +2138,7 @@ function Test-TrustedNvidiaProfileInspector([string]$Path) {
   } catch { $false }
 }
 
-function Get-OptItems([string]$GamePath, [string]$GpuSpoofModel) {
+function Get-OptItems([string]$GamePath) {
   $items = @()
   $hw = $null
   try { $hw = Get-HardwareInfo } catch {}
@@ -2376,21 +2338,19 @@ function Get-OptItems([string]$GamePath, [string]$GpuSpoofModel) {
                Ops = $prioOps; RequiresGame = $true
                Note = '通过 IFEO 让游戏进程一启动就是高优先级，抢占后台扫描/更新占用的资源。需要游戏 exe 路径。' }
 
-  # ===== risky 档：必须显式勾选 + -Risky 才执行；仅主推全套包含，界面必须单独二次确认 =====
-
-  # 改独显上报的型号名。实测结论（RTX 3070 Laptop / Win11 26200）：该键管理员组有
-  # FullControl，直接写即可，无需 takeown 或改 ACL；写入即时生效（WMI 立刻改口径），
-  # 写回原字符串后逐字节一致、WMI 同步复原——所以备份/还原走通用 reg 通路就够。
-  if (Test-GpuNameSpoofSupported $hw) {
-    $gpuEnum = Get-GpuNameEnumPath $hw
-    $spoofModels = @(Get-GpuSpoofModels)
-    $fakeGpu = $(if ($GpuSpoofModel -and $spoofModels -contains $GpuSpoofModel) { $GpuSpoofModel }
-                 else { Get-DefaultGpuSpoofModel $hw.MainGpuName $hw.IsLaptop $hw.MainGpuVendor })
-    $items += @{ Id = 'gpu-name-spoof'; Tier = 'risky'; Name = '★ 显卡型号伪装'; SpoofModel = $fakeGpu; Admin = $true; Default = $false; Kind = 'multi'
-                 Ops = $(if ($gpuEnum) { @(@{ Kind = 'reg'; Path = $gpuEnum; Name = 'DeviceDesc'; Value = $fakeGpu
-                                             Kind2 = 'String'; Label = '显卡型号' }) })
-                 Note = '让游戏以为你是另一款显卡从而选择不同渲染路径。已有实测反例：有人改完帧数不升反降。重装或更新显卡驱动后失效（DeviceDesc 被驱动写回）。系统上报的型号与真实硬件不一致，反作弊如何对待这种状态没有公开说明。支持 NVIDIA 与 AMD 主显卡，备份原值可完整还原。' }
-  }
+  # ===== risky 档 =====
+  # 本分支移除了唯一的 risky 项「显卡型号伪装」（gpu-name-spoof），当前没有 risky 档项目。
+  # -Risky / AllowRisky 这套闸门保留，以备将来新增。
+  #
+  # 移除理由：它只改 Enum\<PnpDeviceId> 下的 DeviceDesc，不改 PCI ID 也不改 DriverDesc，
+  # 对走 DXGI 的游戏大概率无效；它自己的 Note 就写着「已有实测反例：有人改完帧数不升反降」；
+  # 而它让系统向一个带 ACE 反作弊的游戏谎报硬件身份，与 NOTICE 里「不与反作弊交互」的
+  # 声明无法并存。
+  #
+  # 注意：**旧备份仍然可以还原**。Test-AllowedBackupRegTarget 的 DeviceDesc 白名单与
+  # Get-SelectiveRestoreItemIds 里的 'gpu-name-spoof' 都刻意保留 —— 从上游迁过来、
+  # 已经应用过伪装的用户必须还能把真实型号写回去。删掉那两处会让他们的**任何**还原
+  # 都失败（备份校验一条 op 不过白名单就整份 throw）。
 
   # nvidia-profile 已停止从软件内执行：Inspector 导入无法生成可验证的自动还原备份。
 
@@ -2407,13 +2367,13 @@ function Get-BuiltinPresets {
       # Items 顺序刻意按依赖关系排列：
       # ①电源深度定制（一切的前置）→ ②进程/IO 优先级 → ③中断绑核 → ④系统精简 → ⑤显卡驱动层
       Id = 'main'; Name = '主推全套'; Builtin = $true
-      Note = '按电源→优先级→中断绑核→系统精简→显卡层的顺序全套执行；NVIDIA / AMD 主显卡显示并包含显卡型号伪装（执行前单独二次确认），Intel 显卡自动禁用该项。代价：鼠标手感变直、休眠/快速启动没了、Windows 搜索变慢、待机功耗升高（笔记本更耗电）。不关引导虚拟化，WSL/模拟器不受影响。'
+      Note = '按电源→优先级→中断绑核→系统精简→显卡层的顺序全套执行。代价：鼠标手感变直、休眠/快速启动没了、Windows 搜索变慢、待机功耗升高（笔记本更耗电）。不关引导虚拟化，WSL/模拟器不受影响。'
       Items = @('power-ultimate','power-tuning','powerplan-lock',
                 'prio-separation','game-priority','sys-responsiveness','mmcss-games','net-throttling-off','game-mode',
                 'gpu-irq-affinity',
                 'dvr-off','wer-off','sysmain-off','wsearch-off','hibernate-off',
                 'paging-exec','transparency-off','mpo-off','dyntick-off','mouse-accel-off',
-                'hags','fso-off','gpu-pref','gpu-pstate-lock','gpu-name-spoof',
+                'hags','fso-off','gpu-pref','gpu-pstate-lock',
                 'pcie-check','vcredist-check','xmp-check')
     }
     [pscustomobject]@{
@@ -2807,7 +2767,7 @@ function Import-EngineActionRequest([string]$Path, [string]$ExpectedSessionRoot)
   try { $document = Get-Content -LiteralPath $full -Raw -Encoding UTF8 | ConvertFrom-Json }
   catch { throw "管理员引擎请求 JSON 无效：$($_.Exception.Message)" }
   Assert-ExactProperties $document @(
-    'SchemaVersion','ResultId','Action','ItemIds','GamePath','AllowRisky','GpuSpoofModel',
+    'SchemaVersion','ResultId','Action','ItemIds','GamePath','AllowRisky',
     'BackupFile','ListRestoreItems','RestoreItemIds','UserSid','UserLocalAppData','UserStateRoot'
   ) @() '管理员引擎请求'
   if (($document.SchemaVersion -isnot [int] -and $document.SchemaVersion -isnot [long]) -or
@@ -2826,7 +2786,6 @@ function Import-EngineActionRequest([string]$Path, [string]$ExpectedSessionRoot)
   $itemIds = @(Get-EngineRequestItemIds $document.ItemIds 'ItemIds')
   $restoreItemIds = @(Get-EngineRequestItemIds $document.RestoreItemIds 'RestoreItemIds')
   $gamePath = Get-EngineRequestOptionalString $document.GamePath 'GamePath'
-  $gpuSpoofModel = Get-EngineRequestOptionalString $document.GpuSpoofModel 'GpuSpoofModel' 128
   $backupFile = Get-EngineRequestOptionalString $document.BackupFile 'BackupFile'
   $userSid = Get-EngineRequestOptionalString $document.UserSid 'UserSid' 184
   $userLocalAppData = Get-EngineRequestOptionalString $document.UserLocalAppData 'UserLocalAppData'
@@ -2838,9 +2797,6 @@ function Import-EngineActionRequest([string]$Path, [string]$ExpectedSessionRoot)
   catch { throw '管理员引擎请求用户 SID 无效' }
   if (-not $sid.IsAccountSid() -or -not [IO.Path]::IsPathRooted($userLocalAppData) -or
       -not [IO.Path]::IsPathRooted($userStateRoot)) { throw '管理员引擎请求用户上下文无效' }
-  $supportedSpoofModels = @('NVIDIA GeForce GTX 750 Ti','NVIDIA GeForce GTX 1050 Ti',
-    'NVIDIA GeForce RTX 2050','NVIDIA GeForce RTX 2060','AMD Radeon RX560')
-  if ($gpuSpoofModel -and $gpuSpoofModel -notin $supportedSpoofModels) { throw '管理员引擎请求显卡伪装型号无效' }
 
   if ("$($document.Action)" -eq 'Apply') {
     if ($itemIds.Count -eq 0 -or $document.ListRestoreItems -or $restoreItemIds.Count -gt 0 -or $backupFile) {
@@ -2855,7 +2811,7 @@ function Import-EngineActionRequest([string]$Path, [string]$ExpectedSessionRoot)
   }
   [pscustomobject]@{
     ResultId = $resultId; Action = "$($document.Action)"; ItemIds = [string[]]$itemIds
-    GamePath = $gamePath; AllowRisky = [bool]$document.AllowRisky; GpuSpoofModel = $gpuSpoofModel
+    GamePath = $gamePath; AllowRisky = [bool]$document.AllowRisky
     BackupFile = $backupFile; ListRestoreItems = [bool]$document.ListRestoreItems
     RestoreItemIds = [string[]]$restoreItemIds; UserSid = $userSid
     UserLocalAppData = [IO.Path]::GetFullPath($userLocalAppData)
@@ -3322,7 +3278,8 @@ function New-BackupItemRecord($Item) {
 function Get-SelectiveRestoreItemIds {
   # 所有只落注册表、且备份同时记录 AppliedValue/AppliedKind 的项目都可按项目复原；
   # 复原前会逐值核对当前状态，发现用户或其他程序在优化后改过就保留现状。
-  # pagefile-custom 已停止新应用，但必须继续开放旧备份精确复原。
+  # pagefile-custom 与 gpu-name-spoof 已停止新应用，但必须继续开放旧备份精确复原：
+  # 从上游迁过来、已经应用过伪装的用户要能把真实型号写回去。
   @('hags','game-mode','dvr-off','prio-separation','paging-exec','wer-off','transparency-off',
     'visualfx-perf','mouse-accel-off','mpo-off','net-throttling-off','sys-responsiveness',
     'sysmain-off','wsearch-off','gpu-pstate-lock','gpu-irq-affinity','mmcss-games',
@@ -3484,14 +3441,13 @@ function Set-ApplyResultChangeState($Result, [bool]$Changed) {
 # $Progress 为可选进度回调（不传时行为与旧版完全一致，CLI 与 SKILL.md 契约不受影响）：
 # 每项开始时以 Stage='start' 调用一次（带 Index/Total/Name），完成时以 Stage='done'
 # 再调一次（额外带该项的 Result），GUI 靠它做进度条与实时日志
-function Invoke-Apply([string[]]$ItemIds, [string]$GamePath, [bool]$AllowRisky, [scriptblock]$Progress,
-                      [string]$GpuSpoofModel) {
+function Invoke-Apply([string[]]$ItemIds, [string]$GamePath, [bool]$AllowRisky, [scriptblock]$Progress) {
   $engineMutex = Enter-EngineMutex
   try {
   # powershell -File 不会把 "a,b" 解析成数组，整串会当成单个元素传进来，这里统一拆开
   $ItemIds = @($ItemIds | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
   if (-not $GamePath) { $GamePath = Find-GamePath }
-  $items = Get-OptItems $GamePath $GpuSpoofModel
+  $items = Get-OptItems $GamePath
   # 不传 -Items 时只取 safe 档默认项：risky 永远不会被"一键默认"带上
   if (-not $ItemIds -or $ItemIds.Count -eq 0) {
     $ItemIds = @($items | Where-Object { $_.Default -and $_.Tier -eq 'safe' } | ForEach-Object { $_.Id })
@@ -4410,10 +4366,6 @@ if ($RequestFile) {
   $Items = [string[]]@($engineRequest.ItemIds)
   $GamePath = $engineRequest.GamePath
   $Risky = [bool]$engineRequest.AllowRisky
-  # GpuSpoofModel 是带 ValidateSet 的脚本参数。Windows PowerShell 5.1 会在把
-  # $null/空串重新赋给该变量时再次执行验证并抛出 ValidateSetFailure；请求未指定
-  # 型号时保持参数原有的 $null，只在确有已校验型号时回填。
-  if ($engineRequest.GpuSpoofModel) { $GpuSpoofModel = $engineRequest.GpuSpoofModel }
   $BackupFile = $engineRequest.BackupFile
   $RestoreItems = [string[]]@($engineRequest.RestoreItemIds)
 }
@@ -4488,7 +4440,7 @@ elseif ($ListRestoreItems) {
 elseif ($Apply) {
   # -Preset 与 -Items 二选一；同时给出时以 -Preset 为准
   if ($Preset) { $Items = Resolve-PresetItems $Preset $GamePath }
-  $r = Invoke-Apply $Items $GamePath ([bool]$Risky) $null $GpuSpoofModel
+  $r = Invoke-Apply $Items $GamePath ([bool]$Risky) $null
   if ($Json) { $r | ConvertTo-Json -Depth 5 }
   else {
     foreach ($x in $r.Results) { Write-Output "  $(if ($x.Attention) { '[提示]' } elseif ($x.Ok) { '[成功]' } elseif ($x.Skipped) { '[跳过]' } else { '[失败]' }) $($x.Name) — $($x.Msg)" }
