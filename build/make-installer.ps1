@@ -133,6 +133,9 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $launcher -PathType Lea
 $payloadFiles = @(
   '启动优化工具.exe', 'EngineHost.exe', '启动优化工具.bat', 'README.md', 'SKILL.md',
   'DISCLAIMER.md', 'LICENSE', 'NOTICE.md',
+  # 独立诊断导出器。刻意不进 make-launcher.ps1 的哈希白名单：它要在完整性校验
+  # 本身失败时仍然可用，钉死哈希等于让它和主程序一起失效。
+  '导出诊断信息.cmd', 'scripts\export-diagnostics.ps1',
   'scripts\delta-booster.ps1', 'scripts\diagnose.ps1', 'scripts\updater.ps1',
   'scripts\telemetry-client.ps1', 'scripts\tuning-experiment.ps1', 'scripts\user-context-worker.ps1',
   'scripts\hardware-sensors.ps1',
