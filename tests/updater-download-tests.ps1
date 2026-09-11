@@ -240,9 +240,9 @@ try {
   } finally { $failedServer.Dispose() }
 
   $guiSource = [IO.File]::ReadAllText((Join-Path $root 'gui\DeltaForceBooster-GUI.ps1'))
-  Assert-True ($guiSource -match '\$st\.Status' -and $guiSource -match "Status = '正在进入服务器下载队列…'; RetryCount = 0" -and
-    $guiSource -match "Phase -in @\('queued','downloading'\)") `
-    'update dialog does not surface queue/retry/resume status'
+  Assert-True ($guiSource -match '\$st\.Status' -and $guiSource -match "Status = '正在下载更新…'; RetryCount = 0" -and
+    $guiSource -match "Phase -eq 'downloading'") `
+    'update dialog does not surface retry/resume status'
 
   'PASS updater download: Read timeout resumes with Range and exhaustion is user-friendly'
 } finally {

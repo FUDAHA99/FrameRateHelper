@@ -1,9 +1,13 @@
 ﻿<#
-  DeltaForceBooster 更新检查模块 — v0.8
+  DeltaForceBooster 更新检查模块 — v0.9（本分支）
   独立于优化引擎：负责「取清单 → 比版本 → 报告结果」+「带校验的内置下载」。
-  v0.8：排队时显示前方人数与服务器预计等待时间；用户取消后立即通知服务器释放票据。
+
+  v0.9（本分支）：清单与安装包改为托管在 GitHub Releases；删除服务器下载排队
+        （/report/download-queue/*）—— 那是自有服务端的能力，GitHub 上不存在。
+        下载域名白名单改为 github.com 加 .githubusercontent.com 注册域后缀。
+  v0.8：排队时显示前方人数与服务器预计等待时间；用户取消后立即通知服务器释放票据。（本分支已删除）
   v0.7：官网安装包下载先进入服务器队列；获得名额后使用短时签名地址下载，并继续支持
-        Range 断点续传。排队位置和重试状态都会回报给界面。
+        Range 断点续传。排队位置和重试状态都会回报给界面。（本分支已删除）
   v0.6：下载读取超时或连接中断时自动按已接收字节断点续传；有限重试耗尽后返回
         用户可理解的网络错误，不再暴露 PowerShell 的 Read(...) 调用异常。
   v0.5：下载改用 CreateNew + 独占句柄完成大小/SHA256 校验；成品与完整性 sidecar
@@ -12,16 +16,20 @@
   清单格式：{ "version", "notes", "url"(下载页), "setupUrl"(安装包), "sha256", "size" }
 
   安全约定（每条都是硬红线）：
-    - 下载源域名白名单硬编码在本文件（$script:BoosterDownloadHosts）：setupUrl 必须是
-      https 且主机在白名单内，否则拒绝下载——清单本身可能被篡改，绝不信任清单里的任意 URL。
+    - 下载源域名白名单硬编码在本文件（$script:BoosterDownloadHosts 与
+      $script:BoosterDownloadHostSuffixes）：setupUrl 必须是 https 且主机通过
+      Test-BoosterAllowedDownloadHost，否则拒绝下载——清单本身可能被篡改，
+      绝不信任清单里的任意 URL。重定向后的最终地址会再过一次同一道闸。
     - 清单必须携带合法的 sha256 与 size，缺任何一个都视为不可信，界面层退化为
       「仅提示 + 跳浏览器」的旧行为；下载完成后强制校验哈希与大小，任一不匹配立即删除
       临时文件并终止，绝不执行。
     - 授权边界：用户点「立即更新」即为授权，此后下载→校验→安装一气呵成，不必再点一次；
       安装只发生在校验通过之后。自动检查永远只提醒，绝不自行下载或安装。
-    - 局限要如实告知：SHA256 防的是传输途中被篡改；清单与安装包在同一台服务器上，
-      服务器本身被攻破时两者可被同时替换，SHA256 无法防护（详见 build\README.md）。
+    - 局限要如实告知：SHA256 防的是传输途中被篡改；清单与安装包都放在同一个 GitHub
+      release 上，能改 release 的人可以同时替换两者，SHA256 无法防护（详见 build\README.md）。
     - 网络不可达、超时、JSON 坏掉一律静默返回 $null——检查更新不许影响主程序启动。
+    - GitHub 在国内网络下可能很慢甚至连不上。连不上时必须退回「提示 + 跳下载页」，
+      绝不能表现为静默失败：用户得知道去哪儿手动下载。
 #>
 #requires -Version 5.1
 param(
@@ -33,15 +41,34 @@ param(
   [long]$StageSize = 0
 )
 
-# 清单地址：托管在自有服务器（Caddy 站点 upstream-host.invalid）。发新版时覆盖服务器上的
-# update-manifest.json，客户端下次检查即可发现。
+# 清单地址：GitHub Releases 的 latest 资源。每次发版把 update-manifest.json 作为
+# 资源附加到 release 上，/releases/latest/download/<名字> 会自动指向最新那一份。
 # 本地测试用 Test-BoosterUpdate -ManifestUrl 'file:///...' 临时覆盖。
-$script:BoosterManifestUrl = 'https://upstream-host.invalid/update-manifest.json'
+$script:BoosterManifestUrl = 'https://github.com/FUDAHA99/FrameRateHelper/releases/latest/download/update-manifest.json'
 
 # 下载源域名白名单（硬编码，不从任何配置/清单读取）：清单文件本身可能被篡改，
 # 若照单全收 setupUrl，攻击者改一行 JSON 就能把用户导去任意恶意地址——这是内置下载
 # 最关键的一道闸，改动它必须走代码审查而不是改配置。
-$script:BoosterDownloadHosts = @('upstream-host.invalid')
+$script:BoosterDownloadHosts = @('github.com')
+
+# GitHub 的 release 资源下载会 302 到一个 CDN 子域，而 Invoke-BoosterSetupDownload
+# 会把重定向后的最终地址再过一遍这道闸。那个子域名 GitHub 改过
+# （objects.githubusercontent.com -> release-assets.githubusercontent.com），
+# 写死具体子域名等于给未来埋一颗定时炸弹：某天 GitHub 一改，所有人的内置更新
+# 直接变成"下载重定向已拦截"。所以按注册域匹配。
+# 必须带前导点：evilgithubusercontent.com 以 "githubusercontent.com" 结尾，
+# 但不以 ".githubusercontent.com" 结尾。
+$script:BoosterDownloadHostSuffixes = @('.githubusercontent.com')
+
+function Test-BoosterAllowedDownloadHost([string]$HostName) {
+  $h = "$HostName".Trim().ToLowerInvariant()
+  if (-not $h) { return $false }
+  if ($script:BoosterDownloadHosts -contains $h) { return $true }
+  foreach ($suffix in $script:BoosterDownloadHostSuffixes) {
+    if ($h.EndsWith($suffix, [StringComparison]::Ordinal)) { return $true }
+  }
+  $false
+}
 
 # 本模块位于 scripts\，工具根目录是它的上一级。长期 high GUI 会把
 # $script:BoosterUserConfigDir 指向 ProgramData 的受保护 per-SID 状态区；只有旧的
@@ -138,24 +165,10 @@ function Test-BoosterSetupUrl([string]$Url) {
   }
   # file:// 与 C:\ 本地路径都会解析成 file 协议，和 http 明文一起挡在这条之外
   if ($u.Scheme -ne 'https') { return (& $deny "只允许 https 下载（实际是 $($u.Scheme)）：$Url") }
-  if ($script:BoosterDownloadHosts -notcontains $u.Host.ToLowerInvariant()) {
+  if (-not (Test-BoosterAllowedDownloadHost $u.Host)) {
     return (& $deny "下载域名不在白名单内：$($u.Host)")
   }
   [pscustomobject]@{ Allowed = $true; Reason = '' }
-}
-
-function Get-BoosterDownloadQueueEndpoints([string]$SetupUrl) {
-  $uri = $null
-  if (-not [Uri]::TryCreate("$SetupUrl", [UriKind]::Absolute, [ref]$uri)) { return $null }
-  if ($uri.Scheme -ne 'https' -or $script:BoosterDownloadHosts -notcontains $uri.Host.ToLowerInvariant()) {
-    return $null
-  }
-  $origin = $uri.GetLeftPart([UriPartial]::Authority)
-  [pscustomobject]@{
-    Join = "$origin/report/download-queue/join"
-    Status = "$origin/report/download-queue/status"
-    Cancel = "$origin/report/download-queue/cancel"
-  }
 }
 
 # 完整性校验：大小与 SHA256 任一不符即删除文件并报告失败——留着一个校验失败的
@@ -564,193 +577,11 @@ function Wait-BoosterDownloadRetry {
   -not [bool]$State.Cancel
 }
 
-function Invoke-BoosterQueueJsonRequest {
-  param(
-    [Parameter(Mandatory)][string]$Url,
-    [ValidateSet('GET','POST')][string]$Method = 'GET',
-    [ValidateRange(500, 30000)][int]$TimeoutMs = 5000,
-    [string]$Body = '{}'
-  )
-  $resp = $null; $stream = $null; $reader = $null
-  try {
-    [Net.ServicePointManager]::SecurityProtocol = `
-      [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $req = [Net.HttpWebRequest]::Create($Url)
-    $req.Method = $Method
-    $req.Timeout = $TimeoutMs
-    $req.ReadWriteTimeout = $TimeoutMs
-    $req.UserAgent = 'DeltaForceBooster-Updater'
-    $req.Accept = 'application/json'
-    $req.AllowAutoRedirect = $false
-    if ($Method -eq 'POST') {
-      $bodyBytes = [Text.Encoding]::UTF8.GetBytes($Body)
-      $req.ContentType = 'application/json'
-      $req.ContentLength = $bodyBytes.Length
-      $requestStream = $req.GetRequestStream()
-      try { $requestStream.Write($bodyBytes, 0, $bodyBytes.Length) } finally { $requestStream.Close() }
-    }
-    try { $resp = $req.GetResponse() }
-    catch [Net.WebException] {
-      if (-not $_.Exception.Response) {
-        throw (New-BoosterRetryableDownloadException '排队服务器连接超时或中断' $_.Exception)
-      }
-      $resp = $_.Exception.Response
-    }
-    $statusCode = [int]$resp.StatusCode
-    $stream = $resp.GetResponseStream()
-    $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8)
-    $raw = $reader.ReadToEnd()
-    if ($raw.Length -gt 65536) { throw '排队服务器响应过大' }
-    $payload = $null
-    if ($raw.Trim()) {
-      try { $payload = $raw | ConvertFrom-Json }
-      catch { throw '排队服务器返回了无效数据' }
-    }
-    [pscustomobject]@{ StatusCode = $statusCode; Payload = $payload }
-  } catch {
-    if (Test-BoosterRetryableDownloadException $_.Exception) { throw }
-    if ($_.Exception -is [Net.WebException] -or $_.Exception -is [IO.IOException]) {
-      throw (New-BoosterRetryableDownloadException '排队服务器连接超时或中断' $_.Exception)
-    }
-    throw
-  } finally {
-    try { if ($reader) { $reader.Close() } } catch {}
-    try { if ($stream) { $stream.Close() } } catch {}
-    try { if ($resp) { $resp.Close() } } catch {}
-  }
-}
-
-function Stop-BoosterDownloadQueueTicket {
-  param(
-    [Parameter(Mandatory)][string]$SetupUrl,
-    [Parameter(Mandatory)][string]$Ticket,
-    [ValidateRange(500, 30000)][int]$TimeoutMs = 3000
-  )
-  if ($Ticket -notmatch '^[A-Za-z0-9_-]{20,128}$') { return $false }
-  $endpoints = Get-BoosterDownloadQueueEndpoints $SetupUrl
-  if (-not $endpoints -or -not "$($endpoints.Cancel)") { return $false }
-  $body = @{ ticket = $Ticket } | ConvertTo-Json -Compress
-  try {
-    $response = Invoke-BoosterQueueJsonRequest -Url $endpoints.Cancel -Method POST `
-      -TimeoutMs $TimeoutMs -Body $body
-    return ($response.StatusCode -eq 200)
-  } catch {
-    return $false
-  }
-}
-
-function Wait-BoosterDownloadQueue {
-  param(
-    [Parameter(Mandatory)][string]$SetupUrl,
-    [Parameter(Mandatory)][hashtable]$State,
-    [ValidateRange(500, 30000)][int]$TimeoutMs = 5000,
-    [ValidateRange(1, 10)][int]$MaxFailures = 5
-  )
-  $endpoints = Get-BoosterDownloadQueueEndpoints $SetupUrl
-  if (-not $endpoints) { return $SetupUrl }
-
-  $setupUri = [Uri]$SetupUrl
-  $ticket = ''
-  $consecutiveFailures = 0
-  $State.Phase = 'queued'
-  $State.Status = '正在进入服务器下载队列…'
-  $State.QueuePosition = 0; $State.QueueAhead = 0
-  $State.QueueActive = 0; $State.QueueCapacity = 0
-  $State.QueueEstimatedWaitSeconds = 0
-  $State.QueueTicket = ''
-
-  $releaseTicket = $true
-  try {
-    while (-not $State.Cancel) {
-      $requestUrl = $(if ($ticket) {
-        "$($endpoints.Status)?ticket=$([Uri]::EscapeDataString($ticket))"
-      } else { "$($endpoints.Join)" })
-      $method = $(if ($ticket) { 'GET' } else { 'POST' })
-      try {
-        $response = Invoke-BoosterQueueJsonRequest -Url $requestUrl -Method $method -TimeoutMs $TimeoutMs
-      } catch {
-        if (-not (Test-BoosterRetryableDownloadException $_.Exception)) { throw }
-        $consecutiveFailures++
-        if ($consecutiveFailures -ge $MaxFailures) {
-          throw "排队服务器连续无法响应（已自动重试 $MaxFailures 次）。请稍后重试或打开官网下载。"
-        }
-        $State.Status = "排队连接短暂中断，正在重试（$consecutiveFailures/$MaxFailures）…"
-        if (-not (Wait-BoosterDownloadRetry -State $State -DelayMs 2000)) { return $null }
-        continue
-      }
-
-      if ($response.StatusCode -eq 404 -and $ticket) {
-        $ticket = ''; $State.QueueTicket = ''
-        $State.Status = '排队名额已过期，正在重新进入队列…'
-        continue
-      }
-      if ($response.StatusCode -eq 429 -or $response.StatusCode -ge 500) {
-        $consecutiveFailures++
-        if ($consecutiveFailures -ge $MaxFailures) {
-          throw "排队服务器繁忙（已自动重试 $MaxFailures 次）。请稍后重试或打开官网下载。"
-        }
-        $State.Status = "排队服务器繁忙，正在重试（$consecutiveFailures/$MaxFailures）…"
-        if (-not (Wait-BoosterDownloadRetry -State $State -DelayMs 2000)) { return $null }
-        continue
-      }
-      if ($response.StatusCode -ne 200 -or -not $response.Payload) {
-        throw "排队服务器返回了异常状态：HTTP $($response.StatusCode)"
-      }
-      $consecutiveFailures = 0
-      $payload = $response.Payload
-      $nextTicket = "$($payload.ticket)"
-      if ($nextTicket -notmatch '^[A-Za-z0-9_-]{20,128}$') { throw '排队服务器返回了无效票据' }
-      $ticket = $nextTicket
-      $State.QueueTicket = $ticket
-
-      $State.QueuePosition = [Math]::Max(0, [int]$payload.position)
-      $State.QueueAhead = [Math]::Max(0, [int]$payload.ahead)
-      $State.QueueActive = [Math]::Max(0, [int]$payload.active)
-      $State.QueueCapacity = [Math]::Max(1, [int]$payload.capacity)
-      try {
-        $State.QueueEstimatedWaitSeconds = [Math]::Max(0, [Math]::Min(86400, [int]$payload.estimatedWaitSeconds))
-      } catch { $State.QueueEstimatedWaitSeconds = 0 }
-      if ("$($payload.state)" -eq 'ready') {
-        $downloadUrl = "$($payload.downloadUrl)"
-        $verdict = Test-BoosterSetupUrl $downloadUrl
-        if (-not $verdict.Allowed) { throw "排队下载地址已拦截：$($verdict.Reason)" }
-        $downloadUri = [Uri]$downloadUrl
-        if ($downloadUri.AbsolutePath -ne $setupUri.AbsolutePath) {
-          throw '排队下载地址与清单安装包路径不一致'
-        }
-        $State.Phase = 'downloading'
-        $State.Status = '已获得服务器下载名额，正在开始下载…'
-        $releaseTicket = $false
-        return $downloadUrl
-      }
-      if ("$($payload.state)" -ne 'queued') { throw '排队服务器返回了未知状态' }
-
-      $estimateText = $(if ([int]$State.QueueEstimatedWaitSeconds -ge 60) {
-        "预计约 $([Math]::Ceiling([int]$State.QueueEstimatedWaitSeconds / 60.0)) 分钟"
-      } elseif ([int]$State.QueueEstimatedWaitSeconds -gt 0) {
-        "预计约 $([int]$State.QueueEstimatedWaitSeconds) 秒"
-      } else { '正在估算等待时间' })
-      $State.Status = "服务器排队中：前方 $($State.QueueAhead) 位，$estimateText…"
-      $retrySeconds = 2
-      try { $retrySeconds = [Math]::Max(1, [Math]::Min(10, [int]$payload.retryAfter)) } catch {}
-      if (-not (Wait-BoosterDownloadRetry -State $State -DelayMs ($retrySeconds * 1000))) { return $null }
-    }
-    $null
-  } finally {
-    if ($releaseTicket -and $ticket) {
-      [void](Stop-BoosterDownloadQueueTicket -SetupUrl $SetupUrl -Ticket $ticket `
-        -TimeoutMs ([Math]::Min($TimeoutMs, 3000)))
-      $State.QueueTicket = ''
-    }
-  }
-}
-
 # 内置更新下载：URL 安检 → 流式下载（写进度、可取消、超时断点续传）→ 完整性校验。
 # 同步函数，由界面层丢进后台 runspace 跑，进度经 Synchronized 哈希表回报——
 # PS 5.1 + WPF 下跨线程事件回调很脆，轮询共享状态最稳。
-# $State 键：Received/Total(字节)、Phase(queued|downloading|done|failed|cancelled)、
-#            Status/QueuePosition/QueueAhead/QueueActive/QueueCapacity/QueueEstimatedWaitSeconds/
-#            QueueTicket/RetryCount、
+# $State 键：Received/Total(字节)、Phase(downloading|done|failed|cancelled)、
+#            Status/RetryCount、
 #            Error、File(校验通过后的成品路径)、
 #            Cancel(界面置 $true 请求中止)、Done
 function Invoke-BoosterSetupDownload {
@@ -772,10 +603,6 @@ function Invoke-BoosterSetupDownload {
   try {
     $State.Received = 0; $State.Total = $Size; $State.Phase = 'downloading'
     $State.Status = '正在下载更新…'; $State.RetryCount = 0
-    $State.QueuePosition = 0; $State.QueueAhead = 0
-    $State.QueueActive = 0; $State.QueueCapacity = 0
-    $State.QueueEstimatedWaitSeconds = 0
-    $State.QueueTicket = ''
     $State.Error = ''; $State.File = ''; $State.Done = $false
     $State.ExpectedSha256 = "$Sha256".ToUpperInvariant(); $State.ExpectedSize = $Size
 
@@ -785,9 +612,9 @@ function Invoke-BoosterSetupDownload {
     if ("$Sha256" -notmatch '^[0-9a-fA-F]{64}$') { & $finish 'failed' '清单缺少合法的 SHA256，拒绝下载'; return }
     if ($Size -le 0) { & $finish 'failed' '清单缺少合法的文件大小，拒绝下载'; return }
 
-    $downloadUrl = Wait-BoosterDownloadQueue -SetupUrl $SetupUrl -State $State `
-      -TimeoutMs ([Math]::Max(500, [Math]::Min(30000, $TimeoutMs)))
-    if ($State.Cancel -or -not $downloadUrl) { & $finish 'cancelled' '已取消下载'; return }
+    # 本分支没有排队服务端，setupUrl 就是最终下载地址。
+    $downloadUrl = $SetupUrl
+    if ($State.Cancel) { & $finish 'cancelled' '已取消下载'; return }
     $State.Phase = 'downloading'
     $State.Status = '正在下载更新…'
 
@@ -953,11 +780,6 @@ function Invoke-BoosterSetupDownload {
     try { if ($stageInfo -and (Test-Path -LiteralPath $stageInfo.Directory)) { Remove-Item -LiteralPath $stageInfo.Directory -Recurse -Force } } catch {}
     & $finish 'failed' "下载失败：$($_.Exception.Message)"
   } finally {
-    if ($State.Phase -ne 'done' -and "$($State.QueueTicket)") {
-      [void](Stop-BoosterDownloadQueueTicket -SetupUrl $SetupUrl -Ticket "$($State.QueueTicket)" `
-        -TimeoutMs ([Math]::Max(500, [Math]::Min(3000, $TimeoutMs))))
-      $State.QueueTicket = ''
-    }
   }
 }
 

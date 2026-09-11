@@ -114,10 +114,17 @@ SHA256 与文件大小 → 提权 helper 复验并复制到受保护 staging →
 
 内置下载的硬约束（实现于 `scripts\updater.ps1`，一条都不能省）：
 
-- **域名白名单硬编码**在 `$script:BoosterDownloadHosts`（当前只有 `upstream-host.invalid`）：
-  `setupUrl` 必须是 https 且主机在白名单内，否则拒绝下载并落日志。清单文件本身可能
+- **域名白名单硬编码**在 `$script:BoosterDownloadHosts` 与
+  `$script:BoosterDownloadHostSuffixes`（当前：`github.com` 精确匹配，
+  加 `.githubusercontent.com` 注册域后缀）：`setupUrl` 必须是 https 且主机通过
+  `Test-BoosterAllowedDownloadHost`，否则拒绝下载并落日志。清单文件本身可能
   被篡改，**绝不信任清单里的任意 URL**——没有这道闸，攻击者改一行 JSON 就能把用户
-  导去恶意地址。
+  导去恶意地址。**重定向后的最终地址会再过一次同一道闸**，因为 GitHub 的 release
+  资源一定会 302 到 CDN 子域。
+- **后缀匹配必须带前导点。** GitHub 把资源 CDN 子域从 `objects.githubusercontent.com`
+  改成过 `release-assets.githubusercontent.com`，所以不能写死子域名；但只比
+  `githubusercontent.com` 结尾的话，`evilgithubusercontent.com` 也会过。
+  `tests\updater-source-tests.ps1` 专门钉了这一条。
 - 清单缺 `sha256` 或 `size`（或值不合法）时视为不可信，界面自动退化为
   「仅提示 + 浏览器打开下载页」的旧行为；下载完成后哈希或大小任一不符，
   立即删除临时文件并报错。正常 GUI 已处于 EngineHost 管理员会话，下载直接落到仅
@@ -125,39 +132,46 @@ SHA256 与文件大小 → 提权 helper 复验并复制到受保护 staging →
   只允许继承现有 high token 的 helper 复验，不再通过 PowerShell 单独触发 UAC。安装器仍会按参数与 sidecar 复验，
   避免“校验后被同权限进程替换”的窗口。
 - **如实告知局限（别粉饰）**：SHA256 校验防的是*传输途中*被篡改（中间人、镜像污染）。
-  清单和安装包放在同一台服务器上，**服务器本身被攻破时攻击者可以同时替换两者并配好
-  哈希，这套校验完全失效**。真正能防这种情况的是代码签名证书（私钥不在服务器上），
-  本项目目前没有证书，所以服务器的安全就是更新链路的安全上限——SSH 键值登录、
-  最小化暴露面，比在客户端加花样更有用。
+  清单和安装包都是同一个 GitHub release 上的资源，**能改这个 release 的人可以同时替换
+  两者并配好哈希，这套校验完全失效**。真正能防这种情况的是代码签名证书（私钥不在
+  发布渠道上），本项目目前没有证书，所以发布账号的安全就是更新链路的安全上限——
+  开双因素、用细粒度 token、别把发布权限散出去，比在客户端加花样更有用。
+- **GitHub 在国内可能很慢甚至连不上。** 内置下载失败时必须退回「提示 + 跳下载页」，
+  绝不能表现为静默失败；清单里的 `url` 就是这条退路，指向 releases 页面。
 
 清单格式（`update-manifest.json`，UTF-8 无 BOM，构建脚本自动生成）：
 
 ```json
 {
-  "version": "0.23.0.11",
-  "displayVersion": "0.23.0.11",
+  "version": "0.23.0.13",
+  "displayVersion": "0.23.0.13",
   "minimumSupportedVersion": "0.23.0.8",
   "notes": "- 本版本包含关键还原修复，旧版本需完成更新后继续使用。",
-  "url": "https://upstream-host.invalid/",
-  "setupUrl": "https://upstream-host.invalid/DeltaForceBooster-Setup.exe",
+  "url": "https://github.com/FUDAHA99/FrameRateHelper/releases/latest",
+  "setupUrl": "https://github.com/FUDAHA99/FrameRateHelper/releases/download/v0.23.0.13/DeltaForceBooster-Setup.exe",
   "sha256": "（安装包的 SHA256，小写十六进制，构建脚本自动填）",
-  "size": 137728
+  "size": 942080
 }
 ```
 
-发布流程（GitHub、更新服务器、官网三处同步，缺一不算发布完成）：
+发布流程（本分支只有 GitHub 一处，不再有自有服务器和官网）：
 
 1. 改完代码，把 `gui\DeltaForceBooster-GUI.ps1` 的版本徽标升号，跑本目录构建脚本出包。
    构建结束会自动生成 `build\update-manifest.json`，`sha256`/`size` 已按本次 Setup.exe
    算好——**不要手工改这两个字段**，改了客户端必然校验失败。
-2. 上传到发布服务器（Caddy 站点 `upstream-host.invalid`，托管目录 `/opt/df-booster`）：
-   Setup.exe 覆盖为 `DeltaForceBooster-Setup.exe`（无版本号固定名，`setupUrl` 才能不变），
-   清单覆盖 `update-manifest.json`。**先传安装包、后传清单**——反过来会有一段时间窗口，
-   老客户端按新清单校验旧安装包，全部失败。
-3. 在私有官网部署工作区更新「更新记录」并上传，确认官网显示的新版本号、更新内容和下载入口都正确。
-4. 提交并推送 GitHub `main`，创建同版本 GitHub Release 并上传带版本号安装包；随后从公网复核官网、安装包、更新清单，并校验安装包大小与
-   SHA256。任一目标未完成时必须明确记录阻塞原因，不能宣称发布完成。
-5. 版本号比较是语义化的（`0.10.0` > `0.9.0`），清单里带不带 `v` 前缀都行。
+2. 提交并推送，打 `v<版本号>` tag，创建同名 GitHub Release。
+3. 给这个 Release 上传两个资源，**文件名必须逐字一致**：
+   - `DeltaForceBooster-Setup.exe`（`setupUrl` 按 tag 拼的就是这个名字）
+   - `update-manifest.json`（客户端读的是 `/releases/latest/download/update-manifest.json`）
+4. **先确认安装包资源已上传完，再上传清单。** 反过来会有一段时间窗口，
+   客户端按新清单去下一个还不存在的安装包，全部失败。
+5. 发布 Release（不要留作草稿）。草稿不计入 `latest`，`/releases/latest/download/` 会
+   继续返回上一版清单，等于这次发版对所有人不存在。
+6. 从公网复核：`/releases/latest/download/update-manifest.json` 能取到、版本号正确、
+   `setupUrl` 能下载、SHA256 与大小与清单一致。任一未完成时必须明确记录阻塞原因，
+   不能宣称发布完成。
+7. 版本号比较是语义化的（`0.10.0` > `0.9.0`），清单里带不带 `v` 前缀都行；
+   但 tag 必须是 `v<版本号>`，因为 `setupUrl` 是按这个格式拼出来的。
    若换下载域名，必须同步改 `scripts\updater.ps1` 的白名单常量再出包，否则老客户端拒绝下载。
 
 更新检查的全部失败路径（断网、超时、清单格式坏）都静默吞掉，不会影响主程序；

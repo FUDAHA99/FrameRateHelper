@@ -514,7 +514,7 @@ $hashRowsText
             !String.IsNullOrEmpty(uri.UserInfo) || !uri.IsDefaultPort)
             throw new InvalidOperationException("外部链接不是允许的 HTTPS 地址");
         string host = uri.IdnHost.ToLowerInvariant();
-        string[] allowed = new string[] { "aka.ms", "upstream-host.invalid", "www.nvidia.cn", "www.amd.com", "www.intel.cn", "redacted.invalid" };
+        string[] allowed = new string[] { "aka.ms", "github.com", "www.nvidia.cn", "www.amd.com", "www.intel.cn", "redacted.invalid" };
         if (Array.IndexOf(allowed, host) < 0) throw new InvalidOperationException("外部链接域名不在白名单");
         var psi = new ProcessStartInfo(uri.AbsoluteUri);
         psi.UseShellExecute = true;

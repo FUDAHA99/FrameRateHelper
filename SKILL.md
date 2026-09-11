@@ -16,7 +16,7 @@ description: 三角洲行动（Delta Force）一键画面/帧率优化。检测�
 - **工具本体必须已装在用户机器上**。你可能是通过链接远程读到这份说明的——那样只有说明、
   没有脚本。先确认 `<root>` 是否存在（正式安装默认位置：
   `%ProgramFiles%\DeltaForceBooster`；旧版可能仍留有下载文件夹中的副本）；找不到就让用户去
-  https://upstream-host.invalid/ 安装后再继续，
+  https://github.com/FUDAHA99/FrameRateHelper/releases/latest 安装后再继续，
   **不要代替用户下载或运行安装包**。
 - 所有命令都在本技能所在目录执行（下文用 `<root>` 表示工具的安装目录）。
 - 调用脚本必须带 `-ExecutionPolicy Bypass`（下载解压的脚本带网络标记，部分机器默认

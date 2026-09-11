@@ -381,7 +381,7 @@ static class Program {
             WinForms.MessageBox.Show(
                 "更新安装失败：" + reason +
                 "\r\n\r\n安装位置：" + (dest ?? "(未确定)") +
-                "\r\n\r\n" + state + "。如需帮助请前往 https://upstream-host.invalid/ 下载安装包手动更新。",
+                "\r\n\r\n" + state + "。如需帮助请前往 https://github.com/FUDAHA99/FrameRateHelper/releases 下载安装包手动更新。",
                 "三角洲行动优化助手 · 更新失败",
                 WinForms.MessageBoxButtons.OK, WinForms.MessageBoxIcon.Error);
         } catch (Exception) { }

@@ -674,6 +674,9 @@ $manifestNotes = @'
 - 历史兼容仅开放 DeltaForceClient.exe 的 CpuPriorityClass 与 IoPriority 原优化项，其他进程名和 IFEO 值继续按安全白名单拒绝。
 - v0.23.0.8 以前的版本仍需完成更新后继续使用。
 '@
+# 发布仓库。改这里等于改所有人的更新源，必须和 scripts\updater.ps1 里硬编码的
+# 域名白名单一起审查。
+$releaseRepo = 'FUDAHA99/FrameRateHelper'
 $manifestObj = [ordered]@{
   # 版本与显示版本逐字一致，避免更新判断、界面和安装包文件名各用一套编号。
   version  = "$ver"
@@ -681,12 +684,15 @@ $manifestObj = [ordered]@{
   # 旧版存在必须淘汰的问题；支持该字段的客户端低于本版时不允许跳过。
   minimumSupportedVersion = '0.23.0.8'
   notes    = $manifestNotes
-  url      = 'https://upstream-host.invalid/'
-  setupUrl = 'https://upstream-host.invalid/DeltaForceBooster-Setup.exe'
+  # 下载页：内置下载失败时界面会引导用户来这里手动下载。GitHub 在国内可能很慢，
+  # 这条退路必须一直有效。
+  url      = "https://github.com/$releaseRepo/releases/latest"
+  # 安装包指向本版 tag 下的资源，不能用 latest —— 清单里的 sha256 是这一个文件的。
+  setupUrl = "https://github.com/$releaseRepo/releases/download/v$ver/DeltaForceBooster-Setup.exe"
   sha256   = (Get-FileHash -LiteralPath $setupOut -Algorithm SHA256).Hash.ToLowerInvariant()
   size     = (Get-Item -LiteralPath $setupOut).Length
 }
-# 不带 BOM：服务器上的清单由 .NET/浏览器直接消费，带 BOM 的 JSON 部分解析器会噎住
+# 不带 BOM：清单由 .NET/浏览器直接消费，带 BOM 的 JSON 部分解析器会噎住
 [IO.File]::WriteAllText($manifestOut, ($manifestObj | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
 
 "构建完成（v$ver）："

@@ -8647,27 +8647,14 @@ function Show-UpdateDialog($UpdInfo) {
   $script:DlPollTimer.Add_Tick({
     $st = $script:DlState
     if (-not $st) { $script:DlPollTimer.Stop(); return }
-    if ($script:UpdDlg.IsVisible -and $st.Phase -in @('queued','downloading')) {
-      if ($st.Phase -eq 'queued') {
-        $script:UpdUi.DlPhaseText.Text = $(if ($st.Cancel) { '正在取消排队…' } elseif ("$($st.Status)") { "$($st.Status)" } else { '正在进入服务器下载队列…' })
-        $script:UpdUi.DlSizeText.Text = $(if ([int]$st.QueuePosition -gt 0) {
-          $seconds = [Math]::Max(0, [int]$st.QueueEstimatedWaitSeconds)
-          $estimate = $(if ($seconds -ge 60) {
-            "预计约 {0} 分钟" -f ([Math]::Ceiling($seconds / 60.0))
-          } elseif ($seconds -gt 0) { "预计约 {0} 秒" -f $seconds } else { '正在估算' })
-          "前方 {0} 位 · {1}" -f ([int]$st.QueueAhead), $estimate
-        } else { '正在获取排队位置' })
-        if (-not $st.Cancel) { $script:UpdUi.CancelDlTxt.Text = '取消排队' }
-        $script:UpdUi.DlFill.Width = 0
-      } else {
-        $recv = [long]$st.Received; $totalB = [long]$st.Total
-        $pct = $(if ($totalB -gt 0) { [Math]::Min(100, [Math]::Floor($recv * 100.0 / $totalB)) } else { 0 })
-        $script:UpdUi.DlPhaseText.Text = $(if ($st.Cancel) { '正在取消下载…' } elseif ("$($st.Status)") { "$($st.Status)" } else { '正在下载更新…' })
-        if (-not $st.Cancel) { $script:UpdUi.CancelDlTxt.Text = '取消下载' }
-        $script:UpdUi.DlSizeText.Text = "{0:N1} MB / {1:N1} MB · {2}%" -f ($recv / 1MB), ($totalB / 1MB), $pct
-        $trackW = $script:UpdUi.DlTrack.ActualWidth - 2
-        if ($trackW -gt 0) { $script:UpdUi.DlFill.Width = $trackW * $pct / 100 }
-      }
+    if ($script:UpdDlg.IsVisible -and $st.Phase -eq 'downloading') {
+      $recv = [long]$st.Received; $totalB = [long]$st.Total
+      $pct = $(if ($totalB -gt 0) { [Math]::Min(100, [Math]::Floor($recv * 100.0 / $totalB)) } else { 0 })
+      $script:UpdUi.DlPhaseText.Text = $(if ($st.Cancel) { '正在取消下载…' } elseif ("$($st.Status)") { "$($st.Status)" } else { '正在下载更新…' })
+      if (-not $st.Cancel) { $script:UpdUi.CancelDlTxt.Text = '取消下载' }
+      $script:UpdUi.DlSizeText.Text = "{0:N1} MB / {1:N1} MB · {2}%" -f ($recv / 1MB), ($totalB / 1MB), $pct
+      $trackW = $script:UpdUi.DlTrack.ActualWidth - 2
+      if ($trackW -gt 0) { $script:UpdUi.DlFill.Width = $trackW * $pct / 100 }
     }
     if (-not $st.Done) { return }
     $script:DlPollTimer.Stop()
@@ -8736,21 +8723,19 @@ function Show-UpdateDialog($UpdInfo) {
     if ($script:DlState -and -not $script:DlState.Done) { return }
     if (Test-TuningExperimentActive) { Write-Log '自动调优实验期间已拦截更新安装。'; return }
     $script:DlState = [hashtable]::Synchronized(@{
-      Received = 0L; Total = [long]$script:UpdDlgInfo.Size; Phase = 'queued'
-      Status = '正在进入服务器下载队列…'; RetryCount = 0
-      QueuePosition = 0; QueueAhead = 0; QueueActive = 0; QueueCapacity = 0
-      QueueEstimatedWaitSeconds = 0; QueueTicket = ''
+      Received = 0L; Total = [long]$script:UpdDlgInfo.Size; Phase = 'downloading'
+      Status = '正在下载更新…'; RetryCount = 0
       Error = ''; File = ''; Cancel = $false; Done = $false
     })
     foreach ($n in 'SkipChk','UpdBtn','GoBtn','LaterBtn') { $script:UpdUi[$n].Visibility = 'Collapsed' }
     $script:UpdUi.ErrPanel.Visibility = 'Collapsed'
     $script:UpdUi.DlPanel.Visibility = 'Visible'
-    $script:UpdUi.DlPhaseText.Text = '正在进入服务器下载队列…'
+    $script:UpdUi.DlPhaseText.Text = '正在下载更新…'
     $script:UpdUi.DlSizeText.Text = ''
     $script:UpdUi.DlFill.Width = 0
     $script:UpdUi.CancelDlBtn.Visibility = 'Visible'
     $script:UpdUi.CancelDlBtn.IsEnabled = $true
-    $script:UpdUi.CancelDlTxt.Text = '取消排队'
+    $script:UpdUi.CancelDlTxt.Text = '取消下载'
     Write-Log "开始下载更新包：$($script:UpdDlgInfo.SetupUrl)"
     # 下载放后台 runspace：白名单安检、SHA256/大小校验都在 Invoke-BoosterSetupDownload 里强制执行
     $ps = [PowerShell]::Create()
@@ -8769,11 +8754,10 @@ function Show-UpdateDialog($UpdInfo) {
   })
   $script:UpdUi.CancelDlBtn.Add_Click({
     if ($script:DlState -and -not $script:DlState.Done) {
-      $wasQueued = ($script:DlState.Phase -eq 'queued')
       $script:DlState.Cancel = $true
       $script:UpdUi.CancelDlBtn.IsEnabled = $false
       $script:UpdUi.CancelDlTxt.Text = '正在取消…'
-      $script:UpdUi.DlPhaseText.Text = $(if ($wasQueued) { '正在取消排队…' } else { '正在取消下载…' })
+      $script:UpdUi.DlPhaseText.Text = '正在取消下载…'
     }
   })
   $script:UpdUi.GoBtn.Add_Click({

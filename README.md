@@ -11,7 +11,7 @@
 
 工具覆盖电源计划、进程与 IO 优先级、HAGS、后台录制、系统服务和显卡层设置。所有写入操作都会先保存原值，支持一键还原；不修改游戏目录内的文件，不注入游戏进程，也不与反作弊交互。
 
-[下载](https://upstream-host.invalid/) · [快速开始](#安装与快速开始) · [Agent Skill](#agent-skill) · [命令行](#命令行) · [安全](#安全与风险提示) · [贡献](#贡献)
+[下载](https://github.com/FUDAHA99/FrameRateHelper/releases/latest) · [快速开始](#安装与快速开始) · [Agent Skill](#agent-skill) · [命令行](#命令行) · [安全](#安全与风险提示) · [贡献](#贡献)
 
 > **仓库范围**：本仓库只公开 Windows 客户端、安装/更新工具及客户端测试。官网、数据接收服务和运营看板在独立的私有部署工作区维护。
 
@@ -57,7 +57,7 @@
 
 ### 快速开始（图形界面）
 
-1. 从 [下载页](https://upstream-host.invalid/) 获取 `DeltaForceBooster-Setup-vX.Y.exe`
+1. 从 [Releases 页](https://github.com/FUDAHA99/FrameRateHelper/releases/latest) 获取 `DeltaForceBooster-Setup-vX.Y.exe`
 2. 运行安装向导；程序文件默认安装到 `%ProgramFiles%\DeltaForceBooster`
 3. 打开工具，等待硬件、游戏路径和系统设置检测完成
 4. 选择预设方案或逐项勾选，点击「执行优化」

@@ -60,7 +60,7 @@ $updaterPolicyDir = Join-Path $testBase 'updater-policy'
 $policyManifestPath = Join-Path $updaterPolicyDir 'manifest.json'
 $policyManifest = [ordered]@{
   version = $currentVersion; displayVersion = $currentVersion; minimumSupportedVersion = $currentVersion; notes = '- test'
-  url = 'https://upstream-host.invalid/'; setupUrl = 'https://upstream-host.invalid/DeltaForceBooster-Setup.exe'
+  url = 'https://github.com/FUDAHA99/FrameRateHelper/releases/latest'; setupUrl = 'https://github.com/FUDAHA99/FrameRateHelper/releases/download/v0.0.1/DeltaForceBooster-Setup.exe'
   sha256 = ('0' * 64); size = 1
 }
 [IO.File]::WriteAllText($policyManifestPath, ($policyManifest | ConvertTo-Json), [Text.UTF8Encoding]::new($false))

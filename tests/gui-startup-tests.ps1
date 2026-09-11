@@ -32,11 +32,14 @@ Assert-True ($raw.Contains("`$script:GuiVersion = '0.23.0.13'") -and
     $raw.Contains("`$script:DisplayVersion = '0.23.0.13'") -and
     $raw.Contains('Text="[ v0.23.0.13 ]"')) `
   'the unified v0.23.0.13 version is missing or inconsistent'
-Assert-True ($raw.Contains("`$script:UpdUi.CancelDlTxt.Text = '取消排队'") -and
-    $raw.Contains("'正在取消排队…'") -and
-    $raw.Contains('QueueEstimatedWaitSeconds') -and $raw.Contains('预计约 {0} 分钟') -and
-    -not $raw.Contains('"前方 {0} 位 · {1}/{2} 槽位"')) `
-  'queued update UI does not expose cancellation/estimated time or still displays the slot ratio'
+# 本分支删掉了服务器下载排队，界面只剩下载相位。这里改成守「排队 UI 确实已经拿掉」，
+# 以及下载相位的取消文案仍在。
+Assert-True ($raw.Contains("`$script:UpdUi.CancelDlTxt.Text = '取消下载'") -and
+    $raw.Contains("'正在取消下载…'") -and
+    -not $raw.Contains('QueueEstimatedWaitSeconds') -and
+    -not $raw.Contains('正在进入服务器下载队列…') -and
+    -not $raw.Contains('"前方 {0} 位 · {1}"')) `
+  'download UI still carries the removed server queue, or lost its cancel wording'
 Assert-True ($raw.Contains('以下内容请进入BIOS按照教程手动操作。') -and
   -not $raw.Contains('以下问题本工具改不了，但按教程手动处理并不难：')) `
   'health-check BIOS guidance still uses the old wording'
