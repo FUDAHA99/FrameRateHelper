@@ -997,18 +997,6 @@ $xaml = @'
           <TextBlock Text="[ v0.23.0.13 ]" Style="{StaticResource Mono}" Foreground="{DynamicResource Green}" Margin="9,0,0,0"/>
         </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-          <Button x:Name="NoticeBtn" Style="{StaticResource Ghost}"
-                  Height="24" FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"
-                  ToolTip="查看通知与历史消息">
-            <StackPanel Orientation="Horizontal">
-              <TextBlock x:Name="NoticeText" Text="通知" VerticalAlignment="Center"/>
-              <Border x:Name="NoticeBadge" Visibility="Collapsed" Background="{DynamicResource Green}"
-                      CornerRadius="7" MinWidth="15" Height="15" Margin="6,0,0,0" VerticalAlignment="Center">
-                <TextBlock x:Name="NoticeBadgeTxt" Text="" Foreground="#FFFFFFFF" FontSize="9" FontWeight="Bold"
-                           Margin="5,0,5,0" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-              </Border>
-            </StackPanel>
-          </Button>
           <Button x:Name="ThemeBtn" Content="☀ 浅色" Style="{StaticResource Ghost}" Visibility="Collapsed"
                   Height="24" MinWidth="66" FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"
                   ToolTip="切换浅色模式"/>
@@ -1833,7 +1821,7 @@ $script:ThemeRes = [Windows.Markup.XamlReader]::Parse($script:ThemeResXaml)
 $window.Resources.MergedDictionaries.Add($script:ThemeRes)
 
 $ui = @{}
-foreach ($n in 'TitleBar','MinBtn','CloseBtn','UpdateBtn','NoticeBtn','NoticeText','NoticeBadge','NoticeBadgeTxt','ThemeBtn','ScanState','MetricsGrid','HwGrid','GameText','BrowseBtn','CountText',
+foreach ($n in 'TitleBar','MinBtn','CloseBtn','UpdateBtn','ThemeBtn','ScanState','MetricsGrid','HwGrid','GameText','BrowseBtn','CountText',
                'SelAllChk',
                'ItemPanel','RiskyGroup','RiskyPanel','ApplyBtn','RestoreBtn','RefreshBtn','GuideBtn','CheckUpdBtn',
                'InlineRestorePanel','InlineRestoreItemsPanel','InlineRestoreEmptyText',
@@ -8828,325 +8816,12 @@ function Update-ItemList {
   Update-Count
 }
 
-# ---------- 官方通知（60 秒轮询 + 本地历史缓存） ----------
-
-$script:NotificationUrl = 'https://upstream-host.invalid/report/notifications'
-$script:NotificationStatePath = Join-Path $script:UserConfigDir 'notifications.json'
-$script:NotificationCheckIntervalSeconds = 60
-$script:NotificationItems = @()
-$script:NotificationLastSeenId = [int64]0
-$script:NotificationAnnouncedLatestId = [int64]0
-$script:NotificationLastFetchOk = $false
-$script:NotificationCheckBusy = $false
-$script:NotificationShowAfterFetch = $false
-
+# ---------- 版本提醒（纯本地，无网络） ----------
 # v0.23.0.8 的一次性重要提醒。状态跟随受保护的用户配置目录，因此同一台电脑
 # 不同 Windows 用户会各自弹出一次；关闭对话框而未点击「我知道了」时不写入确认状态。
 $script:PowerRecoveryNoticeId = 'v0.23.0.8-power-plan-recovery'
 $script:PowerRecoveryNoticeStatePath = Join-Path $script:UserConfigDir 'version-notice-v0.23.0.8.json'
 $script:PowerRecoveryNoticePromptedThisRun = $false
-
-function ConvertTo-NotificationList($Value) {
-  $result = [Collections.Generic.List[object]]::new()
-  $seen = @{}
-  foreach ($item in @($Value) | Select-Object -First 50) {
-    if (-not $item) { continue }
-    [int64]$id = 0
-    [int64]$publishedAt = 0
-    if (-not [int64]::TryParse("$($item.id)", [ref]$id) -or $id -le 0 -or $seen.ContainsKey($id)) { continue }
-    if (-not [int64]::TryParse("$($item.publishedAt)", [ref]$publishedAt) -or $publishedAt -le 0) { continue }
-    $title = "$($item.title)".Trim()
-    $content = "$($item.content)".Trim()
-    $level = "$($item.level)".Trim().ToLowerInvariant()
-    if (-not $title -or $title.Length -gt 80 -or -not $content -or $content.Length -gt 10000) { continue }
-    if ($level -notin 'info','important','warning') { continue }
-    $active = $true
-    if ($item.PSObject.Properties['active']) { $active = [bool]$item.active }
-    $seen[$id] = $true
-    [void]$result.Add([pscustomobject]@{
-      id = $id; title = $title; content = $content; level = $level
-      publishedAt = $publishedAt; active = $active
-    })
-  }
-  @($result.ToArray() | Sort-Object @{Expression='publishedAt';Descending=$true}, @{Expression='id';Descending=$true})
-}
-
-function Get-NotificationLatestId {
-  [int64]$latest = 0
-  foreach ($item in @($script:NotificationItems)) {
-    if ($item.active -and [int64]$item.id -gt $latest) { $latest = [int64]$item.id }
-  }
-  $latest
-}
-
-function Save-NotificationState {
-  try {
-    $state = [ordered]@{
-      SchemaVersion = 1
-      LastSeenId = [int64]$script:NotificationLastSeenId
-      Notifications = @($script:NotificationItems)
-    }
-    if (Get-Command Write-DfbTelemetryConfigAtomic -ErrorAction SilentlyContinue) {
-      Write-DfbTelemetryConfigAtomic $script:NotificationStatePath $state
-    } else {
-      [IO.File]::WriteAllText($script:NotificationStatePath, ($state | ConvertTo-Json -Depth 5),
-        (New-Object Text.UTF8Encoding($true)))
-    }
-  } catch {}
-}
-
-function Update-NotificationBadge {
-  $unread = @($script:NotificationItems | Where-Object { $_.active -and [int64]$_.id -gt $script:NotificationLastSeenId }).Count
-  if ($unread -gt 0) {
-    $ui.NoticeBadgeTxt.Text = $(if ($unread -gt 99) { '99+' } else { "$unread" })
-    $ui.NoticeBadge.Visibility = 'Visible'
-    $ui.NoticeText.Text = '新通知'
-    $ui.NoticeText.Foreground = New-Brush $script:C.Gold
-    $ui.NoticeBtn.ToolTip = "有 $unread 条新通知，点击查看全部消息"
-  } else {
-    $ui.NoticeBadge.Visibility = 'Collapsed'
-    $ui.NoticeBadgeTxt.Text = ''
-    $ui.NoticeText.Text = '通知'
-    $ui.NoticeText.Foreground = New-Brush $script:C.TextSec
-    $ui.NoticeBtn.ToolTip = '查看通知与历史消息'
-  }
-}
-
-function Initialize-NotificationState {
-  try {
-    if (Test-Path -LiteralPath $script:NotificationStatePath -PathType Leaf) {
-      $state = Get-Content -LiteralPath $script:NotificationStatePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-      [int64]$lastSeen = 0
-      if ([int64]::TryParse("$($state.LastSeenId)", [ref]$lastSeen) -and $lastSeen -ge 0) {
-        $script:NotificationLastSeenId = $lastSeen
-      }
-      $script:NotificationItems = @(ConvertTo-NotificationList $state.Notifications)
-    }
-  } catch {
-    $script:NotificationItems = @()
-    $script:NotificationLastSeenId = [int64]0
-  }
-  $script:NotificationAnnouncedLatestId = $script:NotificationLastSeenId
-  Update-NotificationBadge
-}
-
-function Set-NotificationPayload($Payload) {
-  if (-not $Payload -or -not $Payload.PSObject.Properties['notifications']) { throw '通知响应格式无效' }
-  $items = @(ConvertTo-NotificationList $Payload.notifications)
-  $script:NotificationItems = $items
-  $script:NotificationLastFetchOk = $true
-  $latest = Get-NotificationLatestId
-  if ($latest -gt $script:NotificationAnnouncedLatestId -and $latest -gt $script:NotificationLastSeenId) {
-    $newCount = @($items | Where-Object { $_.active -and [int64]$_.id -gt $script:NotificationLastSeenId }).Count
-    if ($newCount -gt 0) { Write-Log "收到 $newCount 条新通知，已在窗口右上角提示。" }
-    $script:NotificationAnnouncedLatestId = $latest
-  }
-  Update-NotificationBadge
-  Save-NotificationState
-}
-
-function Get-NotificationDisplayTime([int64]$UnixTime) {
-  try { [DateTimeOffset]::FromUnixTimeSeconds($UnixTime).ToLocalTime().ToString('yyyy-MM-dd HH:mm') }
-  catch { '' }
-}
-
-function ConvertTo-NotificationTextSegments([string]$Content) {
-  $segments = [Collections.Generic.List[object]]::new()
-  if ([string]::IsNullOrEmpty($Content)) { return @() }
-  $cursor = 0
-  $trimChars = [char[]]@('.', ',', ';', ':', '!', '?', ')', ']', '}', '>', '"', "'",
-    '，', '。', '！', '？', '；', '：', '）', '》', '】')
-  foreach ($match in [regex]::Matches($Content, '(?i)https?://[^\s<>"'']+')) {
-    $urlText = $match.Value.TrimEnd($trimChars)
-    if (-not $urlText) { continue }
-    $uri = $null
-    if (-not [Uri]::TryCreate($urlText, [UriKind]::Absolute, [ref]$uri) -or
-        $uri.Scheme -notin 'https','http') { continue }
-    if ($match.Index -gt $cursor) {
-      [void]$segments.Add([pscustomobject]@{ Text = $Content.Substring($cursor, $match.Index - $cursor); Url = '' })
-    }
-    [void]$segments.Add([pscustomobject]@{ Text = $urlText; Url = $uri.AbsoluteUri })
-    # 末尾的中文句号、右括号等不属于链接，留给下一段普通文字。
-    $cursor = $match.Index + $urlText.Length
-  }
-  if ($cursor -lt $Content.Length) {
-    [void]$segments.Add([pscustomobject]@{ Text = $Content.Substring($cursor); Url = '' })
-  }
-  @($segments.ToArray())
-}
-
-function New-NotificationBodyTextBlock([string]$Content) {
-  $body = New-Object Windows.Controls.TextBlock
-  $body.Foreground = New-Brush $script:C.TextSec
-  $body.FontSize = 12
-  $body.LineHeight = 20
-  $body.TextWrapping = 'Wrap'
-  $body.Margin = '0,7,0,0'
-  foreach ($segment in @(ConvertTo-NotificationTextSegments $Content)) {
-    if (-not $segment.Url) {
-      [void]$body.Inlines.Add((New-Object Windows.Documents.Run "$($segment.Text)"))
-      continue
-    }
-    $link = New-Object Windows.Documents.Hyperlink
-    $link.NavigateUri = New-Object Uri "$($segment.Url)"
-    $link.Foreground = New-Brush $script:C.Green
-    $link.TextDecorations = [Windows.TextDecorations]::Underline
-    $link.Cursor = 'Hand'
-    $link.ToolTip = '点击在默认浏览器中打开'
-    [void]$link.Inlines.Add((New-Object Windows.Documents.Run "$($segment.Text)"))
-    $link.Add_RequestNavigate({
-      param($sender, $eventArgs)
-      try {
-        $target = $eventArgs.Uri
-        if ($target -and $target.IsAbsoluteUri -and $target.Scheme -in 'https','http') {
-          Start-Process -FilePath $target.AbsoluteUri
-        }
-      } catch {}
-      $eventArgs.Handled = $true
-    })
-    [void]$body.Inlines.Add($link)
-  }
-  $body
-}
-
-function Show-NotificationHistory {
-  $unreadBefore = [int64]$script:NotificationLastSeenId
-  $latest = Get-NotificationLatestId
-  if ($latest -gt $script:NotificationLastSeenId) { $script:NotificationLastSeenId = $latest }
-  Update-NotificationBadge
-  Save-NotificationState
-
-  $nxaml = @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Width="520" Height="610" MinHeight="420" WindowStyle="None" ResizeMode="CanResize"
-        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
-        Background="{DynamicResource InputSurface}" BorderBrush="{DynamicResource LineHi}" BorderThickness="1"
-        FontFamily="Microsoft YaHei UI" FontSize="12">
-  <Grid>
-    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-    <Border x:Name="DragBar" Grid.Row="0" Background="{DynamicResource TopBar}" BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" Padding="14,10">
-      <DockPanel><TextBlock Text="通知中心" Foreground="{DynamicResource TextPri}" FontSize="14" FontWeight="Bold"/><TextBlock Text="  NOTIFICATIONS" Foreground="{DynamicResource Green}" FontFamily="Consolas" FontSize="10" VerticalAlignment="Center"/></DockPanel>
-    </Border>
-    <StackPanel Grid.Row="1" Margin="16,14,16,8">
-      <TextBlock Text="官方通知与历史消息" Foreground="{DynamicResource Green}" FontSize="16" FontWeight="Bold"/>
-      <TextBlock x:Name="StatusText" Foreground="{DynamicResource TextSec}" Margin="0,5,0,0" TextWrapping="Wrap"/>
-    </StackPanel>
-    <ScrollViewer Grid.Row="2" Margin="12,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-      <StackPanel x:Name="ItemsPanel" Margin="4,2,4,8"/>
-    </ScrollViewer>
-    <Border Grid.Row="3" BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Padding="14,11">
-      <Button x:Name="CloseButton" Content="关闭" Width="92" Height="30" HorizontalAlignment="Right" Background="{DynamicResource Green}" Foreground="{DynamicResource GreenDark}" BorderThickness="0" FontWeight="Bold" Cursor="Hand"/>
-    </Border>
-  </Grid>
-</Window>
-'@
-  $dialog = [Windows.Markup.XamlReader]::Parse($nxaml)
-  $dialog.Resources.MergedDictionaries.Add($script:ThemeRes)
-  $dialog.Owner = $window
-  $panel = $dialog.FindName('ItemsPanel')
-  $count = @($script:NotificationItems).Count
-  $status = $(if ($script:NotificationLastFetchOk) { "共 $count 条消息 · 已与服务器同步" } else { "共 $count 条消息 · 当前显示本机缓存" })
-  $dialog.FindName('StatusText').Text = $status
-
-  if ($count -eq 0) {
-    $empty = New-Object Windows.Controls.TextBlock
-    $empty.Text = '暂时没有通知。'
-    $empty.Foreground = New-Brush $script:C.TextSec
-    $empty.FontSize = 14
-    $empty.HorizontalAlignment = 'Center'
-    $empty.Margin = '0,70,0,0'
-    [void]$panel.Children.Add($empty)
-  } else {
-    foreach ($notice in @($script:NotificationItems)) {
-      $isUnread = [int64]$notice.id -gt $unreadBefore
-      $accent = switch ($notice.level) { 'warning' { $script:C.Danger } 'important' { $script:C.Gold } default { $script:C.Green } }
-      $levelText = switch ($notice.level) { 'warning' { '重要提醒' } 'important' { '重点通知' } default { '官方通知' } }
-      $card = New-Object Windows.Controls.Border
-      $card.Background = New-Brush $script:C.Panel
-      $card.BorderBrush = New-Brush $accent
-      $card.BorderThickness = '2,0,0,0'
-      $card.Padding = '14,12'
-      $card.Margin = '0,0,0,10'
-      $stack = New-Object Windows.Controls.StackPanel
-      $meta = New-Object Windows.Controls.StackPanel
-      $meta.Orientation = 'Horizontal'
-      $chip = New-Text $levelText $accent 10 -Mono
-      [void]$meta.Children.Add($chip)
-      if ($isUnread) {
-        $new = New-Text '  NEW' $script:C.Danger 10 -Mono
-        $new.FontWeight = 'Bold'
-        [void]$meta.Children.Add($new)
-      }
-      $time = New-Text ("  " + (Get-NotificationDisplayTime ([int64]$notice.publishedAt))) $script:C.TextMut 10 -Mono
-      [void]$meta.Children.Add($time)
-      [void]$stack.Children.Add($meta)
-      $title = New-Object Windows.Controls.TextBlock
-      $title.Text = "$($notice.title)"
-      $title.Foreground = New-Brush $script:C.TextPri
-      $title.FontSize = 14
-      $title.FontWeight = 'Bold'
-      $title.TextWrapping = 'Wrap'
-      $title.Margin = '0,7,0,0'
-      [void]$stack.Children.Add($title)
-      $body = New-NotificationBodyTextBlock "$($notice.content)"
-      [void]$stack.Children.Add($body)
-      $card.Child = $stack
-      [void]$panel.Children.Add($card)
-    }
-  }
-  $dialog.FindName('DragBar').Add_MouseLeftButtonDown({ $dialog.DragMove() })
-  $dialog.FindName('CloseButton').Add_Click({ $dialog.Close() })
-  [void]$dialog.ShowDialog()
-}
-
-function Start-NotificationCheck([switch]$ShowHistory) {
-  if ($ShowHistory) { $script:NotificationShowAfterFetch = $true }
-  if ($script:NotificationCheckBusy) { return }
-  $script:NotificationCheckBusy = $true
-  try {
-    $ps = [PowerShell]::Create()
-    [void]$ps.AddScript({
-      param($Url)
-      try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec 8 -UseBasicParsing -Headers @{ Accept='application/json' }
-        [pscustomobject]@{ Ok=$true; Content="$($response.Content)" }
-      } catch { [pscustomobject]@{ Ok=$false; Content='' } }
-    }).AddArgument($script:NotificationUrl)
-    $script:NotificationJob = $ps
-    $script:NotificationAsync = $ps.BeginInvoke()
-    $script:NotificationPollTimer = New-Object Windows.Threading.DispatcherTimer
-    $script:NotificationPollTimer.Interval = [TimeSpan]::FromMilliseconds(300)
-    $script:NotificationPollTimer.Add_Tick({
-      if (-not $script:NotificationAsync.IsCompleted) { return }
-      $script:NotificationPollTimer.Stop()
-      try {
-        $reply = @($script:NotificationJob.EndInvoke($script:NotificationAsync)) | Where-Object { $_ -and $_.PSObject.Properties['Ok'] } | Select-Object -Last 1
-        if ($reply -and $reply.Ok -and $reply.Content) {
-          $payload = "$($reply.Content)" | ConvertFrom-Json -ErrorAction Stop
-          Set-NotificationPayload $payload
-        } else { $script:NotificationLastFetchOk = $false }
-      } catch { $script:NotificationLastFetchOk = $false }
-      finally {
-        try { $script:NotificationJob.Dispose() } catch {}
-        $script:NotificationCheckBusy = $false
-      }
-      if ($script:NotificationShowAfterFetch) {
-        $script:NotificationShowAfterFetch = $false
-        Show-NotificationHistory
-      }
-    })
-    $script:NotificationPollTimer.Start()
-  } catch {
-    $script:NotificationCheckBusy = $false
-    $script:NotificationLastFetchOk = $false
-    if ($script:NotificationShowAfterFetch) {
-      $script:NotificationShowAfterFetch = $false
-      Show-NotificationHistory
-    }
-  }
-}
 
 function Test-PowerRecoveryNoticeAcknowledged {
   try {
@@ -9307,17 +8982,11 @@ $script:UpdatePromptedVersion = $null
 $script:UpdateDialogOpen = $false
 $script:HardwareInfo = $null
 Initialize-RunLogStore
-Initialize-NotificationState
 
 $window.Add_ContentRendered({
   Show-PowerRecoveryVersionNotice
   Initialize-LiveMetricsDashboard
   Refresh-PerformanceComparison -Force
-  Start-NotificationCheck
-  $script:NotificationPeriodicTimer = New-Object Windows.Threading.DispatcherTimer
-  $script:NotificationPeriodicTimer.Interval = [TimeSpan]::FromSeconds($script:NotificationCheckIntervalSeconds)
-  $script:NotificationPeriodicTimer.Add_Tick({ Start-NotificationCheck })
-  $script:NotificationPeriodicTimer.Start()
   try {
     $hw = Get-HardwareInfo
     $script:HardwareInfo = $hw
@@ -9397,14 +9066,6 @@ $ui.MinBtn.Add_Click({ $window.WindowState = 'Minimized' })
 if ($script:LightThemeEnabled) {
   $ui.ThemeBtn.Add_Click({ Set-AppTheme $(if ($script:CurrentTheme -eq 'dark') { 'light' } else { 'dark' }) -Persist })
 }
-$ui.NoticeBtn.Add_Click({
-  if (@($script:NotificationItems).Count -gt 0) {
-    Show-NotificationHistory
-    Start-NotificationCheck
-  } else {
-    Start-NotificationCheck -ShowHistory
-  }
-})
 $ui.UpdateBtn.Add_Click({
   if (-not $script:UpdateInfo) { return }
   if (Test-TuningExperimentActive) { Write-Log '自动调优实验期间不安装更新，请先停止并回滚。'; return }
@@ -9426,7 +9087,6 @@ $window.Add_Closing({
     Stop-LiveMetricsMonitor
     if ($script:PerformanceTimer) { $script:PerformanceTimer.Stop() }
     if ($script:TuningTelemetryTimer) { $script:TuningTelemetryTimer.Stop() }
-    if ($script:NotificationPeriodicTimer) { $script:NotificationPeriodicTimer.Stop() }
   }
 })
 $ui.CloseBtn.Add_Click({

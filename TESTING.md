@@ -32,17 +32,23 @@ Get-ChildItem tests\*.ps1 | Sort-Object Name | ForEach-Object {
 }
 ```
 
-**期望：18 个文件里 15 个通过。**
+**期望：17 个文件全部通过。**
 
-以下 3 个失败是**上游基线就有的，不是本次改动引入**（在未修改的 `9fab79d` 上复现同样结果，可自行 checkout 验证）：
+但有个前提 —— 下面两个用例读的是构建产物，不先出测试包必定失败，跟改动无关：
 
-| 文件 | 原因 |
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File build\make-installer.ps1 -TestBuild
+```
+
+| 文件 | 前置条件 |
 |---|---|
-| `installer-security-tests` | 需要先 `build\make-installer.ps1 -TestBuild` 产出测试包 |
+| `installer-security-tests` | 需要上面那行先产出测试包 |
 | `installer-drive-picker-tests` | 同上 |
-| `notification-feature-tests` | 上游既有失败，未排查 |
 
 新增的 `startup-bootstrap-tests.ps1` 必须通过。
+
+`notification-feature-tests.ps1` 已随通知功能一并删除 —— 它读 `server/report_server.py`，
+而上游把服务端代码转私有后这个文件在公开仓库里根本不存在，本来就不可能通过。
 
 ---
 
