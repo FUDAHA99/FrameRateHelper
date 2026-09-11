@@ -5406,8 +5406,19 @@ function Get-ValidatedTuningCandidateRuntime([string]$GroupId) {
 function Invoke-TuningRollbackBackup([string]$BackupFile, [string]$Reason) {
   if (-not (Test-TuningBackupReference $BackupFile)) { throw '只允许按当前实验的受保护备份回滚' }
   $reply = Invoke-ElevatedEngineAction -Action Restore -BackupFile $BackupFile
-  if ([int]$reply.EngineExitCode -ne 0 -or @($reply.Failed).Count -gt 0) {
-    throw "回滚失败（$Reason）：$(@($reply.Failed) -join '；')"
+  # 真失败的判据是 Failed 非空，不是「退出码非 0」。退出码 6 的含义是「系统设置已经写回去了，
+  # 只是这次还原没记上账」——把它当成回滚失败会同时做错两件事：对用户说「回滚失败：」而冒号
+  # 后一个字都没有（Failed 是空的），并且让调用方 catch 后终止倒序回滚链——本份明明已经回滚
+  # 完，更早的几份却再也不回滚了，这正是「最终安全回滚」最不能出的错。
+  $rollbackFailures = @($reply.Failed | Where-Object { $_ })
+  $rollbackBookkeeping = @($reply.BookkeepingFailed | Where-Object { $_ })
+  if ($rollbackFailures.Count -gt 0) {
+    throw "回滚失败（$Reason）：$($rollbackFailures -join '；')"
+  }
+  foreach ($note in $rollbackBookkeeping) { Write-Log "[记账失败] 自动调优回滚：$note" }
+  # 退出码非 0 但一条失败项都没给：结果读不懂，按失败处理，别假装成功
+  if ([int]$reply.EngineExitCode -ne 0 -and $rollbackBookkeeping.Count -eq 0) {
+    throw "回滚失败（$Reason）：管理员引擎返回退出码 $([int]$reply.EngineExitCode)，但没有给出失败项"
   }
   $script:TuningConfigGeneration++
   if ($script:ActiveTuningExperiment) { $script:ActiveTuningExperiment.configGeneration = $script:TuningConfigGeneration }
@@ -7668,6 +7679,9 @@ function Invoke-InlineRestoreAction([ValidateSet('selected_items','all')][string
     if ($w -gt 0) { $ui.ProgFill.Width = $w }
     $failN = @($r.Failed).Count
     $skipN = @($r.Skipped).Count
+    # 记账失败：系统设置确实写回去了，只是这次还原没记上账。它既不是失败也不是完成，
+    # 而且后续动作和失败完全相反——不要重试还原，先把备份目录修好
+    $bookN = @($r.BookkeepingFailed | Where-Object { $_ }).Count
     try {
       $updatedCatalog = Invoke-ElevatedEngineAction -Action Restore -ListRestoreItems
       Update-TelemetryOptimizationContextFromCatalog -Catalog $updatedCatalog
@@ -7692,6 +7706,7 @@ function Invoke-InlineRestoreAction([ValidateSet('selected_items','all')][string
     }
     foreach ($f in $r.Failed) { Write-Log "[还原失败] $f" }
     foreach ($s in $r.Skipped) { Write-Log "[还原跳过] $s" }
+    foreach ($b in $r.BookkeepingFailed) { Write-Log "[记账失败] $b" }
     foreach ($n in $r.Notes) { Write-Log "[提示] $n" }
     Update-ItemList
     Hide-InlineRestorePanel
@@ -7706,8 +7721,13 @@ function Invoke-InlineRestoreAction([ValidateSet('selected_items','all')][string
                elseif ($skipN -gt 0) { "`n`n其余全部还原成功，各项已回到优化前的状态。" }
                else { "`n`n全部还原成功，各项已回到优化前的状态。" })
     }
+    if ($bookN -gt 0) {
+      $sum += "`n`n注意：系统设置已经按上面的结果还原，但本次还原没有记上账（$bookN 处）。请不要立刻重试还原——重试会把同样的旧值再写回一遍，可能覆盖你之后的手动修改。原因见运行日志。"
+    }
     $restoreDialogTitle = $(if ($failN -gt 0) { '还原未完成' } else { '还原完成' })
     $restoreDialogCode = $(if ($failN -gt 0) { 'RESTORE INCOMPLETE' } else { 'RESTORE DONE' })
+    # 记账失败时绝不能说「完成」：改动写回去了，账没记上，下次还原会重放同样的旧值
+    if ($failN -eq 0 -and $bookN -gt 0) { $restoreDialogTitle = '还原部分完成'; $restoreDialogCode = 'RESTORE PARTIAL' }
     Show-ConfirmDialog $restoreDialogTitle $restoreDialogCode $sum '知道了' -InfoOnly | Out-Null
     if (@($r.RebootItems).Count -gt 0 -and (Show-RebootDialog @($r.RebootItems))) {
       Start-ConfirmedSystemReboot
