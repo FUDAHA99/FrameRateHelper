@@ -923,15 +923,100 @@ function Set-MMAgentState([string]$Feature, [bool]$Enabled) {
   }
 }
 
+# 计划任务存在性必须是三态。schtasks 的退出码 1 同时意味着「任务不存在」和
+# 「任务计划服务查不了」（被 debloat 脚本停掉、任务注册损坏、RPC 瞬时失败），
+# 旧写法把后者读成前者：还原时判定「任务已经不在了」→ 记成功 → 写消费凭证，
+# 而锁定任务活着，每分钟把刚还原好的电源方案切回优化方案；「优化」页还一直显示未锁定。
+#
+# 用 COM 而不是解析 schtasks 文本：退出码和错误文案都随系统语言变，COM 的 HRESULT 不变。
+#   0x80070002 ERROR_FILE_NOT_FOUND / 0x8007007B 文件名无效  → 'absent'
+#   其他任何异常（含服务不可用）                              → 'unknown'
+# 范式和同文件的 Get-BcdValue 一致：'absent' 是明确的「没有」，$null/'unknown' 是「读不了」。
+function Get-TaskQueryState([string]$TaskName) {
+  $service = $null
+  try {
+    $service = New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    $folder = $service.GetFolder('\')
+  } catch {
+    if ($service) { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($service) } catch {} }
+    return 'unknown'
+  }
+  try {
+    [void]$folder.GetTask($TaskName)
+    'present'
+  } catch {
+    # 按异常**类型**分类是不可靠的：实测互操作层把 0x80070002 包成 FileNotFoundException，
+    # 不是 COMException；5.1 还可能再套一层 MethodInvocationException。所以一律读 HRESULT
+    # 并沿 InnerException 往下找。HResult 是有符号 Int32，先按位取回无符号再比——
+    # 直接 [uint32] 转负数会溢出抛错，那会把「任务不存在」变成一次异常。
+    $absent = $false
+    $probeError = $_.Exception
+    while ($probeError -and -not $absent) {
+      $hr = [int64]$probeError.HResult -band 0xFFFFFFFF
+      if ($hr -eq 0x80070002 -or $hr -eq 0x8007007B) { $absent = $true }
+      $probeError = $probeError.InnerException
+    }
+    if ($absent) { 'absent' } else { 'unknown' }
+  } finally {
+    try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($service) } catch {}
+  }
+}
+
+# 本工具的电源锁定任务是否还在。三态：$true 在 / $false 不在 / $null 无法确认。
+# 装到不同目录后任务名会带一截安装根哈希，所以按前缀枚举，每个候选都过身份复验——
+# 备份侧 Assert-BackupOperation 本来就兼容裸前缀，探测侧不兼容是不对称，会让
+# 「安装根变过的老用户」界面永远显示未锁定，而任务其实还在跑。
+function Get-BoosterLockTaskState {
+  # 名字过滤在**消费侧**再做一遍，不只靠枚举函数：Test-BoosterLockTask 只验命令行是
+  # powercfg /setactive <guid>，别家厂商的电源任务完全可能长一样。「是我们的任务」
+  # 必须同时满足命名空间和命令行两条，少一条就可能去删别人的任务。
+  $nameRx = '^' + [regex]::Escape($script:LockTaskPrefix) + '(-[0-9A-Fa-f]{12})?$'
+  $names = New-Object System.Collections.Generic.List[string]
+  [void]$names.Add($script:LockTask)
+  foreach ($candidate in @(Get-BoosterLockTaskCandidates)) {
+    if ("$candidate" -notmatch $nameRx) { continue }
+    if ($names -notcontains "$candidate") { [void]$names.Add("$candidate") }
+  }
+  $sawUnknown = $false
+  foreach ($name in $names) {
+    switch (Get-TaskQueryState $name) {
+      'present' { if (Test-BoosterLockTask $name) { return $true } }
+      'unknown' { $sawUnknown = $true }
+    }
+  }
+  # 有任务查不了就是「无法确认」：说「不存在」会诱导用户再点一次优化，而任务可能还在
+  if ($sawUnknown) { return $null }
+  $false
+}
+
+# 枚举根文件夹里所有符合本工具锁定任务命名的候选（裸前缀，或前缀 + 12 位安装根哈希）。
+# 枚举失败时返回空集合：调用方靠 Get-TaskQueryState 的 'unknown' 兜底，不靠这里。
+function Get-BoosterLockTaskCandidates {
+  $service = $null
+  try {
+    $service = New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    $rx = '^' + [regex]::Escape($script:LockTaskPrefix) + '(-[0-9A-Fa-f]{12})?$'
+    @($service.GetFolder('\').GetTasks(0) | ForEach-Object { "$($_.Name)" } | Where-Object { $_ -match $rx })
+  } catch { @() }
+  finally { if ($service) { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($service) } catch {} } }
+}
+
 function Test-LockTaskExists {
-  [bool](Test-BoosterLockTask $script:LockTask)
+  # 布尔契约保留给不关心三态的调用方：无法确认时保守地按「不在」处理**只用于显示**，
+  # 还原路径一律走 Get-BoosterLockTaskState，绝不把 unknown 当成已删除。
+  [bool](Get-BoosterLockTaskState)
 }
 
 # ---------- 休眠 / 引导配置 / 显卡专项 ----------
 
 function Get-HibernateState {
-  # HibernateEnabled 在部分机器上不存在（本机实测缺失），退而看休眠文件是否在，
-  # 两个信号都拿不到才算读取失败——备份必须基于真实旧状态
+  # HibernateEnabled 在部分机器上不存在（本机实测缺失），退而看休眠文件是否在。
+  # 说实话：这个函数**没有**第三态。两个信号都拿不到时它返回 $false（"没休眠"），
+  # 而不是"读不出来"——hiberfil.sys 被安全软件挡住读取时会被当成休眠已关闭。
+  # 目前可接受：休眠还原走 Set-HibernateEnabled，它自己有写后回读校验，判错只会
+  # 表现为一次失败而不是静默的错误结论。要真三态得先给它一条独立的读取失败通道。
   $v = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' 'HibernateEnabled'
   if ($null -ne $v) { return ([int]$v -ne 0) }
   [bool](Test-Path -LiteralPath (Join-Path $script:SystemDrive 'hiberfil.sys'))
@@ -2597,7 +2682,10 @@ function Get-ItemState($Item) {
               Current   = $(if ($act) { $act.Name } else { '未知' }) }
   }
   if ($Item.Kind -eq 'sched') {
-    $ex = Test-LockTaskExists
+    # 三态：查不到 ≠ 不存在。任务计划服务读不了时说「未锁定」会诱导用户再点一次优化，
+    # 而任务可能还在跑——两个都写不进去，只会得到一次失败。
+    $ex = Get-BoosterLockTaskState
+    if ($null -eq $ex) { return @{ Optimized = $null; Current = '无法确认（任务计划服务查询失败）' } }
     return @{ Optimized = $ex; Current = $(if ($ex) { '锁定任务已建立' } else { '未锁定' }) }
   }
   if ($Item.Kind -eq 'npi') { return @{ Optimized = $null; Current = '无法读取驱动内状态' } }
@@ -4485,6 +4573,10 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
   # 前者让已经写回的旧值下次被重复写回（覆盖用户手改），后者把没成功的也一并勾销。
   $succeededKeys = @{}
   $finalOpIds = @{}
+  # 锁定任务没删掉时，后面的电源方案还原是白写：任务每分钟把活动方案切回优化方案。
+  # 执行顺序已经保证 sched 排在 power 前面（见 Get-RestoreExecutionOps），这里把
+  # 「顺序」升级成「前置条件」，让 power 分支能据此拒绝把自己算成已还原。
+  $lockTaskBlocked = ''
   foreach ($op in $ops) {
     $seq++
     if ($Progress) { & $Progress ([pscustomobject]@{ Stage = 'start'; Index = $seq; Total = $total; Name = (Get-RestoreOpLabel $op); Ok = $null }) }
@@ -4496,7 +4588,12 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
       if (@('pcfg', 'mmagent', 'hib', 'bcd') -contains $op.Kind -and -not (Test-Admin)) { throw '需要管理员权限' }
       switch ($op.Kind) {
         'power'   {
-          if ($op.Old) {
+          # sched → power 的前置依赖：锁定任务每分钟把活动方案切回优化方案。它没删掉时
+          # 写回原方案是白写——1 分钟后就被改回去，而用户已经看到「已还原」。
+          # 旧实现只把这条依赖编码成执行顺序（先 sched 后 power），没编码成前置条件。
+          if ($lockTaskBlocked) {
+            $failed += "$(Get-RestoreOpLabel $op)：$lockTaskBlocked；刚写回的电源方案会在 1 分钟内被它改回优化方案，本项不计为已还原"
+          } elseif ($op.Old) {
             $powerRestore = Invoke-RestorePowerScheme "$($op.Old)"
             if ($powerRestore.Exact) { $restored++; $succeededKeys[$opKey] = $true }
             else {
@@ -4571,14 +4668,25 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
           $restored++; $succeededKeys[$opKey] = $true
         }
         'sched'   {
-          $xml = Get-TaskXml "$($op.TaskName)"
-          if ($xml) {
+          # 「查不到」不等于「不存在」。Schedule 服务被 debloat 脚本停掉、任务注册损坏、
+          # RPC 瞬时失败时，旧写法把 $null 读成「任务已经不在了」，记成功、写凭证，
+          # 而任务还活着，每分钟把刚还原好的电源方案切回去。不确定就必须失败重试。
+          $probe = Get-TaskQueryState "$($op.TaskName)"
+          if ($probe -eq 'unknown') {
+            throw "无法确认计划任务 $($op.TaskName) 是否仍存在（任务计划服务查询失败），已拒绝判定为已删除；请确认「Task Scheduler」服务正在运行后重试还原"
+          }
+          if ($probe -eq 'present') {
             if (-not (Test-BoosterLockTask "$($op.TaskName)")) { throw '同名计划任务不是本工具创建，已拒绝删除' }
             $taskOut = & $script:SchTasksExe /Delete /TN "$($op.TaskName)" /F 2>&1
             $code = $LASTEXITCODE
-            if ((Get-TaskXml "$($op.TaskName)") -or $code -ne 0) { throw "计划任务删除失败（退出码 $code）：$(("$taskOut").Trim())" }
+            # 回读必须是明确的 'absent' 才算删掉了；'unknown' 同样不许当成成功
+            $after = Get-TaskQueryState "$($op.TaskName)"
+            if ($after -ne 'absent' -or $code -ne 0) {
+              throw "计划任务删除失败（退出码 $code，删除后状态 $after）：$(("$taskOut").Trim())"
+            }
           }
           $restored++; $succeededKeys[$opKey] = $true
+          $lockTaskBlocked = ''
         }
         'hib'     { Set-HibernateEnabled ([bool]$op.OldEnabled); $restored++; $succeededKeys[$opKey] = $true }
         'bcd'     {
@@ -4610,6 +4718,9 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
       # 失败行必须带人话项名：pcfg 备份没有 Name 字段，旧写法拼出来只剩「pcfg ：」，
       # 用户完全不知道哪项失败了——统一走 Get-RestoreOpLabel
       $opOk = $false; $failed += "$(Get-RestoreOpLabel $op)：$($_.Exception.Message)"
+      if ("$($op.Kind)" -eq 'sched') {
+        $lockTaskBlocked = "锁定任务「$($op.TaskName)」未能删除（$($_.Exception.Message)）"
+      }
     }
     if ($Progress) { & $Progress ([pscustomobject]@{ Stage = 'done'; Index = $seq; Total = $total; Name = (Get-RestoreOpLabel $op); Ok = $opOk }) }
   }

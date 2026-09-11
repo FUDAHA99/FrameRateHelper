@@ -406,7 +406,7 @@ try {
   # 一份备份里放齐五类，让 reg 那条失败：其余四类必须全部入账，于是重试**只**重放 reg。
   # 任何一类漏了记账，重试都会把它再执行一遍——对 hib/bcd 这种系统级开关，
   # 等于把用户后来手动开的休眠 / 启动项再关一次。
-  $originalGetTaskXml = ${function:Get-TaskXml}
+  $originalGetTaskQueryState = ${function:Get-TaskQueryState}
   $originalGetMMAgentState = ${function:Get-MMAgentState}
   $originalSetMMAgentState = ${function:Set-MMAgentState}
   $originalGetHibernateState = ${function:Get-HibernateState}
@@ -415,7 +415,7 @@ try {
   try {
     $script:KindCalls = New-Object System.Collections.Generic.List[string]
     $script:KindMMAgent = $false; $script:KindHibernate = $false
-    function Get-TaskXml([string]$TaskName) { [void]$script:KindCalls.Add('sched'); $null }
+    function Get-TaskQueryState([string]$TaskName) { [void]$script:KindCalls.Add('sched'); 'absent' }
     function Get-MMAgentState([string]$Feature) { [bool]$script:KindMMAgent }
     function Set-MMAgentState([string]$Feature,[bool]$Enabled) { [void]$script:KindCalls.Add('mmagent'); $script:KindMMAgent = $Enabled }
     function Get-HibernateState { [bool]$script:KindHibernate }
@@ -467,7 +467,7 @@ try {
       (@($script:RegWrites.ToArray()) -join ',') -eq (Get-TestRegKey $pagingPath 'DisablePagingExecutive')) `
       'sched / mmagent / hib / bcd 里有类型漏了记账——重试把已经还原好的系统开关又改了一遍'
   } finally {
-    Set-Item -LiteralPath Function:\Get-TaskXml -Value $originalGetTaskXml
+    Set-Item -LiteralPath Function:\Get-TaskQueryState -Value $originalGetTaskQueryState
     Set-Item -LiteralPath Function:\Get-MMAgentState -Value $originalGetMMAgentState
     Set-Item -LiteralPath Function:\Set-MMAgentState -Value $originalSetMMAgentState
     Set-Item -LiteralPath Function:\Get-HibernateState -Value $originalGetHibernateState
@@ -551,6 +551,78 @@ try {
     "$($mixedFaultRetry.Notes)" -like '*此前已完成还原*') `
     '好数据还原后不得因为那条被拒绝的 op 而反复重放'
 
+  # ---------- 4f. 计划任务「查不到」不等于「不存在」 ----------
+  # Schedule 服务被 debloat 脚本停掉 / 任务注册损坏 / RPC 瞬时失败时，旧写法把
+  # 查询失败读成「任务已经不在了」→ 记成功 → 写消费凭证。而锁定任务活着，
+  # 每分钟把刚还原好的电源方案切回优化方案，用户却看到「全部还原成功」。
+  $originalSchedQueryState = ${function:Get-TaskQueryState}
+  $originalSchedLockTask = ${function:Test-BoosterLockTask}
+  $originalSchedPowerRestore = ${function:Invoke-RestorePowerScheme}
+  try {
+    $script:SchedProbe = 'unknown'
+    $script:SchedIdentityOk = $true
+    $script:SchedPowerCalls = 0
+    function Get-TaskQueryState([string]$TaskName) { "$script:SchedProbe" }
+    function Test-BoosterLockTask([string]$TaskName) { [bool]$script:SchedIdentityOk }
+    function Invoke-RestorePowerScheme([string]$OriginalGuid) {
+      $script:SchedPowerCalls++
+      [pscustomobject]@{Guid=$OriginalGuid;Exact=$true;Retryable=$false;Message=$null}
+    }
+
+    # 同一份备份里有锁定任务和电源方案两条 op，正是真实「锁定电源计划」的组合
+    function New-SchedPowerBackup {
+      $doc = New-BackupDocument ([DateTime]::UtcNow)
+      $doc.State = 'complete'
+      $schedOpId = [guid]::NewGuid().ToString('D'); $powerOpId = [guid]::NewGuid().ToString('D')
+      $doc.Items = @(
+        [pscustomobject][ordered]@{ItemId='powerplan-lock';RestoreGroupId='powerplan-lock';DisplayName='电源锁定任务'
+          DefinitionHash=('5'*64);RebootRequired=$false;OpIds=@($schedOpId)},
+        [pscustomobject][ordered]@{ItemId='power-ultimate';RestoreGroupId='power-ultimate';DisplayName='电源计划'
+          DefinitionHash=('6'*64);RebootRequired=$true;OpIds=@($powerOpId)}
+      )
+      $doc.Ops = @(
+        [pscustomobject][ordered]@{Id=$schedOpId;Status='applied';ApplyId=$doc.ApplyId;ItemId='powerplan-lock'
+          RestoreGroupId='powerplan-lock';OpIndex=0;Kind='sched';TaskName=$script:LockTask},
+        [pscustomobject][ordered]@{Id=$powerOpId;Status='applied';ApplyId=$doc.ApplyId;ItemId='power-ultimate'
+          RestoreGroupId='power-ultimate';OpIndex=0;Kind='power'
+          Old='11111111-2222-4333-8444-555555555555';ToolCreated=$false;NewGuid=$null}
+      )
+      $path = Join-Path $script:BackupDir ("backup-$($doc.BackupId).json")
+      Write-BackupDocumentAtomic $path $doc
+      $path
+    }
+
+    $script:SchedProbe = 'unknown'
+    $unknownPath = New-SchedPowerBackup
+    $unknownRestore = Invoke-Restore $unknownPath
+    Assert-True (@($unknownRestore.Failed).Count -eq 2 -and
+      (@($unknownRestore.Failed) -join '|') -like '*无法确认*' -and
+      $null -eq $unknownRestore.Receipt -and $script:SchedPowerCalls -eq 0) `
+      '任务计划服务查不了时不得判定为「已删除」，更不得写消费凭证'
+    Assert-True ((@($unknownRestore.Failed) -join '|') -like '*1 分钟内被它改回*') `
+      '锁定任务没删掉时，电源方案还原是白写，必须说出来而不是照常写回'
+
+    # 修好服务后重试：两条 op 都还在，能正常还原
+    $script:SchedProbe = 'absent'
+    $unknownRetry = Invoke-Restore $unknownPath
+    Assert-True ($unknownRetry.Failed.Count -eq 0 -and $unknownRetry.RestoredOps -eq 2 -and
+      $script:SchedPowerCalls -eq 1 -and $unknownRetry.Receipt -and (Test-Path -LiteralPath $unknownRetry.Receipt)) `
+      '「无法确认」必须是可重试状态——修好任务计划服务后重试要能还原'
+
+    # 任务确实在，但不是本工具建的：拒绝删除，同样不得放行电源方案
+    $script:SchedProbe = 'present'; $script:SchedIdentityOk = $false
+    $foreignPath = New-SchedPowerBackup
+    $foreignRestore = Invoke-Restore $foreignPath
+    Assert-True (@($foreignRestore.Failed).Count -eq 2 -and
+      (@($foreignRestore.Failed) -join '|') -like '*不是本工具创建*' -and
+      $null -eq $foreignRestore.Receipt) `
+      '同名计划任务不是本工具创建时必须拒绝删除'
+  } finally {
+    Set-Item -LiteralPath Function:\Get-TaskQueryState -Value $originalSchedQueryState
+    Set-Item -LiteralPath Function:\Test-BoosterLockTask -Value $originalSchedLockTask
+    Set-Item -LiteralPath Function:\Invoke-RestorePowerScheme -Value $originalSchedPowerRestore
+  }
+
   # ---------- 5. v2 整份归档的闸门跟着 op 走 ----------
   # v2 没有 op 级凭证，只能整份 .restored 归档。所以它的判据必须是「这份自己的 op
   # 全部入账」——只要还剩一条没入账就不能改名，否则剩下那条会随归档被永久勾销。
@@ -591,6 +663,62 @@ Assert-True ($guiRaw.Contains("if (`$failN -eq 0 -and `$bookN -gt 0) { `$restore
 $engineRaw = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts\delta-booster.ps1'), [Text.Encoding]::UTF8)
 Assert-True ($engineRaw.Contains('foreach ($b in $r.BookkeepingFailed) { Write-Output "  [记账失败] $b" }')) `
   'CLI 文本输出丢掉了记账失败'
+
+# ---------- 6b. 锁定任务探测必须三态，而且要认带安装根哈希的任务名 ----------
+# 备份侧 Assert-BackupOperation 本来就兼容「裸前缀」和「前缀-12位哈希」两种任务名，
+# 探测侧只认当前安装根算出来的那一个是不对称的：换过安装目录的老用户，任务还在跑，
+# 界面却一直显示「未锁定」，点优化又会因为同名任务已存在而失败。
+$originalProbeState = ${function:Get-TaskQueryState}
+$originalProbeCandidates = ${function:Get-BoosterLockTaskCandidates}
+$originalProbeIdentity = ${function:Test-BoosterLockTask}
+try {
+  $script:ProbeStates = @{}
+  $script:ProbeIdentities = @{}
+  $script:ProbeCandidates = @()
+  function Get-TaskQueryState([string]$TaskName) {
+    if ($script:ProbeStates.ContainsKey($TaskName)) { return $script:ProbeStates[$TaskName] }
+    'absent'
+  }
+  function Get-BoosterLockTaskCandidates { @($script:ProbeCandidates) }
+  function Test-BoosterLockTask([string]$TaskName) { [bool]$script:ProbeIdentities[$TaskName] }
+
+  $orphan = "$($script:LockTaskPrefix)-aabbccdd1122"
+  $script:ProbeCandidates = @($orphan)
+  $script:ProbeStates = @{ $orphan = 'present' }
+  $script:ProbeIdentities = @{ $orphan = $true }
+  Assert-True ((Get-BoosterLockTaskState) -eq $true -and (Test-LockTaskExists)) `
+    '换过安装目录后遗留的锁定任务必须被认出来，否则界面永远显示未锁定'
+
+  $script:ProbeCandidates = @()
+  $script:ProbeStates = @{}
+  Assert-True ((Get-BoosterLockTaskState) -eq $false) '一个任务都查不到时必须明确返回「不存在」'
+
+  $script:ProbeStates = @{ $script:LockTask = 'unknown' }
+  Assert-True ($null -eq (Get-BoosterLockTaskState)) `
+    '任务计划服务查询失败必须返回「无法确认」，不得退化成「不存在」'
+  Assert-True ((Get-ItemState @{Kind='sched'}).Current -like '*无法确认*' -and
+    $null -eq (Get-ItemState @{Kind='sched'}).Optimized) `
+    '「无法确认」必须原样传到界面，不能被说成「未锁定」'
+
+  # 名字不符合本工具命名的任务，即使身份校验会通过也不该被枚举进来
+  $script:ProbeCandidates = @('SomeOtherVendor-PowerLock')
+  $script:ProbeStates = @{ 'SomeOtherVendor-PowerLock' = 'present' }
+  $script:ProbeIdentities = @{ 'SomeOtherVendor-PowerLock' = $true }
+  Assert-True ((Get-BoosterLockTaskState) -eq $false) '不属于本工具命名空间的任务不得被当成本工具的锁定任务'
+} finally {
+  Set-Item -LiteralPath Function:\Get-TaskQueryState -Value $originalProbeState
+  Set-Item -LiteralPath Function:\Get-BoosterLockTaskCandidates -Value $originalProbeCandidates
+  Set-Item -LiteralPath Function:\Test-BoosterLockTask -Value $originalProbeIdentity
+}
+
+# 真机上跑一次真实 COM 探测：一个必定不存在的任务名必须得到明确的 'absent'，
+# 而不是 'unknown' —— 否则三态在真实环境里退化成两态，上面的 fixture 全是空转。
+$realProbe = Get-TaskQueryState ('DeltaForceBooster-NoSuchTask-' + [guid]::NewGuid().ToString('N'))
+Assert-True ($realProbe -eq 'absent') `
+  "真实 COM 探测把「任务不存在」报成了 $realProbe —— 三态在真机上退化了"
+$realCandidatesOk = $true
+try { [void](Get-BoosterLockTaskCandidates) } catch { $realCandidatesOk = $false }
+Assert-True $realCandidatesOk '真实 COM 枚举锁定任务候选时抛异常了'
 
 # ---------- 7. 自动调优回滚不得把退出码 6 当成回滚失败 ----------
 # 这个消费者写在退出码只有 0/4 的年代，把「非 0 即失败」当公理。新增 6 之后它会：

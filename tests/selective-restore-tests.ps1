@@ -205,6 +205,7 @@ try {
   Write-BackupDocumentAtomic $allKindPath $allKindDoc
 
   $originalInvokeRestorePowerSchemeForKinds = ${function:Invoke-RestorePowerScheme}
+  $originalGetTaskQueryStateForKinds = ${function:Get-TaskQueryState}
   $originalGetTaskXmlForKinds = ${function:Get-TaskXml}
   $originalTestBoosterLockTaskForKinds = ${function:Test-BoosterLockTask}
   $originalSetPowerSettingAcForKinds = ${function:Set-PowerSettingAc}
@@ -222,11 +223,14 @@ try {
       $script:AllKindPower = $OldGuid
       [pscustomobject]@{Exact=$true;Guid=$OldGuid;Message='fixture restored'}
     }
-    function Get-TaskXml([string]$TaskName) {
+    # 计划任务存在性是三态：删除前问一次「在不在」，删除后必须再回读一次确认变成 'absent'。
+    # 这里数的是**语义次数**（探测 + 回读），不是绑定某个具体函数名的调用次数。
+    function Get-TaskQueryState([string]$TaskName) {
       $script:AllKindTaskQueries++
-      if ($script:AllKindTaskQueries -eq 1) { return [xml]'<Task />' }
-      $null
+      if ($script:AllKindTaskQueries -eq 1) { return 'present' }
+      'absent'
     }
+    function Get-TaskXml([string]$TaskName) { [xml]'<Task />' }
     function Test-BoosterLockTask([string]$TaskName) { $true }
     function Set-PowerSettingAc([string]$Sub,[string]$Setting,[int]$Value,[string]$SchemeGuid) {
       $script:AllKindPowerSetting = "$Sub|$Setting|$Value|$SchemeGuid"
@@ -251,6 +255,7 @@ try {
       '非注册表优化类型没有全部通过真实完整还原分支'
   } finally {
     Set-Item -LiteralPath Function:\Invoke-RestorePowerScheme -Value $originalInvokeRestorePowerSchemeForKinds
+    Set-Item -LiteralPath Function:\Get-TaskQueryState -Value $originalGetTaskQueryStateForKinds
     Set-Item -LiteralPath Function:\Get-TaskXml -Value $originalGetTaskXmlForKinds
     Set-Item -LiteralPath Function:\Test-BoosterLockTask -Value $originalTestBoosterLockTaskForKinds
     Set-Item -LiteralPath Function:\Set-PowerSettingAc -Value $originalSetPowerSettingAcForKinds
