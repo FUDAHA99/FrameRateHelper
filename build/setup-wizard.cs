@@ -253,7 +253,6 @@ static class Program {
             Log(logFile, "桌面快捷方式: " + Installer.CreateDesktopShortcut(codeRoot));
             Log(logFile, runAfter ? "新版文件已切换，等待启动验证: " + codeRoot : "安装完成: " + codeRoot);
             if (!string.IsNullOrEmpty(Installer.LastMigrationNote)) Log(logFile, Installer.LastMigrationNote);
-            if (!string.IsNullOrEmpty(Installer.PawnIoInstallNote)) Log(logFile, Installer.PawnIoInstallNote);
             if (runAfter) {
                 int launchedPid;
                 LaunchDisposition disposition;
@@ -478,11 +477,7 @@ static class Installer {
     const string InstallProductId = "DeltaForceBooster";
     const string AnchorIdentityName = "anchor.identity";
     const string AnchorCodeDirectory = "app";
-    const string PawnIoInstallerRelativePath = @"tools\PawnIO_setup.exe";
-    const string PawnIoInstallerSha256 = "1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032";
     public static string LastMigrationNote;
-    public static string PawnIoInstallNote;
-    public static bool PawnIoRebootRequired;
 
     static string TestRoot() {
 #if DFB_TESTING
@@ -1564,132 +1559,6 @@ static class Installer {
     static string FileSha256(string path) {
         using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
         using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(fs)).Replace("-", "");
-    }
-
-    static bool IsPawnIoCurrent(out Version installedVersion) {
-        installedVersion = null;
-        RegistryView[] views = Environment.Is64BitOperatingSystem
-            ? new RegistryView[] { RegistryView.Registry64, RegistryView.Registry32 }
-            : new RegistryView[] { RegistryView.Registry32 };
-        foreach (RegistryView view in views) {
-            try {
-                using (RegistryKey baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view))
-                using (RegistryKey key = baseKey.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO")) {
-                    if (key == null) continue;
-                    Version parsed;
-                    if (!Version.TryParse(Convert.ToString(key.GetValue("DisplayVersion"), CultureInfo.InvariantCulture), out parsed)) continue;
-                    installedVersion = parsed;
-                    // FileVersion can be reported as either 2.2.0 or 2.2.0.0.  A
-                    // four-part minimum makes System.Version treat 2.2.0 as older
-                    // because its missing Revision is -1, so compare at three parts.
-                    if (parsed.CompareTo(new Version(2, 2, 0)) >= 0) return true;
-                }
-            } catch (Exception) { }
-        }
-        // Some hardware tools install the signed PawnIO driver without keeping its
-        // Add/Remove Programs entry.  Treat the protected DriverStore service and a
-        // present ROOT\PAWNIO device as authoritative too, otherwise a second setup
-        // can return ERROR_ALREADY_EXISTS (183) and block the whole application.
-        try {
-            using (RegistryKey baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine,
-                       Environment.Is64BitOperatingSystem ? RegistryView.Registry64 : RegistryView.Registry32))
-            using (RegistryKey service = baseKey.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\PawnIO"))
-            using (RegistryKey device = baseKey.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT\PAWNIO")) {
-                if (service == null || device == null || device.SubKeyCount < 1) return false;
-                int serviceType = Convert.ToInt32(service.GetValue("Type", 0), CultureInfo.InvariantCulture);
-                if (serviceType != 1) return false;
-                string rawPath = Convert.ToString(service.GetValue("ImagePath"), CultureInfo.InvariantCulture);
-                if (string.IsNullOrWhiteSpace(rawPath)) return false;
-                rawPath = Environment.ExpandEnvironmentVariables(rawPath.Trim().Trim('"'));
-                string windows = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.Windows)).TrimEnd('\\');
-                const string systemRootPrefix = @"\SystemRoot\";
-                if (rawPath.StartsWith(systemRootPrefix, StringComparison.OrdinalIgnoreCase))
-                    rawPath = Path.Combine(windows, rawPath.Substring(systemRootPrefix.Length));
-                string fullPath = Path.GetFullPath(rawPath);
-                string driverStore = Path.GetFullPath(Path.Combine(windows, "System32", "DriverStore", "FileRepository")).TrimEnd('\\') + "\\";
-                if (!fullPath.StartsWith(driverStore, StringComparison.OrdinalIgnoreCase) ||
-                    !string.Equals(Path.GetFileName(fullPath), "PawnIO.sys", StringComparison.OrdinalIgnoreCase) ||
-                    !File.Exists(fullPath)) return false;
-                Version parsed;
-                if (!Version.TryParse(FileVersionInfo.GetVersionInfo(fullPath).FileVersion, out parsed)) return false;
-                installedVersion = parsed;
-                return parsed.CompareTo(new Version(2, 2, 0)) >= 0;
-            }
-        } catch (Exception) { }
-        return false;
-    }
-
-    static string PawnIoUnavailableNote(string detail) {
-        return "硬件传感器驱动暂未就绪" +
-            (string.IsNullOrEmpty(detail) ? "" : "（" + detail + "）") +
-            "；软件主体将继续安装，除 CPU 温度可能暂不显示外，其他功能不受影响。";
-    }
-
-    static void EnsurePawnIoInstalled(string stage, Action<int, int, string> onProgress) {
-#if DFB_TESTING
-        // 安装器安全测试必须保持纯临时目录操作，绝不触碰真实内核驱动。
-        if (TestRoot() != null) {
-            PawnIoInstallNote = "测试模式已跳过 PawnIO 驱动安装";
-            return;
-        }
-#endif
-        Version installedVersion;
-        if (IsPawnIoCurrent(out installedVersion)) {
-            PawnIoInstallNote = "硬件传感器驱动已就绪：PawnIO " + installedVersion;
-            return;
-        }
-
-        string installer = ChildPath(stage, PawnIoInstallerRelativePath);
-        EnsureNoReparseExistingPath(installer);
-        if (!File.Exists(installer) ||
-            !string.Equals(FileSha256(installer), PawnIoInstallerSha256, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("PawnIO 驱动安装器完整性复验失败");
-        if (onProgress != null) onProgress(1, 1, "正在安装签名硬件传感器驱动 PawnIO");
-
-        int exitCode = -1;
-        try {
-            using (Process process = Process.Start(new ProcessStartInfo {
-                FileName = installer,
-                Arguments = "-install -silent",
-                WorkingDirectory = Path.GetDirectoryName(installer),
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
-            })) {
-                if (process == null) {
-                    PawnIoInstallNote = PawnIoUnavailableNote("驱动安装程序未启动");
-                    return;
-                }
-                if (!process.WaitForExit(120000)) {
-                    try { process.Kill(); } catch (Exception) { }
-                    PawnIoInstallNote = PawnIoUnavailableNote("驱动安装超时");
-                    return;
-                }
-                exitCode = process.ExitCode;
-            }
-        } catch (Exception) {
-            PawnIoInstallNote = PawnIoUnavailableNote("驱动安装程序未完成");
-            return;
-        }
-        bool currentAfterInstall = IsPawnIoCurrent(out installedVersion);
-        if (currentAfterInstall) {
-            PawnIoRebootRequired = exitCode == 3010;
-            PawnIoInstallNote = PawnIoRebootRequired
-                ? "PawnIO 驱动已安装；Windows 要求重启后启用 CPU 温度读取"
-                : "硬件传感器驱动已就绪：PawnIO " + installedVersion;
-            return;
-        }
-        if (exitCode == 3010) {
-            PawnIoRebootRequired = true;
-            PawnIoInstallNote = "PawnIO 驱动已写入；Windows 要求重启后启用 CPU 温度读取";
-            return;
-        }
-        if (exitCode == 183) {
-            PawnIoInstallNote = "检测到电脑中已有 PawnIO 组件，已保留现有状态并继续安装；" +
-                "除 CPU 温度可能暂不显示外，其他功能不受影响。";
-            return;
-        }
-        PawnIoInstallNote = PawnIoUnavailableNote(exitCode == 0 ? "系统尚未启用驱动" : "错误 " + exitCode);
     }
 
     static bool IsTrustedInstallWriter(SecurityIdentifier sid) {
@@ -2825,8 +2694,6 @@ static class Installer {
     }
 
     static DeferredInstall InstallCore(string dest, Action<int, int, string> onProgress, string migrationSource, bool deferCommit) {
-        PawnIoInstallNote = null;
-        PawnIoRebootRequired = false;
         string requested = Path.GetFullPath(dest.Trim());
         string secure = CheckSecureInstallLocation(requested);
         if (secure != null) throw new UnauthorizedAccessException(secure);
@@ -2883,7 +2750,6 @@ static class Installer {
                 // 明确白名单数据迁到 LocalAppData，旧目录随后仅原子改名保留。
             }
             HardenInstalledTree(stage);
-            EnsurePawnIoInstalled(stage, onProgress);
 
             int stoppedPresentMon = StopInstalledPresentMon(full);
             if (stoppedPresentMon > 0)
@@ -3474,7 +3340,7 @@ class SetupWindow : Window {
             Margin = new Thickness(0, 4, 0, 0)
         });
         warnBox.Children.Add(new TextBlock {
-            Text = "· 硬件温度使用开源 LibreHardwareMonitor，并安装 namazso.eu 签名的 PawnIO 驱动；该驱动可能被其他硬件工具共用，卸载助手不会自动删除。",
+            Text = "· 硬件温度由 nvidia-smi 与用户自行安装的 LibreHardwareMonitor / OpenHardwareMonitor 提供；本软件不安装任何驱动，也不分发传感器组件。",
             Foreground = Theme.TextSub, TextWrapping = TextWrapping.Wrap, LineHeight = 19,
             Margin = new Thickness(0, 4, 0, 0)
         });
@@ -3912,8 +3778,7 @@ class SetupWindow : Window {
                 Dispatcher.Invoke(new Action(delegate {
                     _installing = false;
                     _installedDir = Installer.CodeRootForInstall(dest);
-                    _destText.Text = "安装位置：" + Installer.InstallRootForDisplay(dest) +
-                        (string.IsNullOrEmpty(Installer.PawnIoInstallNote) ? "" : "\n" + Installer.PawnIoInstallNote);
+                    _destText.Text = "安装位置：" + Installer.InstallRootForDisplay(dest);
                     ApplyAutoLaunchPolicy();
                     ShowStep(3);
                 }));
@@ -4024,7 +3889,7 @@ class SetupWindow : Window {
         sb.AppendLine("窗口标题=" + Title);
         sb.AppendLine("步骤=" + string.Join("/", StepNames));
         sb.AppendLine("欢迎标题=欢迎安装 三角洲行动优化助手");
-        sb.AppendLine("硬件传感器=LibreHardwareMonitor/PawnIO（签名驱动；卸载助手不自动删除）");
+        sb.AppendLine("硬件传感器=不分发（温度由 nvidia-smi 或用户自装的监控软件提供）");
         sb.AppendLine("按钮=上一步/取消/下一步/开始安装/完成");
         sb.AppendLine("安装磁盘说明=选择要安装到的磁盘，安装器会自动创建安全目录");
         sb.AppendLine("完成页勾选=创建开始菜单快捷方式（含「卸载优化助手」入口）/创建桌面快捷方式（三角洲行动优化助手）/立即运行 三角洲行动优化助手");

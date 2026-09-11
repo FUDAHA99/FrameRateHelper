@@ -55,11 +55,7 @@ $ver4 = ($seg[0..3]) -join '.'
 # tools 是第三方二进制风险最高的目录：只要出现白名单外文件或子目录，就让构建失败，
 # 并且在生成任何新产物前就停止。
 $allowedTools = @(
-  'PresentMon.exe', 'PresentMon-LICENSE.txt', 'DeltaForce-Recommended.nip',
-  'LibreHardwareMonitorLib.dll', 'HidSharp.dll', 'DiskInfoToolkit.dll', 'RAMSPDToolkit-NDD.dll',
-  'BlackSharp.Core.dll', 'System.Memory.dll', 'System.Runtime.CompilerServices.Unsafe.dll',
-  'System.Buffers.dll', 'System.Numerics.Vectors.dll', 'PawnIO_setup.exe',
-  'LibreHardwareMonitor-LICENSE.txt', 'LibreHardwareMonitor-THIRD-PARTY-NOTICES.txt', 'PawnIO-LICENSE.txt'
+  'PresentMon.exe', 'PresentMon-LICENSE.txt', 'DeltaForce-Recommended.nip'
 )
 $extraTools = @(Get-ChildItem -LiteralPath (Join-Path $root 'tools') -Force | Where-Object {
   $allowedTools -notcontains $_.Name
@@ -68,35 +64,26 @@ if ($extraTools.Count -gt 0) {
   throw "tools 目录含发布白名单外项目，构建已停止：$($extraTools.Name -join ', ')"
 }
 
-# 传感器 DLL 与内核驱动安装器会进入高权限进程：固定到已验证的官方 v0.9.6 / v2.2.0
-# 文件，并额外复验 PawnIO Authenticode，避免本地 tools 被替换后由构建流程重新背书。
-$hardwareToolHashes = [ordered]@{
-  'LibreHardwareMonitorLib.dll' = '6EBC194316536BA61AF5BE24508AD9FCBB2ECC685E716C12E787C79530F66BF0'
-  'HidSharp.dll' = 'D86690EFDE30EA9179F669320F39148853793B743A98B531AFEAF30598E22F54'
-  'DiskInfoToolkit.dll' = '1ACBF51B3C10C51C986CF43021680D34A2E38D9A5BA652BCFA9A1B5F7FC09800'
-  'RAMSPDToolkit-NDD.dll' = 'B6882354C7C8EC186617E421507743DBFAE09C5C1FC24CEF76A1D0C0C26651DE'
-  'BlackSharp.Core.dll' = 'CAFB93AFCC8D8A367E21F619673D05C06887D8964867FED1371F02DED1CD3E23'
-  'System.Memory.dll' = 'D5E8E4866F9CFA66F7765660F84B210198893E55335487AFE5EBDA342C0E913D'
-  'System.Runtime.CompilerServices.Unsafe.dll' = '08CBD7278B66F1E68425A82D4B97181A4130D93E3DD91831407ABA7212CCDACF'
-  'System.Buffers.dll' = '2D78D770C9CB997199154AE8C018B9F1D1EFBC86729F7264DDE6DBAD2A12CAC3'
-  'System.Numerics.Vectors.dll' = '20C2FA81B8C70D651099D762954F285FD4F942E63B2D7217C145DAB8D4B2F4C9'
-  'PawnIO_setup.exe' = '1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032'
+# 本分支已移除内置传感器栈（LibreHardwareMonitor + HidSharp + DiskInfoToolkit +
+# RAMSPDToolkit + BlackSharp + 4 个 System.* 垫片）与 PawnIO 内核驱动安装器。
+# 那一整套只产出一个数字（CPU 封装温度），而静默安装内核驱动是杀软误报最大的触发器，
+# 「软件打不开」才是本产品最高频的故障。温度改由 nvidia-smi 与用户自装的
+# LibreHardwareMonitor / OpenHardwareMonitor 的 WMI 命名空间提供，本项目不再分发任何
+# 传感器二进制 —— 同时也消掉了 PawnIO 的 GPL-2.0 源码义务和 8 个无随附许可证的 DLL。
+#
+# PresentMon 保留：它支撑实时 FPS、120 秒性能记录与自动调优采样，是 Intel 官方签名的
+# MIT 组件。上游没有把它纳入构建期固定（审计发现的缺口），这里补上哈希与签名复验，
+# 避免本地 tools 被替换后由构建流程重新背书。
+$presentMonPath = Join-Path $root 'tools\PresentMon.exe'
+if (-not (Test-Path -LiteralPath $presentMonPath -PathType Leaf)) { throw '帧数采集组件缺失：tools\PresentMon.exe' }
+$presentMonExpectedHash = '9BEC3083069F58F911E6A512F4806DB51A27BD096103087BC1D05EF54C80A191'
+$presentMonHash = (Get-FileHash -LiteralPath $presentMonPath -Algorithm SHA256).Hash.ToUpperInvariant()
+if ($presentMonHash -cne $presentMonExpectedHash) { throw "PresentMon 哈希不符：$presentMonHash" }
+$presentMonSignature = Get-AuthenticodeSignature -LiteralPath $presentMonPath
+if ($presentMonSignature.Status -ne 'Valid' -or
+    "$($presentMonSignature.SignerCertificate.Subject)" -notmatch 'CN=Intel Corporation(?:,|$)') {
+  throw "PresentMon 签名无效或发布者不符：$($presentMonSignature.Status) / $($presentMonSignature.SignerCertificate.Subject)"
 }
-foreach ($name in $hardwareToolHashes.Keys) {
-  $path = Join-Path $root "tools\$name"
-  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "硬件传感器组件缺失：tools\$name" }
-  $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant()
-  if ($actual -cne $hardwareToolHashes[$name]) { throw "硬件传感器组件哈希不符：tools\$name" }
-}
-$pawnIoPath = Join-Path $root 'tools\PawnIO_setup.exe'
-$pawnIoSignature = Get-AuthenticodeSignature -LiteralPath $pawnIoPath
-if ($pawnIoSignature.Status -ne 'Valid' -or "$($pawnIoSignature.SignerCertificate.Subject)" -notmatch 'CN=namazso\.eu(?:,|$)') {
-  throw "PawnIO 安装器签名无效或发布者不符：$($pawnIoSignature.Status) / $($pawnIoSignature.SignerCertificate.Subject)"
-}
-$lhmVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $root 'tools\LibreHardwareMonitorLib.dll')).FileVersion
-if ($lhmVersion -ne '0.9.6.0') { throw "LibreHardwareMonitor 版本不符：$lhmVersion" }
-$pawnIoVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($pawnIoPath).FileVersion
-if ($pawnIoVersion -ne '2.2.0.0') { throw "PawnIO 安装器版本不符：$pawnIoVersion" }
 
 # 中间产物放 ASCII 路径的临时目录：仓库路径含「桌面」，非中文代码页（本机 ACP=1252）下
 # 命令行工具处理中文路径容易翻车，成品最后再移回 build\。白名单检查通过后才创建，
@@ -138,15 +125,8 @@ $payloadFiles = @(
   '导出诊断信息.cmd', 'scripts\export-diagnostics.ps1',
   'scripts\delta-booster.ps1', 'scripts\diagnose.ps1', 'scripts\updater.ps1',
   'scripts\telemetry-client.ps1', 'scripts\tuning-experiment.ps1', 'scripts\user-context-worker.ps1',
-  'scripts\hardware-sensors.ps1',
   'gui\DeltaForceBooster-GUI.ps1', 'gui\app.ico',
   'tools\PresentMon.exe', 'tools\PresentMon-LICENSE.txt', 'tools\DeltaForce-Recommended.nip',
-  'tools\LibreHardwareMonitorLib.dll', 'tools\HidSharp.dll', 'tools\DiskInfoToolkit.dll',
-  'tools\RAMSPDToolkit-NDD.dll', 'tools\BlackSharp.Core.dll', 'tools\System.Memory.dll',
-  'tools\System.Runtime.CompilerServices.Unsafe.dll', 'tools\System.Buffers.dll',
-  'tools\System.Numerics.Vectors.dll', 'tools\PawnIO_setup.exe',
-  'tools\LibreHardwareMonitor-LICENSE.txt', 'tools\LibreHardwareMonitor-THIRD-PARTY-NOTICES.txt',
-  'tools\PawnIO-LICENSE.txt',
   'data\streamer-settings.json'
 )
 

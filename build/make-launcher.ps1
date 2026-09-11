@@ -106,17 +106,7 @@ $hashFiles = @(
   'scripts\telemetry-client.ps1',
   'scripts\tuning-experiment.ps1',
   'scripts\user-context-worker.ps1',
-  'scripts\hardware-sensors.ps1',
-  'tools\PresentMon.exe',
-  'tools\LibreHardwareMonitorLib.dll',
-  'tools\HidSharp.dll',
-  'tools\DiskInfoToolkit.dll',
-  'tools\RAMSPDToolkit-NDD.dll',
-  'tools\BlackSharp.Core.dll',
-  'tools\System.Memory.dll',
-  'tools\System.Runtime.CompilerServices.Unsafe.dll',
-  'tools\System.Buffers.dll',
-  'tools\System.Numerics.Vectors.dll'
+  'tools\PresentMon.exe'
 )
 $hashRows = foreach ($rel in $hashFiles) {
   $path = Join-Path $root $rel

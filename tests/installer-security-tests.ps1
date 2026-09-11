@@ -74,27 +74,24 @@ Assert-True ($mandatoryUpdate -and $mandatoryUpdate.Mandatory -and $mandatoryUpd
 Assert-True ($null -eq (Test-BoosterUpdate -CurrentVersion $currentVersion -ManifestUrl ([Uri]$policyManifestPath).AbsoluteUri)) `
   'current release incorrectly detects itself as an update'
 $setupSource = [IO.File]::ReadAllText((Join-Path $root 'build\setup-wizard.cs'))
-Assert-True ($installerBuildSource -match "(?s)'PawnIO_setup\.exe'\s*=\s*'1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032'" -and
+# 本分支不安装任何内核驱动。反向断言：安装器一旦重新获得驱动安装能力，
+# 就重新带回 GPL-2.0 源码义务、杀软误报放大，以及一个写进同意正文才合规的告知义务。
+Assert-True (-not ($setupSource -match 'PawnIo|PawnIO')) `
+  'the installer can install a kernel driver again (PawnIO is back in setup-wizard.cs)'
+Assert-True (-not ($setupSource -match 'Arguments = "-install -silent"')) `
+  'the installer performs a silent driver install again'
+# 只匹配带引号的文件名形态：它们只出现在白名单/哈希表这类代码里，
+# 不会出现在解释为什么移除的散文注释里。（直接匹配裸名字会被自己的注释触发。）
+foreach ($quoted in "'PawnIO_setup.exe'", "'LibreHardwareMonitorLib.dll'", "'HidSharp.dll'",
+                    "'DiskInfoToolkit.dll'", "'RAMSPDToolkit-NDD.dll'", "'BlackSharp.Core.dll'") {
+  Assert-True (-not $installerBuildSource.Contains($quoted)) `
+    "the build references the bundled sensor stack again: $quoted"
+}
+# PresentMon 保留，且必须继续被固定（上游没做，本分支补的）
+Assert-True ($installerBuildSource -match "presentMonExpectedHash = '[0-9A-F]{64}'" -and
   $installerBuildSource -match 'Get-AuthenticodeSignature' -and
-  $installerBuildSource.Contains('CN=namazso\.eu')) `
-  'build no longer pins and verifies the signed PawnIO 2.2.0 installer'
-Assert-True ($setupSource -match 'EnsurePawnIoInstalled\(stage, onProgress\)' -and
-  $setupSource -match 'Arguments = "-install -silent"' -and
-  $setupSource -match 'PawnIoInstallerSha256 = "1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032"' -and
-  $setupSource -match '测试模式已跳过 PawnIO 驱动安装') `
-  'installer no longer installs the verified PawnIO driver or isolates driver installation from test builds'
-$pawnIoSection = [regex]::Match($setupSource, '(?s)static bool IsPawnIoCurrent.*?static bool IsTrustedInstallWriter').Value
-Assert-True ($pawnIoSection.Contains('SYSTEM\CurrentControlSet\Services\PawnIO') -and
-  $pawnIoSection.Contains('SYSTEM\CurrentControlSet\Enum\ROOT\PAWNIO') -and
-  $pawnIoSection.Contains('DriverStore') -and
-  $pawnIoSection.Contains('PawnIO.sys') -and
-  ([regex]::Matches($pawnIoSection, 'new Version\(2, 2, 0\)').Count -ge 2) -and
-  -not $pawnIoSection.Contains('new Version(2, 2, 0, 0)') -and
-  $pawnIoSection.Contains('bool currentAfterInstall = IsPawnIoCurrent') -and
-  $pawnIoSection.Contains('if (exitCode == 183)') -and
-  $pawnIoSection.Contains('软件主体将继续安装') -and
-  -not $pawnIoSection.Contains('throw new InvalidOperationException("PawnIO 驱动安装失败')) `
-  'PawnIO detection/failure regression: existing driver or exit 183 can still abort the application install'
+  $installerBuildSource.Contains('CN=Intel Corporation')) `
+  'build no longer pins and verifies the Intel-signed PresentMon binary'
 Assert-True ($setupSource -match 'SetNamedSecurityInfoW' -and
   $setupSource -match 'LABEL_SECURITY_INFORMATION' -and
   $setupSource -match 'S:\(ML;OICI;NW;;;HI\)' -and
@@ -381,12 +378,9 @@ try {
   $expectedPayload = @(
     'DISCLAIMER.md','LICENSE','NOTICE.md','README.md','SKILL.md','install.identity',
     'data\streamer-settings.json','EngineHost.exe','UninstallHost.exe','gui\app.ico','gui\DeltaForceBooster-GUI.ps1',
-    'scripts\delta-booster.ps1','scripts\diagnose.ps1','scripts\hardware-sensors.ps1','scripts\telemetry-client.ps1','scripts\tuning-experiment.ps1','scripts\updater.ps1','scripts\user-context-worker.ps1',
-    'tools\BlackSharp.Core.dll','tools\DeltaForce-Recommended.nip','tools\DiskInfoToolkit.dll','tools\HidSharp.dll',
-    'tools\LibreHardwareMonitor-LICENSE.txt','tools\LibreHardwareMonitor-THIRD-PARTY-NOTICES.txt','tools\LibreHardwareMonitorLib.dll',
-    'tools\PawnIO-LICENSE.txt','tools\PawnIO_setup.exe','tools\PresentMon-LICENSE.txt','tools\PresentMon.exe','tools\RAMSPDToolkit-NDD.dll',
-    'tools\System.Buffers.dll','tools\System.Memory.dll','tools\System.Numerics.Vectors.dll','tools\System.Runtime.CompilerServices.Unsafe.dll',
-    '启动优化工具.bat','启动优化工具.exe','卸载.bat','卸载.exe','uninstall.ps1'
+    'scripts\delta-booster.ps1','scripts\diagnose.ps1','scripts\export-diagnostics.ps1','scripts\telemetry-client.ps1','scripts\tuning-experiment.ps1','scripts\updater.ps1','scripts\user-context-worker.ps1',
+    'tools\DeltaForce-Recommended.nip','tools\PresentMon-LICENSE.txt','tools\PresentMon.exe',
+    '启动优化工具.bat','启动优化工具.exe','导出诊断信息.cmd','卸载.bat','卸载.exe','uninstall.ps1'
   ) | Sort-Object
   $destPrefix = [IO.Path]::GetFullPath($dest).TrimEnd('\') + '\'
   $actualPayload = @(Get-ChildItem -LiteralPath $dest -Recurse -File | ForEach-Object {
@@ -841,7 +835,14 @@ try {
   foreach ($n in 1..$legacyMatrices.Count) {
     Assert-True (Test-Path (Join-Path $userRoot "profiles\profile$n.json")) "profile$n not migrated"
   }
-  $inventory = Get-Content (Join-Path $env:DFB_TEST_PROGRAMDATA 'DeltaForceBooster\legacy-roots.json') -Raw | ConvertFrom-Json
+  # 必须显式 UTF8：legacy-roots.json 由 setup-wizard.cs 以 UTF8Encoding(false) 写入（无 BOM），
+  # 而 PS 5.1 的 Get-Content 对无 BOM 文件按系统 ANSI 代码页读。用户名含中文时（GBK 下）
+  # 会把 JSON 转义用的反斜杠 0x5C 当成双字节字符的第二字节吃掉，ConvertFrom-Json 报
+  # 「Unrecognized escape sequence」。生产侧读取（delta-booster.ps1 的 Get-LegacyRoots）
+  # 用的是 [IO.File]::ReadAllText(..., UTF8)，本来就是对的，只有这里写漏了。
+  $inventory = [IO.File]::ReadAllText(
+    (Join-Path $env:DFB_TEST_PROGRAMDATA 'DeltaForceBooster\legacy-roots.json'),
+    [Text.Encoding]::UTF8) | ConvertFrom-Json
   Assert-True ($inventory.SchemaVersion -eq 1 -and @($inventory.Roots).Count -eq $legacyMatrices.Count) 'inventory did not merge all legacy roots'
   Assert-True (@($inventory.Roots | Where-Object { (Split-Path $_ -Leaf) -notmatch '^\.DeltaForceBooster\.migrated-[0-9a-f]{32}$' }).Count -eq 0) 'inventory leaf mismatch'
   foreach ($legacyBackup in @($inventory.Roots)) {

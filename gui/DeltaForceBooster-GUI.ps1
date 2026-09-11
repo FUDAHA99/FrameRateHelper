@@ -2680,26 +2680,17 @@ public static class DfbLiveSystemMetrics {
 }
 
 $script:LiveMetricsWorker = {
-  param($State,[string]$PresentMon,[string]$NvidiaSmi,[string]$GpuVendor,[string]$GpuPciLocation,
-    [string]$HardwareSensorScript,[string]$HardwareSensorLibraryDir)
+  param($State,[string]$PresentMon,[string]$NvidiaSmi,[string]$GpuVendor,[string]$GpuPciLocation)
   $ErrorActionPreference = 'SilentlyContinue'
 
+  # 温度来源只有两条，都不分发任何二进制：
+  #   1. N 卡走 nvidia-smi（随驱动安装，见下面的 Get-NvidiaSnapshot）
+  #   2. 用户自己装了 LibreHardwareMonitor / OpenHardwareMonitor 时读它们的 WMI 命名空间
+  # 上游曾内置 LibreHardwareMonitor + PawnIO 内核驱动来读 CPU 封装温度，本分支已移除：
+  # 那一整套（9 个 DLL + 一个内核驱动）只产出一个数字，而静默安装内核驱动是杀软误报
+  # 最大的触发器，「软件打不开」才是本产品最高频的故障。
   function Get-OptionalSensorTemperatures {
-    $cpu = $null; $gpu = $null; $cpuSource = ''; $gpuSource = ''; $providerSeen = $false; $bundledReadError = ''
-    if ($sensorComputer) {
-      $providerSeen = $true
-      try {
-        $bundled = Get-DfbHardwareTemperatures $sensorComputer
-        if ($null -ne $bundled.Cpu) {
-          $cpu = $bundled.Cpu
-          $cpuSource = "内置硬件传感器（LibreHardwareMonitor / PawnIO · $($bundled.CpuSensor)）"
-        }
-        if ($null -ne $bundled.Gpu) {
-          $gpu = $bundled.Gpu
-          $gpuSource = "内置硬件传感器（LibreHardwareMonitor / PawnIO · $($bundled.GpuSensor)）"
-        }
-      } catch { $bundledReadError = $_.Exception.Message }
-    }
+    $cpu = $null; $gpu = $null; $cpuSource = ''; $gpuSource = ''; $providerSeen = $false
     foreach ($namespace in 'root\LibreHardwareMonitor','root\OpenHardwareMonitor') {
       if ($null -ne $cpu -and $null -ne $gpu) { break }
       try {
@@ -2720,20 +2711,18 @@ $script:LiveMetricsWorker = {
         if ($null -ne $cpu -and $null -ne $gpu) { break }
       } catch {}
     }
-    $cpuStatus = $(if ($null -ne $cpu) { '' } elseif ($bundledReadError) {
-      "内置硬件传感器读取失败：$bundledReadError"
-    } elseif ($sensorInitializationError) {
-      "内置硬件传感器初始化失败：$sensorInitializationError"
-    } elseif ($providerSeen) {
-      '内置硬件传感器已启动，但没有上报可信的 CPU 封装温度；请确认 PawnIO 驱动正常并重启软件'
+    # CPU 封装温度在用户态读不到（rdmsr 是 CPL0 指令），所以只能引导用户自己装一个
+    # 带驱动的监控软件。不去读 WMI 的 ACPI 热区冒充它 —— 上游踩过这个坑并特意回退了。
+    $cpuStatus = $(if ($null -ne $cpu) { '' } elseif ($providerSeen) {
+      '已检测到硬件监控软件，但它没有上报 CPU 封装温度'
     } else {
-      '未检测到可用的硬件温度源'
+      '未检测到温度来源。安装 LibreHardwareMonitor 并保持后台运行即可显示 CPU 温度'
     })
-    $gpuStatus = $(if ($null -ne $gpu) { '' } elseif ($bundledReadError) {
-      "内置硬件传感器读取失败：$bundledReadError"
-    } elseif ($sensorInitializationError) {
-      "内置硬件传感器初始化失败：$sensorInitializationError"
-    } else { '硬件传感器与显卡驱动均未上报可信的 GPU 温度' })
+    $gpuStatus = $(if ($null -ne $gpu) { '' } elseif ($providerSeen) {
+      '硬件监控软件与显卡驱动均未上报可信的 GPU 温度'
+    } else {
+      '未检测到温度来源。N 卡请确认显卡驱动完整；A 卡 / 核显可安装 LibreHardwareMonitor'
+    })
     [pscustomobject]@{Cpu=$cpu;Gpu=$gpu;CpuSource=$cpuSource;GpuSource=$gpuSource;CpuStatus=$cpuStatus;GpuStatus=$gpuStatus}
   }
 
@@ -2778,16 +2767,9 @@ $script:LiveMetricsWorker = {
     $null
   }
 
-  $sampler = $null; $cpuSampler = $null; $sensorComputer = $null; $sensorInitializationError = ''; $gamePid = 0
+  $sampler = $null; $cpuSampler = $null; $gamePid = 0
   $nextHardware = [DateTime]::MinValue; $nextProcess = [DateTime]::MinValue
   try {
-    try {
-      if (-not $HardwareSensorScript -or -not (Test-Path -LiteralPath $HardwareSensorScript -PathType Leaf)) {
-        throw 'hardware-sensors.ps1 缺失'
-      }
-      . $HardwareSensorScript
-      $sensorComputer = Open-DfbHardwareMonitor $HardwareSensorLibraryDir
-    } catch { $sensorInitializationError = $_.Exception.Message }
     $sampler = New-Object DfbLivePresentMonSampler
     $cpuSampler = New-Object DfbProcessorUtilitySampler
     while (-not [bool]$State.Stop) {
@@ -2850,7 +2832,6 @@ $script:LiveMetricsWorker = {
   } finally {
     if ($sampler) { $sampler.Dispose() }
     if ($cpuSampler) { $cpuSampler.Dispose() }
-    if ($sensorComputer -and (Get-Command Close-DfbHardwareMonitor -ErrorAction SilentlyContinue)) { Close-DfbHardwareMonitor $sensorComputer }
   }
 }
 
@@ -2874,15 +2855,13 @@ function Start-LiveMetricsMonitor($Hw) {
   }
   $script:LiveMetricsState = [hashtable]::Synchronized(@{
     Stop=$false;Fps=$null;FpsStatus='游戏未运行';GameRunning=$false;CpuUsage=$null;CpuTemperature=$null
-    CpuTemperatureSource='';CpuTemperatureStatus='正在启动内置硬件传感器';GpuUsage=$null;GpuTemperature=$null;GpuTemperatureSource='';GpuTemperatureStatus='正在启动内置硬件传感器';MemoryUsage=$null
+    CpuTemperatureSource='';CpuTemperatureStatus='正在检测温度来源';GpuUsage=$null;GpuTemperature=$null;GpuTemperatureSource='';GpuTemperatureStatus='正在检测温度来源';MemoryUsage=$null
   })
   $presentMon = Join-Path $script:RootDir 'tools\PresentMon.exe'
-  $hardwareSensorScript = Join-Path $script:RootDir 'scripts\hardware-sensors.ps1'
-  $hardwareSensorLibraryDir = Join-Path $script:RootDir 'tools'
   $nvidiaSmi = $(if (Get-Command Get-NvidiaSmiPath -ErrorAction SilentlyContinue) { Get-NvidiaSmiPath } else { $null })
   $script:LiveMetricsPowerShell = [PowerShell]::Create()
   [void]$script:LiveMetricsPowerShell.AddScript($script:LiveMetricsWorker)
-  foreach ($argument in @($script:LiveMetricsState,$presentMon,$nvidiaSmi,"$($Hw.MainGpuVendor)","$($Hw.MainGpuPciLocation)",$hardwareSensorScript,$hardwareSensorLibraryDir)) {
+  foreach ($argument in @($script:LiveMetricsState,$presentMon,$nvidiaSmi,"$($Hw.MainGpuVendor)","$($Hw.MainGpuPciLocation)")) {
     [void]$script:LiveMetricsPowerShell.AddArgument($argument)
   }
   $script:LiveMetricsAsync = $script:LiveMetricsPowerShell.BeginInvoke()

@@ -131,6 +131,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build\make-installer.ps1
   （`setup-wizard.cs:263-277`），而回滚副本在切换成功后即被删除（`:2743`），
   做用户可点的回退需要改安装事务模型，风险收益比不划算。
 - 域名仍是 `upstream-host.invalid`（上游作者的服务器）。
-- 第三方二进制（LibreHardwareMonitor / PawnIO / 三个来源不明 DLL）未处理，
-  分发前的许可证合规未处理。
+- 第三方传感器栈与 PawnIO 内核驱动已移除；剩余第三方件只有 Intel MIT 的 PresentMon。
 - 产品改名未执行：代码里仍是 `DeltaForceBooster`。
