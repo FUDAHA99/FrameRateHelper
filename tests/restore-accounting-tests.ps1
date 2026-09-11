@@ -572,9 +572,13 @@ try {
     '项目里还有改动永远回不去时，不得说它已经回到优化前'
   $script:RegWrites.Clear()
   $mixedFaultRetry = Invoke-Restore $mixedFaultPath
-  Assert-True ($mixedFaultRetry.RestoredOps -eq 0 -and @($script:RegWrites.ToArray()).Count -eq 0 -and
-    "$($mixedFaultRetry.Notes)" -like '*此前已完成还原*') `
+  Assert-True ($mixedFaultRetry.RestoredOps -eq 0 -and @($script:RegWrites.ToArray()).Count -eq 0) `
     '好数据还原后不得因为那条被拒绝的 op 而反复重放'
+  # 好 op 全部消费完之后，这份备份只剩被拒绝的 op。此时绝不能说「此前已完成还原」——
+  # 那两条改动确实还留在系统里，只是工具还不回去，必须一直如实报。
+  Assert-True (@($mixedFaultRetry.Failed).Count -eq 2 -and
+    "$($mixedFaultRetry.Notes)" -notlike '*此前已完成还原*') `
+    '只剩被拒绝的 op 时不得报成「此前已完成还原」'
 
   # ---------- 4f. 计划任务「查不到」不等于「不存在」 ----------
   # Schedule 服务被 debloat 脚本停掉 / 任务注册损坏 / RPC 瞬时失败时，旧写法把
@@ -634,6 +638,73 @@ try {
       $script:SchedPowerCalls -eq 1 -and $unknownRetry.Receipt -and (Test-Path -LiteralPath $unknownRetry.Receipt)) `
       '「无法确认」必须是可重试状态——修好任务计划服务后重试要能还原'
 
+    # 合并还原时有两条任务名不同的 sched op（换过安装目录的老用户）：一条删不掉、
+    # 一条本来就不在。前置条件必须按任务名累计——用一个全局标志时，后一条成功会把
+    # 前一条失败的标志清掉，活着的锁定任务被掩盖，power 照样入账并被永久消费。
+    $script:SchedProbeByName = @{}
+    function Get-TaskQueryState([string]$TaskName) {
+      if ($script:SchedProbeByName.ContainsKey($TaskName)) { return $script:SchedProbeByName[$TaskName] }
+      "$script:SchedProbe"
+    }
+    $orphanTaskName = "$($script:LockTaskPrefix)-ddeeff001122"
+    $mergedNewer = New-SchedPowerBackup
+    $mergedOlderDoc = New-BackupDocument ([DateTime]::UtcNow.AddMinutes(-10))
+    $mergedOlderDoc.State = 'complete'
+    $olderSchedId = [guid]::NewGuid().ToString('D')
+    $mergedOlderDoc.Items = @([pscustomobject][ordered]@{
+      ItemId='powerplan-lock';RestoreGroupId='powerplan-lock';DisplayName='电源锁定任务'
+      DefinitionHash=('f'*64);RebootRequired=$false;OpIds=@($olderSchedId)})
+    $mergedOlderDoc.Ops = @([pscustomobject][ordered]@{
+      Id=$olderSchedId;Status='applied';ApplyId=$mergedOlderDoc.ApplyId;ItemId='powerplan-lock'
+      RestoreGroupId='powerplan-lock';OpIndex=0;Kind='sched';TaskName=$orphanTaskName})
+    $mergedOlderPath = Join-Path $script:BackupDir ("backup-$($mergedOlderDoc.BackupId).json")
+    Write-BackupDocumentAtomic $mergedOlderPath $mergedOlderDoc
+    # 当前安装根那条删不掉；旧安装目录那条本来就不在
+    $script:SchedProbeByName = @{ $script:LockTask = 'present'; $orphanTaskName = 'absent' }
+    $script:SchedIdentityOk = $true
+    $script:SchedPowerCalls = 0
+    $mergedSched = Invoke-Restore $null
+    Assert-True (@($mergedSched.Failed | Where-Object { $_ -like '*1 分钟内被它改回*' }).Count -eq 1 -and
+      $script:SchedPowerCalls -eq 0 -and
+      @($mergedSched.RestoredItemIds) -notcontains 'power-ultimate') `
+      '后一条 sched 成功不得掩盖前一条没删掉的锁定任务——power 会被永久消费掉'
+    $mergedReceiptOps = @()
+    if ($mergedSched.Receipt) {
+      $mergedReceiptOps = @((Get-Content -LiteralPath $mergedSched.Receipt -Raw -Encoding UTF8 | ConvertFrom-Json).ConsumedOps)
+    }
+    Assert-True (@($mergedReceiptOps | Where-Object { $_.OpId -eq $olderSchedId }).Count -le 1 -and
+      @($mergedReceiptOps).Count -le 1) `
+      '锁定任务没删掉时，同一次还原里的 power op 绝不能进消费凭证'
+    $script:SchedProbeByName = @{}
+
+    # sched op 被 op 级校验拒绝时**压根没执行**，锁定任务原封不动。前置条件不能只覆盖
+    # 「执行了但失败」，否则 power 一路畅通地被还原并消费，而任务还在每分钟改回去。
+    $rejectedSchedDoc = New-BackupDocument ([DateTime]::UtcNow)
+    $rejectedSchedDoc.State = 'complete'
+    $rejSchedId = [guid]::NewGuid().ToString('D'); $rejPowerId = [guid]::NewGuid().ToString('D')
+    $rejectedSchedDoc.Items = @(
+      [pscustomobject][ordered]@{ItemId='powerplan-lock';RestoreGroupId='powerplan-lock';DisplayName='电源锁定任务'
+        DefinitionHash=('1'*63+'2');RebootRequired=$false;OpIds=@($rejSchedId)},
+      [pscustomobject][ordered]@{ItemId='power-ultimate';RestoreGroupId='power-ultimate';DisplayName='电源计划'
+        DefinitionHash=('3'*63+'4');RebootRequired=$true;OpIds=@($rejPowerId)}
+    )
+    $rejectedSchedDoc.Ops = @(
+      # 任务名不在本工具命名空间里 → op 级拒绝，这条 op 不会进执行表
+      [pscustomobject][ordered]@{Id=$rejSchedId;Status='applied';ApplyId=$rejectedSchedDoc.ApplyId
+        ItemId='powerplan-lock';RestoreGroupId='powerplan-lock';OpIndex=0;Kind='sched';TaskName='SomeOtherVendorTask'},
+      [pscustomobject][ordered]@{Id=$rejPowerId;Status='applied';ApplyId=$rejectedSchedDoc.ApplyId
+        ItemId='power-ultimate';RestoreGroupId='power-ultimate';OpIndex=0;Kind='power'
+        Old='11111111-2222-4333-8444-555555555555';ToolCreated=$false;NewGuid=$null}
+    )
+    $rejectedSchedPath = Join-Path $script:BackupDir ("backup-$($rejectedSchedDoc.BackupId).json")
+    Write-BackupDocumentAtomic $rejectedSchedPath $rejectedSchedDoc
+    $script:SchedPowerCalls = 0
+    $rejectedSched = Invoke-Restore $rejectedSchedPath
+    Assert-True ($script:SchedPowerCalls -eq 0 -and
+      @($rejectedSched.Failed | Where-Object { $_ -like '*1 分钟内被它改回*' }).Count -eq 1 -and
+      $null -eq $rejectedSched.Receipt) `
+      '被拒绝的 sched op 压根没执行，锁定任务还在——power 绝不能照常还原并被消费'
+
     # 任务确实在，但不是本工具建的：拒绝删除，同样不得放行电源方案
     $script:SchedProbe = 'present'; $script:SchedIdentityOk = $false
     $foreignPath = New-SchedPowerBackup
@@ -647,6 +718,99 @@ try {
     Set-Item -LiteralPath Function:\Test-BoosterLockTask -Value $originalSchedLockTask
     Set-Item -LiteralPath Function:\Invoke-RestorePowerScheme -Value $originalSchedPowerRestore
   }
+
+  # ---------- 4g. 被拒绝的 op 在**每一条**执行路径上都不许落地 ----------
+  # 下面每一条都对应一次真实回归：C 组把 op 级拒绝从「整份 throw」改成「收集成 fault」
+  # 之后，凡是没查 fault 表的路径，被拒绝的 op 就从「谁都执行不了」变成了「照常执行」。
+
+  # 4g-1. v2 文档的执行表原来直接取 $b.Ops，一条 fault 过滤都没有
+  $v2FaultDoc = [pscustomobject][ordered]@{
+    SchemaVersion=2;BackupId=[guid]::NewGuid().ToString('D');CreatedUtc=[DateTime]::UtcNow.ToString('o')
+    UserSid=$script:TargetUserSid;UserLocalAppData=$script:TargetLocalAppData;State='complete';Ops=@(
+      # 目标不在白名单：op 级拒绝
+      [pscustomobject][ordered]@{Id=[guid]::NewGuid().ToString('D');Status='applied';Kind='reg'
+        Path='HKLM:\SYSTEM\CurrentControlSet\Services\NotOnTheWhitelist';Name='Start'
+        Existed=$true;OldValue=2;OldKind='DWord'},
+      [pscustomobject][ordered]@{Id=[guid]::NewGuid().ToString('D');Status='applied';Kind='reg'
+        Path=$dwmPath;Name='OverlayTestMode';Existed=$true;OldValue=0;OldKind='DWord'}
+    );Integrity=$null
+  }
+  $script:RegState[(Get-TestRegKey 'HKLM:\SYSTEM\CurrentControlSet\Services\NotOnTheWhitelist' 'Start')] = [pscustomobject]@{Value=4;Kind='DWord'}
+  $script:RegState[(Get-TestRegKey $dwmPath 'OverlayTestMode')] = [pscustomobject]@{Value=5;Kind='DWord'}
+  $v2FaultPath = Join-Path $script:BackupDir ("backup-$($v2FaultDoc.BackupId).json")
+  Write-BackupDocumentAtomic $v2FaultPath $v2FaultDoc
+  $script:RegWrites.Clear()
+  $v2Fault = Invoke-Restore $v2FaultPath
+  Assert-True ((@($script:RegWrites.ToArray()) -join ',') -eq (Get-TestRegKey $dwmPath 'OverlayTestMode') -and
+    (Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\NotOnTheWhitelist' 'Start') -eq 4) `
+    'v2 备份里被拒绝的 op 照样写了系统——fault 收集在 v2 执行路径上成了旁路'
+  Assert-True ($v2Fault.RestoredOps -eq 1 -and @($v2Fault.Failed).Count -eq 1 -and
+    $v2Fault.Failed[0] -like '*不在白名单*') `
+    '被拒绝的 op 既不能算进 RestoredOps，也必须如实进失败清单'
+
+  # 4g-2. fault 的主键必须是下标而不是 OpId：Id 为空正是它被拒绝的原因之一
+  $emptyIdDoc = New-BackupDocument ([DateTime]::UtcNow)
+  $emptyIdDoc.State = 'complete'
+  $emptyIdDoc.Items = @([pscustomobject][ordered]@{
+    ItemId='hags';RestoreGroupId='hags';DisplayName='硬件加速 GPU 计划';DefinitionHash=('b'*64)
+    RebootRequired=$true;OpIds=@('')})
+  $emptyIdDoc.Ops = @([pscustomobject][ordered]@{
+    Id='';Status='applied';ApplyId=$emptyIdDoc.ApplyId;ItemId='hags';RestoreGroupId='hags'
+    OpIndex=0;Kind='reg';Path=$hagsPath;Name='HwSchMode'
+    Existed=$true;OldValue=9;OldKind='DWord';AppliedValue=2;AppliedKind='DWord'})
+  $emptyIdPath = Join-Path $script:BackupDir ("backup-$($emptyIdDoc.BackupId).json")
+  Write-BackupDocumentAtomic $emptyIdPath $emptyIdDoc
+  $script:RegState[(Get-TestRegKey $hagsPath 'HwSchMode')] = [pscustomobject]@{Value=2;Kind='DWord'}
+  $script:RegWrites.Clear()
+  $emptyIdCatalog = Get-RestoreItemCatalog
+  Assert-True ([int]$emptyIdCatalog.UnrestorableOpCount -ge 1) `
+    'OpId 为空的 fault 被整条丢掉了——它压根没进 fault 表'
+  $emptyIdRestore = Invoke-Restore $emptyIdPath
+  Assert-True (@($script:RegWrites.ToArray()).Count -eq 0 -and
+    (Get-RegValue $hagsPath 'HwSchMode') -eq 2 -and $emptyIdRestore.RestoredOps -eq 0 -and
+    @($emptyIdRestore.Failed).Count -ge 1) `
+    'Id 为空的 op 被拒绝后仍然进了执行表并真的写了系统'
+
+  # 4g-3. 整份 op 全被拒绝的备份：既不能消失，也不能被说成「此前已完成还原」
+  $allFaultDoc = New-BackupDocument ([DateTime]::UtcNow)
+  $allFaultDoc.State = 'complete'
+  $allFaultOpId = [guid]::NewGuid().ToString('D')
+  $allFaultDoc.Items = @([pscustomobject][ordered]@{
+    ItemId='fso-off';RestoreGroupId='fso-off';DisplayName='全屏优化';DefinitionHash=('d'*64)
+    RebootRequired=$false;OpIds=@($allFaultOpId)})
+  $allFaultDoc.Ops = @([pscustomobject][ordered]@{
+    Id=$allFaultOpId;Status='applied';ApplyId=$allFaultDoc.ApplyId;ItemId='fso-off';RestoreGroupId='fso-off'
+    OpIndex=0;Kind='file';Path=(Join-Path $temp 'gone.cfg');OrigB64=[Convert]::ToBase64String([byte[]](7))})
+  $allFaultPath = Join-Path $script:BackupDir ("backup-$($allFaultDoc.BackupId).json")
+  Write-BackupDocumentAtomic $allFaultPath $allFaultDoc
+  $allFaultResult = Invoke-Restore $allFaultPath
+  Assert-True (@($allFaultResult.Failed).Count -eq 1 -and $allFaultResult.Failed[0] -like '*全屏优化*' -and
+    "$($allFaultResult.Notes)" -notlike '*此前已完成还原*' -and (Get-RestoreExitCode $allFaultResult) -eq 4) `
+    '整份 op 都被拒绝的备份不得在「全部复原」里彻底消失，更不得报成「此前已完成还原」'
+
+  # 4g-4. 按项目复原也必须自己判一次 fault：界面的灰按钮拦不住 CLI
+  $selectedFaultDoc = New-BackupDocument ([DateTime]::UtcNow)
+  $selectedFaultDoc.State = 'complete'
+  $selGoodId = [guid]::NewGuid().ToString('D'); $selFaultId = [guid]::NewGuid().ToString('D')
+  $selectedFaultDoc.Items = @([pscustomobject][ordered]@{
+    ItemId='wer-off';RestoreGroupId='wer-off';DisplayName='错误报告';DefinitionHash=('9'*64)
+    RebootRequired=$false;OpIds=@($selGoodId,$selFaultId)})
+  $selectedFaultDoc.Ops = @(
+    [pscustomobject][ordered]@{Id=$selGoodId;Status='applied';ApplyId=$selectedFaultDoc.ApplyId;ItemId='wer-off'
+      RestoreGroupId='wer-off';OpIndex=0;Kind='reg';Path=$werPath;Name='Disabled'
+      Existed=$true;OldValue=0;OldKind='DWord';AppliedValue=1;AppliedKind='DWord'},
+    [pscustomobject][ordered]@{Id=$selFaultId;Status='applied';ApplyId=$selectedFaultDoc.ApplyId;ItemId='wer-off'
+      RestoreGroupId='wer-off';OpIndex=1;Kind='file';Path=(Join-Path $temp 'wer.cfg')
+      OrigB64=[Convert]::ToBase64String([byte[]](8))})
+  $script:RegState[(Get-TestRegKey $werPath 'Disabled')] = [pscustomobject]@{Value=1;Kind='DWord'}
+  $selectedFaultPath = Join-Path $script:BackupDir ("backup-$($selectedFaultDoc.BackupId).json")
+  Write-BackupDocumentAtomic $selectedFaultPath $selectedFaultDoc
+  $script:RegWrites.Clear()
+  $selectedFaultResult = Invoke-RestoreSelected @('wer-off')
+  Assert-True ($selectedFaultResult.RestoredItems -eq 0 -and $selectedFaultResult.Failed.Count -eq 1 -and
+    @($selectedFaultResult.RestoredItemIds) -notcontains 'wer-off' -and
+    $null -eq $selectedFaultResult.Receipt -and @($script:RegWrites.ToArray()).Count -eq 0) `
+    '半好半坏的项目按项目复原时必须拒绝，不能报「复原成功」并写凭证'
 
   # ---------- 5. v2 整份归档的闸门跟着 op 走 ----------
   # v2 没有 op 级凭证，只能整份 .restored 归档。所以它的判据必须是「这份自己的 op
@@ -765,6 +929,13 @@ try {
     $fullConflict.Skipped.Count -eq 1 -and $fullConflict.Skipped[0] -like '*又被改过*' -and
     (Get-RegValue $wsearchPath 'Start') -eq 3) `
     '全部复原不得拿旧值抹掉用户在优化之后做的手动修改'
+  # conflict 是**唯一可重试**的一类：把值改回去就又能还原了。进消费凭证等于把这份
+  # 备份记录永久烧掉——而去重保留的恰好是唯一带着优化前真原值的那条。
+  Assert-True ($null -eq $fullConflict.Receipt) '冲突的 op 绝不能被写进消费凭证'
+  $script:RegState[(Get-TestRegKey $wsearchPath 'Start')] = [pscustomobject]@{Value=4;Kind='DWord'}
+  $fullConflictRetry = Invoke-Restore $fullConflictPath
+  Assert-True ($fullConflictRetry.RestoredOps -eq 1 -and (Get-RegValue $wsearchPath 'Start') -eq 2) `
+    '用户把值改回去之后必须还能还原——冲突不是终局'
 
 } finally {
   if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }

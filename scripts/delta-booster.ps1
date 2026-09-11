@@ -3280,16 +3280,19 @@ function Assert-BackupDocument($Document, [bool]$RequireIntegrity) {
   if ($ops.Count -gt 256) { throw '备份操作超过 256 项上限' }
   $schemaForOps = $(if ($RequireIntegrity) { [int]$Document.SchemaVersion } else { 1 })
   $allowedLocal = $(if ($RequireIntegrity) { "$($Document.UserLocalAppData)" } else { $script:TargetLocalAppData })
+  # fault 的主键是 op 在文档里的**下标**，不是 OpId。用 OpId 做主键会开一个逃逸口：
+  # op 的 Id 缺失/为空时正是它被 Assert-BackupOperation 拒绝的原因之一，而空串又登记
+  # 不进任何以 Id 为键的集合，于是这条被拒绝的 op 原样进执行表，一句话都不报。
+  # 下标对任何内容都成立，且执行侧按同样的下标过滤。
   $opFaults = New-Object System.Collections.Generic.List[object]
-  $faultedOpIds = @{}
+  $faultedIndexes = @{}
   for ($opIndex = 0; $opIndex -lt $ops.Count; $opIndex++) {
     $op = $ops[$opIndex]
     try { Assert-BackupOperation $op $schemaForOps $allowedLocal }
     catch {
-      $faultOpId = "$($op.Id)"
-      if ($faultOpId) { $faultedOpIds[$faultOpId] = $true }
+      $faultedIndexes[$opIndex] = $true
       [void]$opFaults.Add([pscustomobject]@{
-        OpId = $faultOpId; Index = $opIndex; Kind = "$($op.Kind)"; Reason = "$($_.Exception.Message)" })
+        OpId = "$($op.Id)"; Index = $opIndex; Kind = "$($op.Kind)"; Reason = "$($_.Exception.Message)" })
     }
   }
   if ($RequireIntegrity -and $schemaForOps -eq 3) {
@@ -3304,13 +3307,15 @@ function Assert-BackupDocument($Document, [bool]$RequireIntegrity) {
         $itemOpIds = @()
         try { $itemOpIds = @($item.OpIds | ForEach-Object { "$_" }) } catch { $itemOpIds = @() }
         foreach ($itemOpId in $itemOpIds) {
-          if (-not $itemOpId -or $faultedOpIds.ContainsKey($itemOpId)) { continue }
-          $faultedOpIds[$itemOpId] = $true
-          $owningOp = @($ops | Where-Object { "$($_.Id)" -eq $itemOpId } | Select-Object -First 1)
-          [void]$opFaults.Add([pscustomobject]@{
-            OpId = $itemOpId; Index = -1
-            Kind = $(if ($owningOp.Count) { "$($owningOp[0].Kind)" } else { '' })
-            Reason = "所属项目记录无效（$itemReason）" })
+          if (-not $itemOpId) { continue }
+          # 同样按下标登记：OpIds 里的字符串只是用来**定位**那条 op，不是 fault 的身份
+          for ($ownIndex = 0; $ownIndex -lt $ops.Count; $ownIndex++) {
+            if ("$($ops[$ownIndex].Id)" -ne $itemOpId -or $faultedIndexes.ContainsKey($ownIndex)) { continue }
+            $faultedIndexes[$ownIndex] = $true
+            [void]$opFaults.Add([pscustomobject]@{
+              OpId = $itemOpId; Index = $ownIndex; Kind = "$($ops[$ownIndex].Kind)"
+              Reason = "所属项目记录无效（$itemReason）" })
+          }
         }
       }
     }
@@ -4191,13 +4196,15 @@ function Get-ValidatedRestoreRecords([string]$File, [bool]$AllowEmpty) {
   }
 }
 
-# 这份备份里被 op 级校验拒绝的操作：opId → 原因。
+# 这份备份里被 op 级校验拒绝的操作：**文档 Ops 数组的下标** → 原因。
+# 用下标而不是 OpId 做键：Id 缺失/为空正是 op 被拒绝的原因之一，以 Id 为键会让这条
+# op 登记不进任何集合，从而原样进执行表（而且一句话都不报）。
 function Get-RestoreOpFaultMap($Record) {
   $map = @{}
   foreach ($fault in @($Record.OpFaults)) {
     if (-not $fault) { continue }
-    $faultId = "$($fault.OpId)"
-    if ($faultId) { $map[$faultId] = "$($fault.Reason)" }
+    $faultIndex = [int]$fault.Index
+    if ($faultIndex -ge 0) { $map[$faultIndex] = "$($fault.Reason)" }
   }
   $map
 }
@@ -4212,12 +4219,13 @@ function Get-FaultedRestoreOps($Records) {
     $faults = Get-RestoreOpFaultMap $record
     if ($faults.Count -eq 0) { continue }
     $items = @{}; foreach ($item in @($record.Document.Items)) { $items["$($item.ItemId)"] = $item }
-    foreach ($op in @($record.Document.Ops)) {
-      $opId = "$($op.Id)"
-      if (-not $faults.ContainsKey($opId)) { continue }
+    $recordOps = @($record.Document.Ops)
+    for ($faultOpIndex = 0; $faultOpIndex -lt $recordOps.Count; $faultOpIndex++) {
+      if (-not $faults.ContainsKey($faultOpIndex)) { continue }
+      $op = $recordOps[$faultOpIndex]
       [void]$list.Add([pscustomobject]@{
         BackupId = "$($record.Document.BackupId)"; BackupPath = "$($record.Path)"
-        Item = $items["$($op.ItemId)"]; Op = $op; Reason = $faults[$opId]
+        Item = $items["$($op.ItemId)"]; Op = $op; Reason = $faults[$faultOpIndex]
       })
     }
   }
@@ -4229,9 +4237,11 @@ function Get-ActiveV3RestoreOps($Records, $ConsumedSet) {
   foreach ($record in @($Records | Where-Object { [int]$_.Document.SchemaVersion -eq 3 })) {
     $items = @{}; foreach ($item in @($record.Document.Items)) { $items["$($item.ItemId)"] = $item }
     $faults = Get-RestoreOpFaultMap $record
-    foreach ($op in @($record.Document.Ops)) {
+    $recordOps = @($record.Document.Ops)
+    for ($activeOpIndex = 0; $activeOpIndex -lt $recordOps.Count; $activeOpIndex++) {
       # 校验没过的 op 一条都不许进执行表，理由和旧写法整份拒绝时完全一样
-      if ($faults.ContainsKey("$($op.Id)")) { continue }
+      if ($faults.ContainsKey($activeOpIndex)) { continue }
+      $op = $recordOps[$activeOpIndex]
       $key = ("$($record.Document.BackupId)|$($op.Id)".ToLowerInvariant())
       if ($ConsumedSet.ContainsKey($key)) { continue }
       [void]$list.Add([pscustomobject]@{
@@ -4460,6 +4470,17 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
     $consumed = Get-ConsumedRestoreOpSet
     if ($consumed.Blocked) { throw (Get-ConsumedRestoreBlockReason $consumed) }
     $active = @(Get-ActiveV3RestoreOps $state.Records $consumed.Set)
+    # 校验没过的 op 被 Get-ActiveV3RestoreOps 过滤掉了，所以这里的 $wrappers 只剩好 op——
+    # 半好半坏的项目会被判成「复原成功」并写进凭证，而它其实还有一条永远还不回去的改动。
+    # 目录早就把这种项目判成 CanRestore=$false，但入口只查静态白名单，界面的灰按钮拦不住
+    # CLI（以及任何拿着旧目录发请求的调用方），执行侧必须自己判一次。
+    $selectedFaults = @{}
+    foreach ($faultWrapper in @(Get-FaultedRestoreOps $state.Records)) {
+      $faultItemId = "$($faultWrapper.Op.ItemId)"
+      if (-not $faultItemId) { continue }
+      if (-not $selectedFaults.ContainsKey($faultItemId)) { $selectedFaults[$faultItemId] = @() }
+      $selectedFaults[$faultItemId] += "$(Get-RestoreOpLabel $faultWrapper.Op)：$($faultWrapper.Reason)"
+    }
     $itemResults = New-Object System.Collections.Generic.List[object]
     $successes = New-Object System.Collections.Generic.List[object]
     $failed = New-Object System.Collections.Generic.List[string]
@@ -4471,7 +4492,10 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
       $name = $(if ($meta.Count) { "$($meta[0].DisplayName)" } else { $itemId })
       if ($Progress) { & $Progress ([pscustomobject]@{ Stage='start';Index=$index;Total=$ItemIds.Count;Name=$name;Ok=$null }) }
       $ok = $false; $message = ''
-      if ($wrappers.Count -eq 0) { $message = '没有仍生效且可精确复原的记录' }
+      if ($selectedFaults.ContainsKey($itemId)) {
+        $message = "该项目有设置已停止支持自动还原，只能手动改回：$(@($selectedFaults[$itemId]) -join '；')"
+      }
+      elseif ($wrappers.Count -eq 0) { $message = '没有仍生效且可精确复原的记录' }
       elseif (@($wrappers | Where-Object { $_.Op.Kind -ne 'reg' }).Count -gt 0) { $message = '该项目包含当前版本尚未开放的底层设置，请使用全部复原' }
       else {
         $units = @(Get-SelectiveRestoreUnits $wrappers)
@@ -4579,14 +4603,27 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
   $consumedSet = $consumed.Set
   $activeV3 = @(Get-ActiveV3RestoreOps $state.Records $consumedSet)
   $activeV3Backups = @($activeV3 | ForEach-Object BackupId | Select-Object -Unique)
+  # fault 必须从**未过滤**的记录集里取。下面的 $records 会把「一条好 op 都不剩」的 v3
+  # 文档整份剔掉——而那正是全部 op 都被拒绝的那种文档，最该被说出来的一种。
+  $faultedOps = @(Get-FaultedRestoreOps $state.Records)
+  $faultedFailures = @($faultedOps | ForEach-Object {
+    $faultedName = $(if ($_.Item) { "$($_.Item.DisplayName)（$(Get-RestoreOpLabel $_.Op)）" } else { Get-RestoreOpLabel $_.Op })
+    "$faultedName：该改动的备份记录未通过校验，已拒绝还原（$($_.Reason)）"
+  })
   $records = @($state.Records | Where-Object {
     [int]$_.Document.SchemaVersion -eq 2 -or $activeV3Backups -contains "$($_.Document.BackupId)"
   })
   if ($records.Count -eq 0) {
     if ($File) {
+      # 「没有可还原的」和「有，但一条都还不回去」是两件事。后者绝不能说成「已完成还原」
       return [pscustomobject]@{ Mode='all'; File=$File; Files=@($File); MergedCount=1; RestoredOps=0
-        Failed=@(); Skipped=@(); Notes=@('指定备份此前已完成还原，本次无需重复执行'); BookkeepingFailed=@();
+        Failed=@($faultedFailures)
+        Skipped=@(); BookkeepingFailed=@()
+        Notes=@($(if ($faultedFailures.Count -gt 0) { '指定备份里的改动都没有通过校验，无法自动还原' } else { '指定备份此前已完成还原，本次无需重复执行' }))
         RestoredItemIds=@(); SkippedItemIds=@(); SkippedItems=@(); RebootItems=@(); RebootItemIds=@(); ApplyIds=@(); Receipt=$null }
+    }
+    if ($faultedFailures.Count -gt 0) {
+      throw "找到 $($faultedOps.Count) 条备份记录，但都没有通过校验，无法自动还原：$($faultedOps[0].Reason)"
     }
     throw "未找到尚未还原的备份$(if ($restoreNotes.Count -gt 0) { "（$($restoreNotes -join '；')）" })"
   }
@@ -4597,7 +4634,19 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
     $f = $record.Path; $b = $record.Document
     if ([int]$b.SchemaVersion -eq 3) {
       $cur = @($activeV3 | Where-Object { $_.BackupId -eq "$($b.BackupId)" } | ForEach-Object Op)
-    } else { $cur = @($b.Ops) }
+    } else {
+      # v2 也必须过 fault 过滤。Get-ActiveV3RestoreOps 只保护 v3，这条分支直接取文档里
+      # 的全部 op —— 校验没过的 op 会一路走到 switch 里真的写系统（reg/pcfg/bcd/mmagent
+      # 都会落地），同时还被报成「已拒绝还原」。fault 收集绝不能在任何一条执行路径上
+      # 变成旁路。
+      $recordFaults = Get-RestoreOpFaultMap $record
+      $allRecordOps = @($b.Ops)
+      $cur = @()
+      for ($v2Index = 0; $v2Index -lt $allRecordOps.Count; $v2Index++) {
+        if ($recordFaults.ContainsKey($v2Index)) { continue }
+        $cur += $allRecordOps[$v2Index]
+      }
+    }
     if ($cur.Count -gt 1) { [array]::Reverse($cur) }
     foreach ($o in $cur) { [void]$flat.Add($o) }
     # *.pending.json = 某次执行中途异常退出（断电/被杀/备份目录中途写失败）实时保留的备份：
@@ -4626,14 +4675,7 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
   $ops = @(Get-RestoreExecutionOps $ops)
   # 校验没过的 op 不会进执行表，但必须逐条出现在失败清单里——带人话项名和原因。
   # 「被拒绝」和「没人告诉你」是两件事，后者才是缺陷。
-  $faultedOps = @(Get-FaultedRestoreOps $records)
-  $faultedOpIds = @{}
-  $restored = 0; $failed = @(); $skippedOps = @(); $seq = 0; $total = $ops.Count
-  foreach ($faultedOp in $faultedOps) {
-    $faultedOpIds["$($faultedOp.Op.Id)"] = $true
-    $faultedName = $(if ($faultedOp.Item) { "$($faultedOp.Item.DisplayName)（$(Get-RestoreOpLabel $faultedOp.Op)）" } else { Get-RestoreOpLabel $faultedOp.Op })
-    $failed += "$faultedName：该改动的备份记录未通过校验，已拒绝还原（$($faultedOp.Reason)）"
-  }
+  $restored = 0; $failed = @($faultedFailures); $skippedOps = @(); $seq = 0; $total = $ops.Count
   # 记账跟着事实走，一条 op 一笔账（两个集合的作用域差别见 Test-RestoreOpAccounted）：
   #   $succeededKeys — 确认把原值写回去了（按目标键）
   #   $finalOpIds    — 执行了、没回到原样、而且重试也不可能回到原样（按 op 自己）
@@ -4644,8 +4686,19 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
   $finalOpIds = @{}
   # 锁定任务没删掉时，后面的电源方案还原是白写：任务每分钟把活动方案切回优化方案。
   # 执行顺序已经保证 sched 排在 power 前面（见 Get-RestoreExecutionOps），这里把
-  # 「顺序」升级成「前置条件」，让 power 分支能据此拒绝把自己算成已还原。
-  $lockTaskBlocked = ''
+  # 「顺序」升级成「前置条件」。
+  # 必须按**任务名**累计，不能用一个全局标志：换过安装目录的用户会有两条任务名不同的
+  # sched op（去重键是 sched|TaskName，两条都会执行），而 power 的去重键是常量 'power'、
+  # 永远只剩一条且排在所有 sched 之后。用全局标志时，后一条 sched 成功会把前一条失败
+  # 的标志清掉，于是活着的锁定任务被掩盖，power 照样入账并被消费——用户永久失去把
+  # 电源方案还原回去的能力。
+  # 「压根没执行」和「执行了但失败」一样算没删掉：被 op 级校验拒绝的 sched op 不进
+  # 执行表，锁定任务原封不动，同样要拦住 power。
+  $blockedLockTasks = [ordered]@{}
+  foreach ($faultedOp in $faultedOps) {
+    if ("$($faultedOp.Op.Kind)" -ne 'sched') { continue }
+    $blockedLockTasks["$($faultedOp.Op.TaskName)"] = '备份记录未通过校验，锁定任务没有被删除'
+  }
   foreach ($op in $ops) {
     $seq++
     if ($Progress) { & $Progress ([pscustomobject]@{ Stage = 'start'; Index = $seq; Total = $total; Name = (Get-RestoreOpLabel $op); Ok = $null }) }
@@ -4660,8 +4713,9 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
           # sched → power 的前置依赖：锁定任务每分钟把活动方案切回优化方案。它没删掉时
           # 写回原方案是白写——1 分钟后就被改回去，而用户已经看到「已还原」。
           # 旧实现只把这条依赖编码成执行顺序（先 sched 后 power），没编码成前置条件。
-          if ($lockTaskBlocked) {
-            $failed += "$(Get-RestoreOpLabel $op)：$lockTaskBlocked；刚写回的电源方案会在 1 分钟内被它改回优化方案，本项不计为已还原"
+          if ($blockedLockTasks.Count -gt 0) {
+            $blockedDetail = @($blockedLockTasks.Keys | ForEach-Object { "$_（$($blockedLockTasks[$_])）" }) -join '；'
+            $failed += "$(Get-RestoreOpLabel $op)：锁定任务未能删除 —— $blockedDetail；刚写回的电源方案会在 1 分钟内被它改回优化方案，本项不计为已还原"
           } elseif ($op.Old) {
             $powerRestore = Invoke-RestorePowerScheme "$($op.Old)"
             if ($powerRestore.Exact) { $restored++; $succeededKeys[$opKey] = $true }
@@ -4755,7 +4809,8 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
             }
           }
           $restored++; $succeededKeys[$opKey] = $true
-          $lockTaskBlocked = ''
+          # 只移除**这一条**任务自己的条目，绝不清空整个集合
+          if ($blockedLockTasks.Contains("$($op.TaskName)")) { $blockedLockTasks.Remove("$($op.TaskName)") }
         }
         'hib'     { Set-HibernateEnabled ([bool]$op.OldEnabled); $restored++; $succeededKeys[$opKey] = $true }
         'bcd'     {
@@ -4777,8 +4832,12 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
             $regState = Get-RegUnitRestoreState ([pscustomobject]@{ Restore = $op; Latest = $latestRegOp })
           }
           if ($regState -eq 'conflict') {
-            $skippedOps += "$(Get-RestoreOpLabel $op)：优化后这个设置又被改过，已保留当前值，没有写回原值"
-            $finalOpIds[$opId] = $true
+            # **绝不消费**：conflict 恰恰是唯一可重试的一类——用户把值改回去，这条就
+            # 又能还原了。按项目复原那条路径早就是这么做的（见 Invoke-RestoreSelected），
+            # SKILL.md 的契约表也是这么写的。进 $finalOpIds 等于把这份备份记录永久烧掉：
+            # 去重保留的恰好是唯一带着优化前真原值的那条，烧掉之后下一次还原只会拿
+            # 更晚备份里的中间值当原值写回系统，并宣布已回到优化前。
+            $skippedOps += "$(Get-RestoreOpLabel $op)：优化后这个设置又被改过，已保留当前值，没有写回原值；把它改回去之后可以再次还原"
           } elseif ($regState -eq 'already_restored') {
             # 系统里已经是原值了（多半是上次还原中断在记账前）：不用再写，把账平掉就行
             $restored++; $succeededKeys[$opKey] = $true
@@ -4804,7 +4863,7 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
       # 用户完全不知道哪项失败了——统一走 Get-RestoreOpLabel
       $opOk = $false; $failed += "$(Get-RestoreOpLabel $op)：$($_.Exception.Message)"
       if ("$($op.Kind)" -eq 'sched') {
-        $lockTaskBlocked = "锁定任务「$($op.TaskName)」未能删除（$($_.Exception.Message)）"
+        $blockedLockTasks["$($op.TaskName)"] = "$($_.Exception.Message)"
       }
     }
     if ($Progress) { & $Progress ([pscustomobject]@{ Stage = 'done'; Index = $seq; Total = $total; Name = (Get-RestoreOpLabel $op); Ok = $opOk }) }
@@ -4833,9 +4892,15 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
     # 校验没过的 op 算「已了结」：它永远不会被执行，扣着整份不归档换不来任何东西，
     # 却会让同一份里已经写回的旧值在下次还原时被重放一遍，覆盖用户此后的手动修改。
     # 原文件只是改名不是删除，理由已经逐条报给用户了。
-    $pending = @(@($record.Document.Ops) | Where-Object { $_ } |
-      Where-Object { -not $faultedOpIds.ContainsKey("$($_.Id)") } |
-      Where-Object { -not (Test-RestoreOpAccounted $_ $succeededKeys $finalOpIds) })
+    $recordFaultMap = Get-RestoreOpFaultMap $record
+    $recordAllOps = @($record.Document.Ops)
+    $pending = @()
+    for ($archiveIndex = 0; $archiveIndex -lt $recordAllOps.Count; $archiveIndex++) {
+      if ($recordFaultMap.ContainsKey($archiveIndex)) { continue }
+      if (-not (Test-RestoreOpAccounted $recordAllOps[$archiveIndex] $succeededKeys $finalOpIds)) {
+        $pending += $recordAllOps[$archiveIndex]
+      }
+    }
     if ($pending.Count -gt 0) { continue }
     $f = $record.Path
     try { Rename-Item -LiteralPath $f -NewName ((Split-Path -Leaf $f) + '.restored') -ErrorAction Stop }
