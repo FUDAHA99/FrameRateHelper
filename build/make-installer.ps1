@@ -124,7 +124,7 @@ $payloadFiles = @(
   # 本身失败时仍然可用，钉死哈希等于让它和主程序一起失效。
   '导出诊断信息.cmd', 'scripts\export-diagnostics.ps1',
   'scripts\delta-booster.ps1', 'scripts\diagnose.ps1', 'scripts\updater.ps1',
-  'scripts\telemetry-client.ps1', 'scripts\tuning-experiment.ps1', 'scripts\user-context-worker.ps1',
+  'scripts\tuning-experiment.ps1', 'scripts\user-context-worker.ps1',
   'gui\DeltaForceBooster-GUI.ps1', 'gui\app.ico',
   'tools\PresentMon.exe', 'tools\PresentMon-LICENSE.txt', 'tools\DeltaForce-Recommended.nip',
   'data\streamer-settings.json'

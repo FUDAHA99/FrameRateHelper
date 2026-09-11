@@ -137,7 +137,17 @@ Assert-True ($raw.Contains("Show-ConfirmDialog '重要提醒' 'POWER RECOVERY NO
   $raw.Contains('只执行过其中一项就只恢复对应项') -and
   $raw -match '(?s)\$window\.Add_ContentRendered\(\{\s*Show-PowerRecoveryVersionNotice\s*Initialize-LiveMetricsDashboard') `
   'the per-user power recovery notice is not forced once when the updated UI first renders'
-foreach ($functionName in 'Test-PowerRecoveryNoticeAcknowledged','Set-PowerRecoveryNoticeAcknowledged','Show-PowerRecoveryVersionNotice') {
+# Write-JsonStateAtomic 取代了原来来自 telemetry-client.ps1 的原子写；它调 Write-BytesAtomic，
+# 那个函数在引擎里，所以从引擎源码里一并取出来，而不是打桩 —— 打桩就测不到真的落盘了。
+$engineAst = [Management.Automation.Language.Parser]::ParseFile(
+  (Join-Path $root 'scripts\delta-booster.ps1'), [ref]$null, [ref]$null)
+$bytesAtomic = $engineAst.FindAll({
+  param($candidate)
+  $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and $candidate.Name -eq 'Write-BytesAtomic'
+}, $true) | Select-Object -First 1
+Assert-True ($null -ne $bytesAtomic) 'missing engine function under test: Write-BytesAtomic'
+. ([scriptblock]::Create($bytesAtomic.Extent.Text))
+foreach ($functionName in 'Write-JsonStateAtomic','Test-PowerRecoveryNoticeAcknowledged','Set-PowerRecoveryNoticeAcknowledged','Show-PowerRecoveryVersionNotice') {
   $node = $ast.FindAll({
     param($candidate)
     $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and $candidate.Name -eq $functionName
@@ -236,10 +246,15 @@ Assert-True ($raw.Contains("'GamePP'='gamepp'") -and
   'Game++-inspired runtime signals are missing from collection'
 Assert-True ($raw.Contains('[math]::Max($gpuDedicatedMb.Count,$gpuSharedMb.Count)')) `
   'partial GPU process-memory counters can still be mislabeled as zero samples'
-Assert-True ($raw.Contains("`$session.validity -eq 'valid'") -and
-  $raw.Contains("`$session.frameCount -lt 1000") -and $raw.Contains("`$session.focusLostSec -gt 5") -and
+# 本分支删掉了上报，这条断言改为守「有效性判定本身还在」：session.validity 仍按
+# 帧数与失焦时长打标，界面和调优的胜负判定都靠它，不能被简化掉。
+Assert-True ($raw.Contains("`$session.frameCount -lt 1000") -and $raw.Contains("`$session.focusLostSec -gt 5") -and
   -not $raw.Contains('if ($session.avgFps -le 0 -and $session.gpuUtilAvg -le 0)')) `
-  'ordinary performance capture can still upload a known-invalid frame sample'
+  'performance session validity grading was weakened'
+# 采样 worker 不得再有任何上报出口
+foreach ($gone in 'Send-DfbTelemetryEvent', '$InstallId', '$UploadUrl', '$TelemetryConfigPath') {
+  Assert-True (-not $raw.Contains($gone)) "performance capture worker regained an upload path: $gone"
+}
 
 function Find-GuiFunction([string]$Name) {
   $matches = @($ast.FindAll({

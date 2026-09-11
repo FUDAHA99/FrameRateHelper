@@ -63,19 +63,32 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build\make-installer.ps1
 > 注意：`-TestBuild` 会在仓库根留下带 `DFB_TESTING` 编译开关的启动器（认 `DFB_TEST_SKIP_ACL=1` 旁路）。
 > 验证完请重跑一次**不带** `-TestBuild` 的构建。
 
-### 2.1 匿名统计开关（提交 2796dc7）
+### 2.1 零后端（提交 804e114 / 40e3b15 / edf4117 / 本次）
 
-1. 装好后打开软件 → 「运行日志」页底部应有 **「发送匿名使用统计」** 复选框，**默认不勾选**
-2. 勾上 → 运行日志应出现「已开启匿名使用统计。」
-3. 关闭软件重开 → 勾选状态应保持
-4. 取消勾选 → 日志出现「已关闭匿名使用统计，本机不再上报任何数据。」
-5. **抓包验证**（关键）：未勾选状态下全程操作（检测、执行优化、还原），
-   应观察不到任何到 `upstream-host.invalid/report/telemetry` 的请求
-6. 把 `%ProgramData%\DeltaForceBooster\users\<SID>\config\ui-preferences.json`
-   删掉或改成非法 JSON → 重开软件，开关必须回到**未勾选**（fail-closed，不是重新开启）
+上游有四个网络出口：遥测上报、60 秒通知轮询、诊断上传、更新检查。
+前三个已经整条删除，第四个改指 GitHub Releases。**这一节是本次改造最该被真机验证的部分。**
 
-> ⚠️ **不要在真机上长时间开启第 5 步之外的上报**：域名仍是上游作者的 `upstream-host.invalid`，
-> 开启等于把数据发给上游。这是已知遗留项，换域名前不要发布。
+1. **抓包（最关键）**：装好后全程操作 —— 检测、执行优化、还原、导出诊断报告、
+   开关自动调优 —— 全程抓包。**除了 `github.com` 与 `*.githubusercontent.com`
+   之外不应有任何出站请求**；尤其不得出现 `upstream-host.invalid`
+2. 界面上「运行日志」页底部应是一句**说明文字**（本软件不收集、不上报任何使用数据…），
+   不再是复选框
+3. `%ProgramData%\DeltaForceBooster\users\<SID>\config\` 下：
+   - 不应再生成 `telemetry.json` 或 `tuning-telemetry-outbox.json`
+   - 执行一次优化后应出现 `optimization-context.json`，内容里**不得含**
+     `InstallId` / `DeviceToken` / `TokenExpiresAt` / `Enabled`
+4. 安装目录 `scripts\` 下不应有 `telemetry-client.ps1`
+5. **导出诊断报告**：点「导出完整诊断」→ 选问题/改善 → 确认。
+   报告应写到**桌面**（OneDrive 重定向过桌面的机器请重点看这条），
+   运行日志里应打印完整路径；文件用记事本打开中文不乱码
+6. **检查更新**：点「检查更新」。当前 GitHub 上还没有 release，
+   预期是静默无更新（不得报错、不得影响主界面）。
+   等真正发过一版后再回来验完整的下载 → 校验 → 安装链路
+
+> ⚠️ **GitHub 在国内可能连不上。** 如果检查更新长时间无响应，先确认是网络问题
+> 而不是代码问题 —— 用浏览器打开
+> `https://github.com/FUDAHA99/FrameRateHelper/releases/latest/download/update-manifest.json`
+> 对照。下载失败时界面必须退回「提示 + 跳下载页」，这是设计行为。
 
 ### 2.2 启动引导日志（提交 935950f）
 
@@ -136,6 +149,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build\make-installer.ps1
 - 「回退到上一个可用版本」按钮：**决定不做**。安装器已在「新版启动失败」时自动回滚
   （`setup-wizard.cs:263-277`），而回滚副本在切换成功后即被删除（`:2743`），
   做用户可点的回退需要改安装事务模型，风险收益比不划算。
-- 域名仍是 `upstream-host.invalid`（上游作者的服务器）。
+- 上游服务端依赖已全部移除：遥测、通知轮询、诊断上传删掉，更新源改为 GitHub Releases。
 - 第三方传感器栈与 PawnIO 内核驱动已移除；剩余第三方件只有 Intel MIT 的 PresentMon。
 - 产品改名未执行：代码里仍是 `DeltaForceBooster`。

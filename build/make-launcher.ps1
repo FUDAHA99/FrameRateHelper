@@ -103,7 +103,6 @@ $hashFiles = @(
   'scripts\delta-booster.ps1',
   'scripts\diagnose.ps1',
   'scripts\updater.ps1',
-  'scripts\telemetry-client.ps1',
   'scripts\tuning-experiment.ps1',
   'scripts\user-context-worker.ps1',
   'tools\PresentMon.exe'

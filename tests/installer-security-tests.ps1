@@ -378,7 +378,7 @@ try {
   $expectedPayload = @(
     'DISCLAIMER.md','LICENSE','NOTICE.md','README.md','SKILL.md','install.identity',
     'data\streamer-settings.json','EngineHost.exe','UninstallHost.exe','gui\app.ico','gui\DeltaForceBooster-GUI.ps1',
-    'scripts\delta-booster.ps1','scripts\diagnose.ps1','scripts\export-diagnostics.ps1','scripts\telemetry-client.ps1','scripts\tuning-experiment.ps1','scripts\updater.ps1','scripts\user-context-worker.ps1',
+    'scripts\delta-booster.ps1','scripts\diagnose.ps1','scripts\export-diagnostics.ps1','scripts\tuning-experiment.ps1','scripts\updater.ps1','scripts\user-context-worker.ps1',
     'tools\DeltaForce-Recommended.nip','tools\PresentMon-LICENSE.txt','tools\PresentMon.exe',
     '启动优化工具.bat','启动优化工具.exe','导出诊断信息.cmd','卸载.bat','卸载.exe','uninstall.ps1'
   ) | Sort-Object

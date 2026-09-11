@@ -547,9 +547,6 @@ function Get-NvAutoOptStatus {
   try { (Invoke-EngineHostUserAction -Action GetNvAutoOptStatus) | ConvertFrom-Json -ErrorAction Stop }
   catch { @{ Ok = $null; Text = "NVIDIA App 自动优化检测失败：$($_.Exception.Message)" } }
 }
-$script:TelemetryClientPath = Join-Path $script:RootDir 'scripts\telemetry-client.ps1'
-if (Test-Path -LiteralPath $script:TelemetryClientPath) { . $script:TelemetryClientPath }
-
 # 旧状态只由原交互用户的 medium broker 读取。broker 返回严格白名单、定长、带
 # SHA256 的 JSON 包；high GUI 复验后仅向上面的受保护区 CreateNew，绝不覆盖新版状态。
 function Import-ProtectedLegacyState([string]$PackageJson) {
@@ -564,9 +561,8 @@ function Import-ProtectedLegacyState([string]$PackageJson) {
     Assert-ExactProperties $entry @('RelativePath','Length','Sha256','ContentBase64') @() '旧状态迁移项'
     $relative = "$($entry.RelativePath)".Replace('/','\')
     $allowed = $relative -in @(
-      'config\telemetry.json','config\disclaimer.json','config\updater.json',
-      'config\performance-sessions.json','config\power-scheme.json',
-      'config\tuning-telemetry-outbox.json'
+      'config\disclaimer.json','config\updater.json',
+      'config\performance-sessions.json','config\power-scheme.json'
     ) -or $relative -match '^config\\experiments\\(?:active-experiment|exp_[0-9a-f]{32})\.json$' -or
       $relative -match '^profiles\\[^\\/:*?"<>|]{1,80}\.json$'
     if (-not $allowed -or "$($entry.Sha256)" -notmatch '^[0-9a-fA-F]{64}$') {
@@ -1522,14 +1518,10 @@ $xaml = @'
           <TextBlock Text="关闭软件后仍保留最近运行日志；重新打开可直接复制或导出" Style="{StaticResource Mono}"
                      Margin="12,0,0,0"/>
         </StackPanel>
-        <!-- 统计设置。免责声明里承诺了「可在软件的统计设置中关闭」，上游却没有这个界面，
-             Enabled 字段也只被写成 $true 过 —— 这里把承诺补成真的。默认关闭，
-             Test-TelemetryOptIn 在读不到或读坏配置时一律返回 $false。 -->
-        <CheckBox x:Name="TelemetryChk" Style="{StaticResource TacCheck}" Margin="0,11,0,0">
-          <TextBlock Text="发送匿名使用统计" Foreground="{DynamicResource TextPri}"/>
-        </CheckBox>
-        <TextBlock x:Name="TelemetryHint" Style="{StaticResource Mono}" Margin="19,1,0,0" TextWrapping="Wrap"
-                   Text="默认关闭。勾选后才会上报版本、硬件概况与优化项结果；不含路径、账号名与注册表内容。"/>
+        <!-- 上游有一套匿名统计上报。本分支把它整个删了，所以这里不再是开关，
+             而是一句可以被代码验证的事实陈述。措辞必须精确：更新检查确实会联网。 -->
+        <TextBlock Style="{StaticResource Mono}" Margin="0,11,0,0" TextWrapping="Wrap"
+                   Text="本软件不收集、不上报任何使用数据。唯一的联网行为是检查更新（GitHub），由你手动或定时触发；诊断报告只写到本机桌面。"/>
       </StackPanel>
     </Grid>
 
@@ -1827,7 +1819,7 @@ foreach ($n in 'TitleBar','MinBtn','CloseBtn','UpdateBtn','ThemeBtn','ScanState'
                'InlineRestorePanel','InlineRestoreItemsPanel','InlineRestoreEmptyText',
                'InlineRestoreLegacyNotice','InlineRestoreLegacyText','InlineRestoreSelectedText','InlineRestoreAllSummary',
                'InlineRestoreSelectAllBtn','InlineRestoreClearBtn','InlineRestoreSelectedBtn','InlineRestoreAllBtn','InlineRestoreCloseBtn',
-               'ReportBtn','DisclaimerBtn','LogBox','TelemetryChk','TelemetryHint',
+               'ReportBtn','DisclaimerBtn','LogBox',
                'PresetBox','SavePresetBtn','DelPresetBtn','PresetNote',
                'TabOptBtn','TabTuneBtn','TabFrameFixBtn','TabRefBtn','TabLogBtn','LogBadge','LogBadgeTxt',
                'OptPage','TunePage','FrameFixPage','RefPage','LogPage','RefPanel','ActionRow',
@@ -1936,19 +1928,6 @@ function Get-SavedAppWindowHeight {
   [double]$script:DefaultAppWindowHeight
 }
 
-# 匿名统计的唯一真相来源。默认关闭：读不到配置、字段缺失、JSON 损坏、类型不对
-# 一律返回 $false（fail-closed）。上游把开关存在 telemetry.json 里，那个文件位于
-# Admin/SYSTEM-only 目录且被多个后台 runspace 抢写，不适合承载用户开关。
-function Test-TelemetryOptIn {
-  try {
-    $value = Get-SavedUiPreferences
-    if ($value -and $value.PSObject.Properties['telemetryEnabled'] -and $value.telemetryEnabled -is [bool]) {
-      return [bool]$value.telemetryEnabled
-    }
-  } catch {}
-  $false
-}
-
 function Get-PersistableAppWindowHeight {
   $height = $(if ($window.WindowState -eq [Windows.WindowState]::Normal) { [double]$window.Height } else { [double]$window.RestoreBounds.Height })
   if ([double]::IsNaN($height) -or [double]::IsInfinity($height) -or $height -lt 640) {
@@ -1963,20 +1942,16 @@ function Set-SavedAppWindowHeight {
   $window.Height = [math]::Min($maximum,[math]::Max(640.0,(Get-SavedAppWindowHeight)))
 }
 
-function Save-AppUiPreferences([string]$Theme, [double]$WindowHeight, $TelemetryEnabled = $null) {
+function Save-AppUiPreferences([string]$Theme, [double]$WindowHeight) {
   if (-not $script:LightThemeEnabled) { $Theme = 'dark' }
   if ($Theme -notin 'dark','light') { $Theme = 'dark' }
   if ([double]::IsNaN($WindowHeight) -or [double]::IsInfinity($WindowHeight) -or $WindowHeight -lt 640) {
     $WindowHeight = [double]$script:DefaultAppWindowHeight
   }
-  # 默认值必须是「读回当前磁盘值」而不是 $false/$true：Save-AppTheme 与关窗保存
-  # 都只传两个参数，写死任一常量都会在用户没操作开关时把它悄悄改掉。
-  if ($null -eq $TelemetryEnabled) { $TelemetryEnabled = (Test-TelemetryOptIn) }
   $payload = [pscustomobject][ordered]@{
     schemaVersion=1
     theme=$Theme
     windowHeight=[math]::Round($WindowHeight,0)
-    telemetryEnabled=[bool]$TelemetryEnabled
   }
   $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($payload | ConvertTo-Json -Compress))
   Write-BytesAtomic $script:UiPreferencesPath $bytes
@@ -3755,42 +3730,33 @@ function Show-DisclaimerDialog([switch]$ReadOnly) {
   $ok
 }
 
-# ---------- 匿名使用统计（同意声明后异步发送，不阻塞主界面） ----------
+# ---------- 本机优化上下文（纯本地，无任何上报） ----------
+#
+# 本分支删掉了全部遥测上报。这一节留下来的东西只服务两个本地用途：
+#   1. 诊断报告要写清楚「这台机器现在被工具管成什么样了」；
+#   2. 界面要知道当前处于 baseline / light / balanced / full 哪一档。
+# 函数名里的 Telemetry 是上游留下的历史包袱，产品改名那一步再统一清理。
+#
+# 状态文件从 telemetry.json 改名为 optimization-context.json —— 一个不上报任何
+# 东西的程序，磁盘上不该留着一个叫 telemetry 的文件让用户自己去猜。
+# 旧文件不做迁移：这份上下文每次启动都会由 Update-TelemetryOptimizationContextFromCatalog
+# 从受保护还原目录重新回推，丢了会自愈。
+# 同时删掉了 Enabled / InstallId / DeviceToken / TokenExpiresAt 四个字段：
+# 没有上报，就不需要匿名安装标识，也不该在磁盘上留一个稳定追踪 ID。
 
-$script:TelemetryUploadUrl = 'https://upstream-host.invalid/report/telemetry'
-$script:TelemetryJobs = New-Object System.Collections.ArrayList
+$script:OptimizationContextFileName = 'optimization-context.json'
 $script:LatestRestoreCatalog = $null
 $script:TelemetryGpuPanelCache = @{}
 $script:TelemetryStorageCache = @{}
 $script:TelemetryDeviceSecurityCache = $null
 
-function Get-TelemetryInstallId {
-  # 全部自动上报的总闸门。installId 是三条上传链路的唯一凭据，调用方
-  # （gui Send-AnonymousTelemetry / 性能采样 worker / 调优事件生成器）都已写好
-  # $null 分支，因此在这里断掉即可，不需要逐个删除上报代码。
-  # 闸门必须在 try 之外：放进 try 里，异常仍会掉到下面的重建分支重新开启上报。
-  if (-not (Test-TelemetryOptIn)) { return $null }
-  $dir = $script:UserConfigDir
-  if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-  $path = Join-Path $dir 'telemetry.json'
-  try {
-    if (Test-Path -LiteralPath $path) {
-      $cfg = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-      # 正向判断：原先写 -eq $false，JSON 损坏或字段缺失时会落到重建分支写 Enabled=$true
-      if ($cfg.Enabled -ne $true) { return $null }
-      if ("$($cfg.InstallId)" -match '^[0-9a-fA-F-]{32,64}$') { return "$($cfg.InstallId)" }
-    }
-  } catch {}
-  $id = [guid]::NewGuid().ToString()
-  $cfg = [ordered]@{
-    Enabled = $true; InstallId = $id; CreatedAt = (Get-Date).ToUniversalTime().ToString('o')
-    ConfigTier = 'baseline'; OptimizationScheme = 'baseline'; OptimizationItemIds = @()
-    OptimizationItemSetHash = ''; OptimizationItemsComplete = $true
-    DeviceToken = ''; TokenExpiresAt = 0
-  }
-  if (Get-Command Write-DfbTelemetryConfigAtomic -ErrorAction SilentlyContinue) { Write-DfbTelemetryConfigAtomic $path $cfg }
-  else { [IO.File]::WriteAllText($path, ($cfg | ConvertTo-Json), (New-Object Text.UTF8Encoding($true))) }
-  $id
+function Write-JsonStateAtomic([string]$Path, $Value) {
+  # 注意：Encoding.GetBytes() 不会带出 BOM（那是 GetPreamble/StreamWriter 的活）。
+  # 上游那份原子写就是这么写的，于是这些状态文件一直没有 BOM。内容目前全是 ASCII
+  # 所以没出事，但哪天塞进一个中文字段，PS 5.1 就会按 GBK 读回来。显式拼上前导码。
+  $encoding = New-Object Text.UTF8Encoding($true)
+  $bytes = $encoding.GetPreamble() + $encoding.GetBytes(($Value | ConvertTo-Json -Depth 6))
+  Write-BytesAtomic $Path $bytes
 }
 
 # 普通性能会话记录当前由工具管理的公开项目 ID 与匿名方案类别；自存方案只记为 custom，
@@ -3816,7 +3782,7 @@ function Get-TelemetryOptimizationContext {
     ConfigTier = 'baseline'; Scheme = 'baseline'; ItemIds = @(); ItemSetHash = ''; ItemsComplete = $true
   }
   try {
-    $path = Join-Path $script:UserConfigDir 'telemetry.json'
+    $path = Join-Path $script:UserConfigDir $script:OptimizationContextFileName
     if (-not (Test-Path -LiteralPath $path)) { return [pscustomobject]$result }
     $cfg = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
     $tier = "$($cfg.ConfigTier)".ToLowerInvariant()
@@ -3857,28 +3823,18 @@ function Set-TelemetryOptimizationContext {
   )
   $mutex = $null; $locked = $false
   try {
-    $mutex = New-Object Threading.Mutex($false, 'Local\DeltaForceBooster.Telemetry.Config')
+    # 互斥锁保留：优化执行、还原、启动回推都可能同时写这份上下文。
+    $mutex = New-Object Threading.Mutex($false, 'Local\DeltaForceBooster.OptimizationContext')
     $locked = $mutex.WaitOne([TimeSpan]::FromSeconds(10))
     if (-not $locked) { return }
     $dir = $script:UserConfigDir
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    $path = Join-Path $dir 'telemetry.json'
-    # 上游在这里无条件铸造一个匿名标识并把 Enabled 默认成 $true，于是用户第一次点
-    # 「执行优化」就会在磁盘上留下稳定追踪 ID —— 即便总闸门已关。改为以用户开关为准，
-    # 关闭时不生成任何标识。
-    $enabled = (Test-TelemetryOptIn)
-    $installId = $(if ($enabled) { [guid]::NewGuid().ToString() } else { '' })
+    $path = Join-Path $dir $script:OptimizationContextFileName
     $createdAt = (Get-Date).ToUniversalTime().ToString('o')
     $currentTier = 'baseline'
-    $deviceToken = ''
-    $tokenExpiresAt = 0L
     if (Test-Path -LiteralPath $path) {
       $cfg = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-      # 不再从文件回读 Enabled：ui-preferences.json 的开关是唯一真相来源。
-      if ($enabled -and "$($cfg.InstallId)" -match '^[0-9a-fA-F-]{32,64}$') { $installId = "$($cfg.InstallId)" }
       if ("$($cfg.CreatedAt)") { $createdAt = "$($cfg.CreatedAt)" }
-      if ("$($cfg.DeviceToken)" -match '^v1\.') { $deviceToken = "$($cfg.DeviceToken)" }
-      try { $tokenExpiresAt = [long]$cfg.TokenExpiresAt } catch {}
       if ("$($cfg.ConfigTier)".ToLowerInvariant() -in 'baseline','light','balanced','full') {
         $currentTier = "$($cfg.ConfigTier)".ToLowerInvariant()
       }
@@ -3892,14 +3848,12 @@ function Set-TelemetryOptimizationContext {
     if ($ItemsComplete -and $ids.Count -eq 0) { $Scheme = 'baseline' }
     elseif (-not $ItemsComplete -and $ids.Count -eq 0 -and $Scheme -eq 'baseline') { $Scheme = 'legacy-unknown' }
     $out = [ordered]@{
-      Enabled = $enabled; InstallId = $installId; CreatedAt = $createdAt; ConfigTier = $tier
+      CreatedAt = $createdAt; ConfigTier = $tier
       OptimizationScheme = $Scheme; OptimizationItemIds = @($ids)
       OptimizationItemSetHash = Get-TelemetryOptimizationItemSetHash $ids
       OptimizationItemsComplete = [bool]$ItemsComplete
-      DeviceToken = $deviceToken; TokenExpiresAt = $tokenExpiresAt
     }
-    if (Get-Command Write-DfbTelemetryConfigAtomic -ErrorAction SilentlyContinue) { Write-DfbTelemetryConfigAtomic $path $out }
-    else { [IO.File]::WriteAllText($path, ($out | ConvertTo-Json), (New-Object Text.UTF8Encoding($true))) }
+    Write-JsonStateAtomic $path $out
   } catch {} finally {
     if ($locked) { try { $mutex.ReleaseMutex() } catch {} }
     if ($mutex) { $mutex.Dispose() }
@@ -3911,15 +3865,6 @@ function Get-SelectedTelemetryConfigTier([int]$SelectedCount) {
   if ($SelectedCount -ge 10) { return 'balanced' }
   if ($SelectedCount -ge 1) { return 'light' }
   'baseline'
-}
-
-function Clear-CompletedTelemetryJobs {
-  foreach ($job in @($script:TelemetryJobs)) {
-    if (-not $job.Async.IsCompleted) { continue }
-    try { $job.PowerShell.EndInvoke($job.Async) | Out-Null } catch {}
-    try { $job.PowerShell.Dispose() } catch {}
-    $script:TelemetryJobs.Remove($job) | Out-Null
-  }
 }
 
 function Get-TelemetryMainGpuDriver($Hw) {
@@ -4185,85 +4130,6 @@ function Get-TelemetryAnalysisContext($Hw, [string]$GamePath = $script:TargetExe
   }
 }
 
-function ConvertTo-OptimizationTelemetryIds([object[]]$Values, [switch]$OperationIds) {
-  $pattern = $(if ($OperationIds) { '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' } else { '^[a-z0-9][a-z0-9-]{0,63}$' })
-  @($Values | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ -match $pattern } | Sort-Object -Unique)
-}
-
-function New-OptimizationTelemetryOperation {
-  param(
-    [Parameter(Mandatory)][ValidateSet('apply','restore')][string]$Event,
-    [Parameter(Mandatory)][ValidateSet('manual_selection','frame_fix','restore_manager')][string]$Source,
-    [Parameter(Mandatory)]$Reply,
-    [string[]]$ItemIds = @(),
-    [ValidateSet('not_applicable','selected_items','all')][string]$RestoreMode = 'not_applicable'
-  )
-  $itemIds = @(ConvertTo-OptimizationTelemetryIds $ItemIds)
-  $succeeded = @(); $failed = @(); $skipped = @(); $attention = @(); $changed = @(); $reboot = @()
-  $succeededUnits = 0; $failedUnits = 0; $skippedUnits = 0
-  $backupStatus = 'not_required'; $verificationStatus = 'not_applicable'; $residualCount = 0
-  $related = @(ConvertTo-OptimizationTelemetryIds @($Reply.ApplyIds) -OperationIds)
-  if ($Event -eq 'apply') {
-    if ($Source -eq 'restore_manager' -or $RestoreMode -ne 'not_applicable') { throw '优化操作来源或还原模式无效' }
-    foreach ($row in @($Reply.Results)) {
-      $id = @(ConvertTo-OptimizationTelemetryIds @($row.Id)) | Select-Object -First 1
-      if (-not $id) { continue }
-      if ($itemIds -notcontains $id) { $itemIds += $id; $itemIds = @($itemIds | Sort-Object -Unique) }
-      if ([bool]$row.Attention) { $attention += $id }
-      elseif ([bool]$row.Skipped) { $skipped += $id }
-      elseif (-not [bool]$row.Ok) { $failed += $id }
-      else {
-        $succeeded += $id
-        if ([bool]$row.Changed) { $changed += $id }
-      }
-    }
-    $succeeded = @($succeeded | Sort-Object -Unique); $failed = @($failed | Sort-Object -Unique)
-    $skipped = @($skipped | Sort-Object -Unique); $attention = @($attention | Sort-Object -Unique)
-    $changed = @($changed | Sort-Object -Unique)
-    $succeededUnits = $succeeded.Count; $failedUnits = $failed.Count; $skippedUnits = $skipped.Count
-    if ($changed.Count -gt 0) {
-      if ($Reply.BackupError) { $backupStatus = $(if ($Reply.Backup) { 'partial' } else { 'failed' }) }
-      elseif ($Reply.Backup) { $backupStatus = 'created' }
-      else { $backupStatus = 'not_available' }
-    }
-  } else {
-    if ($Source -ne 'restore_manager' -or $RestoreMode -eq 'not_applicable') { throw '还原操作来源或还原模式无效' }
-    if ($RestoreMode -eq 'selected_items') {
-      foreach ($row in @($Reply.ItemResults)) {
-        $id = @(ConvertTo-OptimizationTelemetryIds @($row.Id)) | Select-Object -First 1
-        if (-not $id) { continue }
-        if ([bool]$row.Ok) { $succeeded += $id; $changed += $id } else { $failed += $id }
-      }
-    } elseif (@($Reply.Failed).Count -eq 0) {
-      $succeeded = @(ConvertTo-OptimizationTelemetryIds @($Reply.RestoredItemIds))
-      $changed = @($succeeded)
-    }
-    $reboot = @(ConvertTo-OptimizationTelemetryIds @($Reply.RebootItemIds))
-    $succeeded = @($succeeded | Sort-Object -Unique); $changed = @($changed | Sort-Object -Unique)
-    $failed = @($failed | Sort-Object -Unique)
-    $succeededUnits = [math]::Max(0, [int]$Reply.RestoredOps)
-    $failedUnits = @($Reply.Failed).Count; $skippedUnits = @($Reply.Skipped).Count
-    $residualCount = $failedUnits + $skippedUnits
-    $verificationStatus = $(if ($failedUnits -gt 0) { 'failed' } elseif ($residualCount -gt 0) { 'residuals_detected' } elseif ($reboot.Count -gt 0) { 'pending_restart' } else { 'immediate_verified' })
-  }
-  $result = $(if ($succeededUnits -gt 0 -and ($failedUnits -gt 0 -or $skippedUnits -gt 0 -or $backupStatus -in 'partial','failed')) { 'partial' }
-    elseif ($succeededUnits -gt 0) { 'succeeded' }
-    elseif ($failedUnits -gt 0 -or $backupStatus -eq 'failed') { 'failed' }
-    else { 'noop' })
-  $operationId = "$($Reply.ApplyId)".Trim().ToLowerInvariant()
-  if ($Event -eq 'restore' -or $operationId -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') {
-    $operationId = [guid]::NewGuid().ToString('D').ToLowerInvariant()
-  }
-  [pscustomobject][ordered]@{
-    schemaVersion=1;operationId=$operationId;source=$Source;result=$result;itemIds=@($itemIds)
-    changedItemIds=@($changed);succeededItemIds=@($succeeded);failedItemIds=@($failed)
-    skippedItemIds=@($skipped);attentionItemIds=@($attention);rebootItemIds=@($reboot)
-    relatedOperationIds=@($related);succeededUnitCount=[int]$succeededUnits;failedUnitCount=[int]$failedUnits
-    skippedUnitCount=[int]$skippedUnits;backupStatus=$backupStatus;restoreMode=$RestoreMode
-    verificationStatus=$verificationStatus;residualCount=[int]$residualCount
-  }
-}
-
 function Update-TelemetryOptimizationContextFromCatalog {
   param(
     [Parameter(Mandatory)]$Catalog,
@@ -4306,61 +4172,6 @@ function Update-TelemetryOptimizationContextFromCatalog {
     $scheme = "$($before.Scheme)"
   } else { $scheme = 'mixed' }
   Set-TelemetryOptimizationContext -ItemIds $ids -Scheme $scheme -ItemsComplete $complete -FallbackTier "$($before.ConfigTier)"
-}
-
-function Send-AnonymousTelemetry([string]$Event, $Hw, [int]$Ok = 0, [int]$Failed = 0, $Operation = $null) {
-  try {
-    if (-not $Hw -or $Event -notin 'launch','apply','restore') { return }
-    $installId = Get-TelemetryInstallId
-    if (-not $installId) { return }
-    Clear-CompletedTelemetryJobs
-    $payload = [ordered]@{
-      installId = $installId
-      event      = $Event
-      version    = $script:GuiVersion
-      os         = "$($Hw.OS)"
-      build      = "$($Hw.Build)"
-      cpu        = "$($Hw.CPU)"
-      gpuVendor  = "$($Hw.MainGpuVendor)"
-      gpuModel   = "$($Hw.MainGpuName)"
-      gpuModelVerified = [bool]$Hw.MainGpuNameVerified
-      driverVersion = Get-TelemetryMainGpuDriver $Hw
-      gpuCount   = [math]::Min(16, @($Hw.Gpus).Count)
-      displayMode = Get-TelemetryDisplayMode $Hw
-      ramGb      = [double]$Hw.RamGB
-      deviceType = $(if ("$($Hw.FormFactor)" -in 'desktop','laptop','unknown') { "$($Hw.FormFactor)" }
-        elseif ($Hw.IsLaptop) { 'laptop' } else { 'unknown' })
-      cpuCores   = [math]::Max(0, [int]$Hw.Cores)
-      cpuThreads = [math]::Max(0, [int]$Hw.Threads)
-      cpuPackages = [math]::Max(0, [int]$Hw.CpuPackages)
-      memoryType = "$($Hw.MemoryType)"
-      memoryConfiguredMhz = [math]::Max(0, [int]$Hw.MemoryConfiguredMHz)
-      memoryRatedMhz = [math]::Max(0, [int]$Hw.MemoryRatedMHz)
-      memoryModuleCount = [math]::Max(0, [int]$Hw.MemoryModuleCount)
-      virtualDisplayCount = [math]::Min(16, [math]::Max(0, [int]$Hw.VirtualDisplayCount))
-      pagefileAutoManaged = [bool]$Hw.AutomaticManagedPagefile
-      gpuReportedModelDiffers = [bool]("$($Hw.MainGpuReportedName)" -ne "$($Hw.MainGpuName)")
-      ok         = [math]::Max(0, $Ok)
-      failed     = [math]::Max(0, $Failed)
-    }
-    $analysisContext = Get-TelemetryAnalysisContext $Hw $script:TargetExe
-    if ($analysisContext) { $payload.analysisContext = $analysisContext }
-    if ($Operation) { $payload.operation = $Operation }
-    if (-not (Get-Command Send-DfbTelemetryEvent -ErrorAction SilentlyContinue)) { return }
-    $body = $payload | ConvertTo-Json -Compress -Depth 6
-    $configPath = Join-Path $script:UserConfigDir 'telemetry.json'
-    $ps = [PowerShell]::Create()
-    [void]$ps.AddScript({
-      param($ModulePath, $Url, $Body, $ConfigPath)
-      try {
-        . $ModulePath
-        $payload = $Body | ConvertFrom-Json
-        Send-DfbTelemetryEvent -UploadUrl $Url -Payload $payload -ConfigPath $ConfigPath | Out-Null
-      } catch {}
-    }).AddArgument($script:TelemetryClientPath).AddArgument($script:TelemetryUploadUrl).AddArgument($body).AddArgument($configPath)
-    $async = $ps.BeginInvoke()
-    [void]$script:TelemetryJobs.Add([pscustomobject]@{ PowerShell = $ps; Async = $async })
-  } catch {}
 }
 
 # ---------- 游戏性能记录（一次会话只采样一段，不常驻逐帧记录） ----------
@@ -4703,9 +4514,8 @@ function Show-PerformanceMetricHistory([string]$Key) {
 }
 
 $script:PerformanceCaptureWorker = {
-  param($GamePid, $PresentMon, $SessionFile, $TelemetryModule, $TelemetryConfigPath,
-        $UploadUrl, $InstallId, $Version,
-        $GpuVendor, $GpuModel, $GpuVerified, $GpuPciLocation, $NvidiaSmi,
+  param($GamePid, $PresentMon, $SessionFile,
+        $GpuVendor, $GpuModel, $GpuPciLocation, $NvidiaSmi,
         $ConfigTier, $OptimizationScheme, $OptimizationItemSetHash, $OptimizationItemIdsCsv,
         $OptimizationItemsComplete, $WarmupSeconds, $SampleSeconds, $CaptureMode,
         $AnalysisContextJson, $PresentMonVersion)
@@ -5234,30 +5044,6 @@ public static class DfbForegroundWindow {
     if ($sessionLocked) { try { $sessionMutex.ReleaseMutex() } catch {} }
     if ($sessionMutex) { $sessionMutex.Dispose() }
   }
-
-  if ($InstallId -and $GpuVerified -and $session.validity -eq 'valid') {
-    try {
-      $payload = [ordered]@{
-        installId = $InstallId; event = 'performance'; version = $Version
-        gpuVendor = $GpuVendor; gpuModel = $GpuModel; gpuModelVerified = [bool]$GpuVerified
-        configTier = $ConfigTier; optimizationScheme = $OptimizationScheme
-        optimizationItemSetHash = $OptimizationItemSetHash; optimizationItemIds = @($OptimizationItemIds)
-        optimizationItemsComplete = [bool]$OptimizationItemsComplete
-        durationSec = $session.durationSec; avgFps = $session.avgFps; fps1Low = $session.fps1Low
-        frameCount = $session.frameCount; p99FrameMs = $session.p99FrameMs
-        frameTimeMadMs = $session.frameTimeMadMs; stutter50Ms = $session.stutter50Ms
-        stutter100Ms = $session.stutter100Ms; stuttersPerMin = $session.stuttersPerMin
-        focusLostSec = $session.focusLostSec
-        gpuUtilAvg = $session.gpuUtilAvg; gpuUtilMax = $session.gpuUtilMax
-        gpuTempAvg = $session.gpuTempAvg; gpuTempMax = $session.gpuTempMax
-        gpuPowerAvg = $session.gpuPowerAvg; gpuPowerMax = $session.gpuPowerMax
-        performanceContext = $session.performanceContext
-      }
-      if ($session.analysisContext) { $payload.analysisContext = $session.analysisContext }
-      . $TelemetryModule
-      Send-DfbTelemetryEvent -UploadUrl $UploadUrl -Payload ([pscustomobject]$payload) -ConfigPath $TelemetryConfigPath | Out-Null
-    } catch {}
-  }
   Write-Output $session
 }
 
@@ -5270,9 +5056,7 @@ function Add-PerformanceWorkerArguments($PowerShell, [int]$GamePid, $Hw, [string
   $presentMonVersion = ''
   try { $presentMonVersion = "$((Get-Item -LiteralPath $presentMon -Force).VersionInfo.FileVersion)".Trim() } catch {}
   foreach ($arg in @($GamePid, $presentMon, (Join-Path $script:UserConfigDir 'performance-sessions.json'),
-                      $script:TelemetryClientPath, (Join-Path $script:UserConfigDir 'telemetry.json'),
-                      $script:TelemetryUploadUrl, (Get-TelemetryInstallId), $script:GuiVersion,
-                      "$($Hw.MainGpuVendor)", "$($Hw.MainGpuName)", [bool]$Hw.MainGpuNameVerified,
+                      "$($Hw.MainGpuVendor)", "$($Hw.MainGpuName)",
                       "$($Hw.MainGpuPciLocation)", "$nvidiaSmi", "$($optimization.ConfigTier)",
                       "$($optimization.Scheme)", "$($optimization.ItemSetHash)", (@($optimization.ItemIds) -join ','),
                       [bool]$optimization.ItemsComplete,
@@ -5386,46 +5170,6 @@ function Assert-TuningGuiState($State) {
     foreach ($rid in @($candidate.controlRunIds) + @($candidate.candidateRunIds)) {
       if ("$rid" -notmatch '^run_[0-9a-f]{32}$' -or -not @($State.runs | Where-Object runId -eq "$rid").Count) {
         throw '候选组运行引用无效'
-      }
-    }
-  }
-  if($State.pendingTuningCommit -and $State.pendingTuningCommit.payload){
-    if(-not (Get-Command Get-DfbTuningPayloadInfo -ErrorAction SilentlyContinue)){throw '缺少待提交遥测严格校验器'}
-    $pending=$State.pendingTuningCommit;$info=Get-DfbTuningPayloadInfo $pending.payload
-    if("$($info.ExperimentId)" -ne "$($State.experimentId)" -or "$($info.TuningType)" -ne "$($pending.telemetryType)"){
-      throw '待提交遥测归属无效'
-    }
-    if("$($pending.kind)" -eq 'run'){
-      $run=@($State.runs|Where-Object runId -eq "$($pending.entityId)")[0]
-      if("$($pending.payload.runId)" -ne (ConvertTo-TuningWireRunId $State "$($pending.entityId)") -or
-          "$($pending.payload.variantId)" -ne (ConvertTo-TuningWireVariantId $State "$($run.variantId)")){throw '待提交运行遥测业务 ID 无效'}
-      foreach($name in 'runNo','sequenceNo','durationSec','stutter50Ms','stutter100Ms'){
-        if([int64]$pending.payload.$name -ne [int64]$run.$name){throw "待提交运行遥测字段不一致：$name"}
-      }
-      foreach($name in 'avgFps','fps1Low','p99FrameMs','gpuUtilAvg','gpuTempAvg','gpuPowerAvg'){
-        $pendingValue=$pending.payload.$name;$runValue=$run.$name
-        if(($null -eq $pendingValue) -ne ($null -eq $runValue) -or
-            ($null -ne $pendingValue -and [double]$pendingValue -ne [double]$runValue)){throw "待提交运行遥测字段不一致：$name"}
-      }
-      foreach($name in 'validity','invalidReason','settingsHash','environmentHash'){
-        if("$($pending.payload.$name)" -cne "$($run.$name)"){throw "待提交运行遥测字段不一致：$name"}
-      }
-      if($pending.payload.orderControlled -isnot [bool] -or [bool]$pending.payload.orderControlled -ne [bool]$run.orderControlled){throw '待提交运行顺序控制标记不一致'}
-    }else{
-      $idx=[int]$pending.candidateIndex;$candidate=$State.candidates[$idx];$library=Get-TuningCandidate "$($candidate.groupId)"
-      $groups=@($State.candidates|Select-Object -First $idx|Where-Object result -eq 'win'|ForEach-Object{"$($_.groupId)"})+@("$($candidate.groupId)")
-      $ids=@($groups|ForEach-Object{@((Get-TuningCandidate "$_").ItemIds)}|ForEach-Object{"$_".ToLowerInvariant()}|Sort-Object -Unique)
-      $expectedApply=$(if("$($pending.outcome)" -eq 'succeeded'){'succeeded'}else{'failed'})
-      if("$($pending.payload.variantId)" -ne (ConvertTo-TuningWireVariantId $State "$($pending.entityId)") -or
-          "$($pending.payload.controlVariantId)" -ne (ConvertTo-TuningWireVariantId $State "$($candidate.controlVariantId)") -or
-          "$($pending.payload.groupId)" -ne "$($candidate.groupId)" -or [int]$pending.payload.sequenceNo -ne [int]$candidate.sequenceNo -or
-          "$($pending.payload.applyResult)" -ne $expectedApply -or "$($pending.payload.status)" -ne $(if($expectedApply -eq 'succeeded'){'variant_applied'}else{'apply_failed'}) -or
-          "$($pending.payload.itemSetHash)" -ne (Get-TuningItemSetHash $ids) -or (@($pending.payload.itemIds) -join ',') -cne ($ids -join ',') -or
-          "$($pending.payload.source)" -ne "$($library.Source)" -or "$($pending.payload.riskLevel)" -ne "$($library.RiskLevel)" -or
-          [bool]$pending.payload.requiresReboot -ne [bool]$library.RequiresReboot -or [int]$pending.payload.skippedCount -ne 0 -or
-          [int]$pending.payload.appliedCount -ne $(if($expectedApply -eq 'succeeded'){$ids.Count}else{0}) -or
-          [int]$pending.payload.failedCount -ne $(if($expectedApply -eq 'failed'){$ids.Count}else{0})){
-        throw '待提交候选遥测与本地执行结果不一致'
       }
     }
   }
@@ -5545,192 +5289,6 @@ function Find-TuningGameProcess {
   $null
 }
 
-function ConvertTo-TuningWireVariantId($State,[string]$LocalVariantId) {
-  if("$($State.experimentId)" -notmatch '^exp_[0-9a-f]{32}$' -or $LocalVariantId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$') {
-    throw '实验或本地方案 ID 无效'
-  }
-  $suffix='baseline'
-  if($LocalVariantId -ne 'baseline'){
-    $candidateMatches=@($State.candidates|Where-Object{"$($_.variantId)" -eq $LocalVariantId -or "$($_.groupId)" -eq $LocalVariantId})
-    if($candidateMatches.Count -ne 1 -or "$($candidateMatches[0].groupId)" -notmatch '^G[123]$'){throw '本地方案没有对应的受信候选组'}
-    $suffix="$($candidateMatches[0].groupId)"
-  }
-  "$($State.experimentId).$suffix"
-}
-
-function ConvertTo-TuningWireRunId($State,[string]$LocalRunId) {
-  if("$($State.experimentId)" -notmatch '^exp_[0-9a-f]{32}$' -or $LocalRunId -notmatch '^run_[0-9a-f]{32}$') {
-    throw '实验或本地运行 ID 无效'
-  }
-  "$($State.experimentId).$LocalRunId"
-}
-
-function Get-TuningWireItemIds($State,$Candidate) {
-  if(-not $Candidate -or "$($Candidate.groupId)" -notmatch '^G[123]$'){throw '候选组无效'}
-  $expectedControl=$(if(@($State.currentBestGroups).Count){"$((Get-TuningCandidate "$(@($State.currentBestGroups)[-1])").VariantId)"}else{'baseline'})
-  if("$($Candidate.controlVariantId)" -ne $expectedControl){throw '候选组的对照方案与当前保留组合不一致'}
-  $groups=@($State.currentBestGroups)+@("$($Candidate.groupId)")
-  if(@($groups|Select-Object -Unique).Count -ne $groups.Count){throw '候选组与已保留组重复'}
-  @($groups|ForEach-Object{@((Get-TuningCandidate "$_").ItemIds)}|ForEach-Object{"$_".ToLowerInvariant()}|Sort-Object -Unique)
-}
-
-function New-TuningTelemetryPayload {
-  param([Parameter(Mandatory)][ValidateSet('experiment_started','variant_applied','run_completed','experiment_completed')][string]$TuningType,
-        [Parameter(Mandatory)]$State, $Candidate, $Run, $Result, [string]$InstallId = '00000000-0000-0000-0000-000000000000', $Hw = $script:HardwareInfo)
-  $mainGpu=@($Hw.Gpus|Where-Object{"$($_.Name)" -eq "$($Hw.MainGpuName)"}|Select-Object -First 1)
-  $driverVersion=$(if($mainGpu.Count){"$($mainGpu[0].Driver)"}else{''})
-  $displayMode=$(if([int]$Hw.DisplayWidth -gt 0 -and [int]$Hw.DisplayHeight -gt 0){"$([int]$Hw.DisplayWidth)x$([int]$Hw.DisplayHeight)@$([int]$Hw.DisplayRefreshHz)"}else{''})
-  $payload = [ordered]@{
-    installId=$InstallId;event='tuning';version="$script:GuiVersion";os="$($Hw.OS)";build="$($Hw.Build)";cpu="$($Hw.CPU)"
-    gpuVendor="$($Hw.MainGpuVendor)";gpuModel="$($Hw.MainGpuName)";gpuModelVerified=[bool]$Hw.MainGpuNameVerified
-    driverVersion=$driverVersion;gpuCount=[math]::Min(16,@($Hw.Gpus).Count);displayMode=$displayMode
-    ramGb=[double]$Hw.RamGB;deviceType=$(if("$($Hw.FormFactor)" -in 'desktop','laptop','unknown'){"$($Hw.FormFactor)"}elseif($Hw.IsLaptop){'laptop'}else{'unknown'})
-    cpuCores=[math]::Max(0,[int]$Hw.Cores);cpuThreads=[math]::Max(0,[int]$Hw.Threads);cpuPackages=[math]::Max(0,[int]$Hw.CpuPackages)
-    memoryType="$($Hw.MemoryType)";memoryConfiguredMhz=[math]::Max(0,[int]$Hw.MemoryConfiguredMHz)
-    memoryRatedMhz=[math]::Max(0,[int]$Hw.MemoryRatedMHz);memoryModuleCount=[math]::Max(0,[int]$Hw.MemoryModuleCount)
-    virtualDisplayCount=[math]::Min(16,[math]::Max(0,[int]$Hw.VirtualDisplayCount));pagefileAutoManaged=[bool]$Hw.AutomaticManagedPagefile
-    gpuReportedModelDiffers=[bool]("$($Hw.MainGpuReportedName)" -ne "$($Hw.MainGpuName)")
-    tuningType=$TuningType;experimentId="$($State.experimentId)"
-  }
-  if(Get-Command Get-TelemetryAnalysisContext -ErrorAction SilentlyContinue){
-    $analysisContext=Get-TelemetryAnalysisContext $Hw $script:TargetExe
-    if($analysisContext){$payload.analysisContext=$analysisContext}
-  }
-  switch($TuningType){
-    'experiment_started'{
-      # 初始事件采用固定状态，便于“状态先落盘、入队前崩溃”后从已推进的实验状态
-      # 重建完全相同的 business payload，并复用 outbox 中的稳定 eventId。
-      $payload.status='baseline_pending';$payload.goal="$($State.goal)";$payload.riskLevel="$($State.riskLevel)"
-      $payload.allowReboot=[bool]$State.allowReboot;$payload.allowHigherPower=[bool]$State.allowHigherPower
-      $payload.maxTempIncreaseC=[double]$State.maxTempIncreaseC;$payload.maxPowerIncreasePct=[double]$State.maxPowerIncreasePct
-      $payload.gameVersion="$($State.environment.gameVersion)";$payload.driverVersion="$($State.environment.driverVersion)"
-      $payload.libraryVersion=[int]$State.libraryVersion
-      $payload.baselineVariantId=ConvertTo-TuningWireVariantId $State 'baseline'
-    }
-    'variant_applied'{
-      if(-not $Candidate -or -not $Result -or -not $Result.runtime -or -not $Result.reply){throw 'variant_applied 缺少结构化执行结果'}
-      $lib=$Result.runtime.Library;$ids=@(Get-TuningWireItemIds $State $Candidate)
-      # wire variant 表示当前活动的完整累计组合，而不是本次引擎只执行的 delta 组。
-      # 本地只有“全部成功”才进入测试；其他结果按整个 wire variant 失败上报，不产生 partial 候选。
-      $applyResult=$(if([bool]$Result.succeeded){'succeeded'}else{'failed'})
-      $applied=$(if($applyResult -eq 'succeeded'){$ids.Count}else{0})
-      $failed=$(if($applyResult -eq 'failed'){$ids.Count}else{0});$skipped=0
-      $payload.status=$(if($applyResult -eq 'failed'){'apply_failed'}else{'variant_applied'})
-      $payload.variantId=ConvertTo-TuningWireVariantId $State "$($Candidate.variantId)"
-      $payload.controlVariantId=ConvertTo-TuningWireVariantId $State "$($Candidate.controlVariantId)"
-      if(-not $Candidate.PSObject.Properties['sequenceNo'] -or [int]$Candidate.sequenceNo -lt 1 -or [int]$Candidate.sequenceNo -gt 64){throw '候选组缺少持久化的 wire 边界序号'}
-      $payload.sequenceNo=[int]$Candidate.sequenceNo;$payload.groupId="$($Candidate.groupId)"
-      $payload.itemSetHash=Get-TuningItemSetHash $ids;$payload.itemIds=@($ids);$payload.source="$($lib.Source)"
-      $payload.riskLevel="$($lib.RiskLevel)";$payload.requiresReboot=[bool]$lib.RequiresReboot
-      $payload.applyResult=$applyResult;$payload.appliedCount=[int]$applied;$payload.failedCount=[int]$failed;$payload.skippedCount=[int]$skipped
-    }
-    'run_completed'{
-      if(-not $Run){throw 'run_completed 缺少运行记录'}
-      $payload.runId=ConvertTo-TuningWireRunId $State "$($Run.runId)";$payload.variantId=ConvertTo-TuningWireVariantId $State "$($Run.variantId)";$payload.runNo=[int]$Run.runNo;$payload.sequenceNo=[int]$Run.sequenceNo
-      $payload.validity="$($Run.validity)";$payload.invalidReason="$($Run.invalidReason)";$payload.durationSec=[int]$Run.durationSec
-      $payload.avgFps=[double]$Run.avgFps;$payload.fps1Low=[double]$Run.fps1Low;$payload.p99FrameMs=[double]$Run.p99FrameMs
-      $payload.stutter50Ms=[int]$Run.stutter50Ms;$payload.stutter100Ms=[int]$Run.stutter100Ms
-      $payload.gpuUtilAvg=$(if($null -ne $Run.gpuUtilAvg){[double]$Run.gpuUtilAvg}else{$null})
-      $payload.gpuTempAvg=$(if($null -ne $Run.gpuTempAvg){[double]$Run.gpuTempAvg}else{$null})
-      $payload.gpuPowerAvg=$(if($null -ne $Run.gpuPowerAvg){[double]$Run.gpuPowerAvg}else{$null})
-      if($Run.PSObject.Properties['frameCount']){$payload.frameCount=[int]$Run.frameCount}
-      if($Run.PSObject.Properties['frameTimeMadMs']){$payload.frameTimeMadMs=[double]$Run.frameTimeMadMs}
-      if($Run.PSObject.Properties['stuttersPerMin']){$payload.stuttersPerMin=[double]$Run.stuttersPerMin}
-      if($Run.PSObject.Properties['focusLostSec']){$payload.focusLostSec=[double]$Run.focusLostSec}
-      if($Run.PSObject.Properties['gpuTempMax']){$payload.gpuTempMax=$(if($null -ne $Run.gpuTempMax){[double]$Run.gpuTempMax}else{$null})}
-      if($Run.PSObject.Properties['gameExitedEarly']){$payload.gameExitedEarly=[bool]$Run.gameExitedEarly}
-      if($Run.PSObject.Properties['captureFailed']){$payload.captureFailed=[bool]$Run.captureFailed}
-      if($Run.PSObject.Properties['presentMonExitCode']){$payload.presentMonExitCode=[int]$Run.presentMonExitCode}
-      if($Run.PSObject.Properties['performanceContext'] -and $Run.performanceContext){$payload.performanceContext=$Run.performanceContext}
-      $payload.settingsHash="$($Run.settingsHash)";$payload.environmentHash="$($Run.environmentHash)";$payload.orderControlled=[bool]$Run.orderControlled
-    }
-    'experiment_completed'{
-      $autoRollback=[bool]$(if($Result -and $Result.PSObject.Properties['autoRollback']){$Result.autoRollback}else{$false})
-      $serverResult=$(if("$($State.status)" -eq 'completed' -and "$($State.result)" -eq 'found_better'){'found_better'}
-        elseif("$($State.status)" -eq 'completed'){'no_significant_gain'}elseif("$($State.status)" -eq 'rolled_back'){'rolled_back'}
-        elseif("$($State.status)" -eq 'cancelled'){'cancelled'}else{'failed'})
-      $payload.status=$(if($serverResult -in 'found_better','no_significant_gain'){'completed'}else{$serverResult})
-      $payload.result=$serverResult
-      $payload.stopReason=$(switch -Regex ("$($State.stopReason)"){
-        'baseline|unstable'{'baseline_unstable';break}'apply'{'apply_failed';break}'environment|settings|driver|game_version'{'environment_changed';break}
-        'user|cancel'{'user_cancelled';break}'safety|constraint'{'constraints_exceeded';break}'completed'{$(if($serverResult -eq 'no_significant_gain'){'no_improvement'}else{'completed'});break}
-        default{'internal_error'} })
-      $payload.winningVariantId=$(if($serverResult -eq 'found_better'){ConvertTo-TuningWireVariantId $State "$($State.currentBestVariantId)"}else{''})
-      $payload.autoRollback=$autoRollback
-    }
-  }
-  [pscustomobject]$payload
-}
-
-function Start-TuningTelemetryOutboxFlush {
-  try {
-    if (-not (Get-Command Invoke-DfbTuningOutboxFlush -ErrorAction SilentlyContinue)) { return }
-    $configPath = Join-Path $script:UserConfigDir 'telemetry.json'
-    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return }
-    try {
-      $cfg = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
-      if ($cfg.Enabled -eq $false) { return }
-    } catch { return }
-    Clear-CompletedTelemetryJobs
-    $running = @($script:TelemetryJobs | Where-Object {
-      $_.PSObject.Properties['Kind'] -and $_.Kind -eq 'tuning-outbox' -and -not $_.Async.IsCompleted
-    })
-    if ($running.Count) { return }
-    $ps = [PowerShell]::Create()
-    [void]$ps.AddScript({
-      param($ModulePath,$Url,$ConfigPath)
-      try {
-        . $ModulePath
-        # 每次只在 outbox 锁内发送一个事件，随后释放锁；这样 UI 同步持久化下一条
-        # completion 时不会被一长串网络请求饿死。成功后再小步续排，退避则立即结束。
-        for ($i=0; $i -lt 16; $i++) {
-          $result = Invoke-DfbTuningOutboxFlush -UploadUrl $Url -ConfigPath $ConfigPath -MaxEvents 1
-          if (-not $result -or [int]$result.remaining -le 0 -or [int]$result.acknowledged -le 0) { break }
-          Start-Sleep -Milliseconds 25
-        }
-      } catch {}
-    }).AddArgument($script:TelemetryClientPath).AddArgument($script:TelemetryUploadUrl).AddArgument($configPath)
-    $async = $ps.BeginInvoke()
-    [void]$script:TelemetryJobs.Add([pscustomobject]@{ PowerShell=$ps; Async=$async; Kind='tuning-outbox' })
-  } catch {}
-}
-
-function New-TuningTelemetryEventPayload {
-  param([Parameter(Mandatory)][string]$TuningType, $State, $Candidate, $Run, $Result,
-        [switch]$RequirePersistence)
-  try {
-    if (-not $script:HardwareInfo.MainGpuNameVerified) { return $null }
-    $installId = Get-TelemetryInstallId
-    if (-not $installId) { return $null }
-    New-TuningTelemetryPayload -TuningType $TuningType -State $State -Candidate $Candidate -Run $Run -Result $Result -InstallId $installId
-  } catch {
-    if ($RequirePersistence) { throw "自动调优遥测载荷生成失败：$($_.Exception.Message)" }
-    $null
-  }
-}
-
-function Send-TuningTelemetryPayload {
-  param($Payload, [switch]$DeferFlush, [switch]$RequirePersistence)
-  if (-not $Payload) { return }
-  try {
-    if (-not (Get-Command Add-DfbTuningOutboxEvent -ErrorAction SilentlyContinue)) {
-      throw '缺少自动调优遥测 outbox 组件'
-    }
-    $configPath = Join-Path $script:UserConfigDir 'telemetry.json'
-    Add-DfbTuningOutboxEvent -Payload $Payload -ConfigPath $configPath | Out-Null
-    if (-not $DeferFlush) { Start-TuningTelemetryOutboxFlush }
-  } catch {
-    if ($RequirePersistence) { throw "自动调优事件未能持久化：$($_.Exception.Message)" }
-  }
-}
-
-function Send-TuningTelemetryEvent {
-  param([Parameter(Mandatory)][string]$TuningType, $State, $Candidate, $Run, $Result,
-        [switch]$DeferFlush, [switch]$RequirePersistence)
-  $payload = New-TuningTelemetryEventPayload -TuningType $TuningType -State $State -Candidate $Candidate -Run $Run -Result $Result -RequirePersistence:$RequirePersistence
-  Send-TuningTelemetryPayload -Payload $payload -DeferFlush:$DeferFlush -RequirePersistence:$RequirePersistence
-}
-
 function Complete-GuiTuningExperimentTerminal([bool]$AutoRollback) {
   $state = $script:ActiveTuningExperiment
   if (-not $state -or "$($state.status)" -notin 'completed','rolled_back','cancelled','failed') {
@@ -5739,13 +5297,9 @@ function Complete-GuiTuningExperimentTerminal([bool]$AutoRollback) {
   if (-not $state.completedAt) { $state.completedAt = ConvertTo-TuningUtcText }
   # 终态只会在待提交步骤已完成 durable enqueue 之后到达；清除 continuation，避免重启重放已完成步骤。
   $state.pendingTuningCommit=$null
-  # 先把终态写入状态文件并保留活动指针；随后同步把 completion 原子写入 outbox。
-  # 只有两份持久数据都落盘后才清指针并异步发送，崩溃重启可按同一 eventId 去重续传。
+  # 两次 Save 的分工保持不变：先写终态并保留活动指针，再清指针收口。
   Save-TuningExperiment
-  Send-TuningTelemetryEvent -TuningType 'experiment_completed' -State $state `
-    -Result ([pscustomobject]@{autoRollback=$AutoRollback}) -DeferFlush -RequirePersistence
   Save-TuningExperiment -Terminal
-  Start-TuningTelemetryOutboxFlush
   # 实验结束后普通性能采样会重新开放；先按真实活动备份刷新当前项目集合，避免后续
   # 会话仍沿用实验前的档位。已有普通优化与实验胜出组并存时会明确记为 mixed。
   try {
@@ -5866,7 +5420,6 @@ function Set-PendingTuningCommit {
         [Parameter(Mandatory)][string]$SourcePhase,
         [Parameter(Mandatory)][int]$CandidateIndex,
         [Parameter(Mandatory)][string]$EntityId,
-        $Payload,
         [string]$ResumePhase='',
         [string]$Outcome='',
         [bool]$UnsafeFailure=$false,
@@ -5875,9 +5428,9 @@ function Set-PendingTuningCommit {
   if(-not $state){throw '没有活动实验可提交'}
   if($state.pendingTuningCommit){throw '已有待提交实验步骤，已拒绝覆盖'}
   $state.pendingTuningCommit=[pscustomobject][ordered]@{
-    schemaVersion=1;kind=$Kind;telemetryType=$(if($Kind -eq 'run'){'run_completed'}else{'variant_applied'})
+    schemaVersion=1;kind=$Kind
     sourcePhase=$SourcePhase;candidateIndex=$CandidateIndex;entityId=$EntityId;resumePhase=$ResumePhase
-    outcome=$Outcome;unsafeFailure=$UnsafeFailure;reason=$Reason;payload=$Payload
+    outcome=$Outcome;unsafeFailure=$UnsafeFailure;reason=$Reason
   }
   try{Save-TuningExperiment}
   catch{
@@ -5953,8 +5506,7 @@ function Test-PendingTuningRunCompleted($State,$Pending,$Run){
 function Resume-PendingTuningCommit {
   $state=$script:ActiveTuningExperiment;$pending=$state.pendingTuningCommit
   if(-not $pending){return $false}
-  # Exact payload was saved with the engine/capture result. Durable idempotent enqueue is the commit point.
-  Send-TuningTelemetryPayload -Payload $pending.payload -DeferFlush -RequirePersistence
+  # 本分支没有上报，这里只剩状态机推进；pendingTuningCommit 本身仍是崩溃恢复的提交点。
   if("$($pending.kind)" -eq 'run'){
     $runs=@($state.runs|Where-Object runId -eq "$($pending.entityId)")
     if($runs.Count -ne 1){throw '待提交运行记录不存在或重复'}
@@ -5979,7 +5531,6 @@ function Resume-PendingTuningCommit {
   if($state -and $state.pendingTuningCommit -and "$($state.pendingTuningCommit.entityId)" -eq "$($pending.entityId)"){
     $state.pendingTuningCommit=$null;Save-TuningExperiment
   }
-  Start-TuningTelemetryOutboxFlush
   $true
 }
 
@@ -6044,9 +5595,8 @@ function Invoke-TuningApplyCandidate($Candidate, [string]$ResumePhase) {
   $unsafeFailure=(-not $success -and -not $validBackup -and ($changed -gt 0 -or [bool]$reply.BackupError))
   if($ResumePhase -eq 'group_capture_b1'){
     $result=[pscustomobject]@{runtime=$runtime;reply=$reply;succeeded=$success;changed=$changed}
-    $payload=New-TuningTelemetryEventPayload -TuningType 'variant_applied' -State $state -Candidate $Candidate -Result $result -RequirePersistence
     Set-PendingTuningCommit -Kind variant -SourcePhase applying -CandidateIndex $candidateIndex -EntityId "$($Candidate.variantId)" `
-      -Payload $payload -ResumePhase $ResumePhase -Outcome $(if($success){'succeeded'}else{'failed'}) `
+      -ResumePhase $ResumePhase -Outcome $(if($success){'succeeded'}else{'failed'}) `
       -UnsafeFailure $unsafeFailure -Reason ($why -join '；')|Out-Null
     [void](Resume-PendingTuningCommit)
     return $success
@@ -6122,14 +5672,11 @@ function Invoke-TuningPerformanceCapture([string]$VariantId,[string]$GroupId,[bo
   $run | Add-Member -NotePropertyName presentMonExitCode -NotePropertyValue ([int]$metrics.presentMonExitCode)
   $run | Add-Member -NotePropertyName gameExitedEarly -NotePropertyValue ([bool]$metrics.gameExitedEarly)
   $run | Add-Member -NotePropertyName captureFailed -NotePropertyValue ([bool]$metrics.captureFailed)
-  # 先生成精确 wire payload，再把 run 加进活动内存；载荷/telemetry 配置失败时不会留下
-  # 一条没有 pending continuation 的幽灵 run，被下一轮误带进状态文件。
-  $payload=$(if($GroupId -ne 'final'){New-TuningTelemetryEventPayload -TuningType 'run_completed' -State $state -Run $run -RequirePersistence}else{$null})
   $script:ActiveTuningExperiment=Add-TuningRun $state $run
   $state=$script:ActiveTuningExperiment
   $state.lastMessage=$(if($run.validity -eq 'valid'){"第 $($run.sequenceNo) 轮有效：平均帧率 $($run.avgFps)，1% 低帧率 $($run.fps1Low)。"}else{"本轮 $($run.validity)（$($run.invalidReason)），不参与胜负，请重试当前步骤。"})
   # final 是非交替的本地安全复核；不把它混入服务端候选组 A/B runs，否则会污染胜出证据。
-  Set-PendingTuningCommit -Kind run -SourcePhase $sourcePhase -CandidateIndex $sourceCandidateIndex -EntityId "$($run.runId)" -Payload $payload|Out-Null
+  Set-PendingTuningCommit -Kind run -SourcePhase $sourcePhase -CandidateIndex $sourceCandidateIndex -EntityId "$($run.runId)"|Out-Null
   Update-TuningUi
   $run
 }
@@ -6319,7 +5866,6 @@ function Invoke-NextTuningStep {
 function New-GuiTuningExperiment {
   if (-not $script:TuningModuleLoaded) { throw '自动调优规则模块缺失，请重新安装软件' }
   if (Test-TuningExperimentActive) {
-    Send-TuningTelemetryEvent -TuningType 'experiment_started' -State $script:ActiveTuningExperiment -RequirePersistence
     return $script:ActiveTuningExperiment
   }
   if(@($script:PerformanceJobs|Where-Object{-not $_.Async.IsCompleted}).Count){throw '普通性能采样正在收尾，请等完成后再创建实验，避免普通会话混入 Beta 时段'}
@@ -6339,7 +5885,7 @@ function New-GuiTuningExperiment {
   $state.configGeneration=$script:TuningConfigGeneration;$state.candidates[0].controlVariantId='baseline'
   $state.lastMessage='实验已创建。先完成 3 次有效基线；每轮请使用同一场景和操作路线。'
   $script:ActiveTuningExperiment=$state;$script:ActiveTuningStatePath=Join-Path $script:TuningExperimentDir ("$($state.experimentId).json")
-  Save-TuningExperiment;Send-TuningTelemetryEvent -TuningType 'experiment_started' -State $state -RequirePersistence;Update-TuningUi
+  Save-TuningExperiment;Update-TuningUi
   Write-Log "已创建自动调优实验 $($state.experimentId)，场景：$scene。"
   $state
 }
@@ -6382,13 +5928,6 @@ function Load-ActiveTuningExperiment {
     $script:ActiveTuningExperiment=$state;$script:ActiveTuningStatePath=$path;$script:TuningConfigGeneration=[int64]$state.configGeneration
     $script:TargetExe="$($state.gamePath)";$ui.GameText.Text=$script:TargetExe
     $ui.TuneSceneBox.Text="$($state.sceneId)";$ui.TuneTempBox.Text="$($state.maxTempIncreaseC)";$ui.TunePowerChk.IsChecked=[bool]$state.allowHigherPower;$ui.TunePowerBox.Text="$($state.maxPowerIncreasePct)"
-    try { Send-TuningTelemetryEvent -TuningType 'experiment_started' -State $state -RequirePersistence }
-    catch {
-      # 状态文件本身有效，只是 start 事件尚未安全入队；保留指针，下一次启动/点击继续会重试。
-      Write-Log "自动调优开始事件仍待持久化：$($_.Exception.Message)"
-      Update-TuningUi
-      return
-    }
     if($state.pendingTuningCommit){
       try{[void](Resume-PendingTuningCommit);$state=$script:ActiveTuningExperiment}
       catch{Write-Log "自动调优待提交步骤仍未安全入队：$($_.Exception.Message)";Update-TuningUi;return}
@@ -7567,10 +7106,6 @@ function Invoke-FrameFixGpuPreference {
       Set-FrameFixActionStatus '当前游戏已经使用 Windows 高性能 GPU 首选项，无需重复写入。' 'success'
       Set-FrameFixProgress '检查完成：当前游戏已经使用高性能 GPU 首选项。' 'success'
     }
-    try {
-      $operation = New-OptimizationTelemetryOperation -Event apply -Source frame_fix -Reply $reply -ItemIds @('gpu-pref')
-      Send-AnonymousTelemetry 'apply' $script:HardwareInfo $(if ($row.Ok) { 1 } else { 0 }) $(if ($row.Ok) { 0 } else { 1 }) $operation
-    } catch {}
   } catch {
     Set-FrameFixActionStatus "高性能 GPU 设置未完成：$($_.Exception.Message)" 'error'
     Set-FrameFixProgress '高性能 GPU 设置未完成，请查看错误说明。' 'error'
@@ -8117,11 +7652,6 @@ function Invoke-InlineRestoreAction([ValidateSet('selected_items','all')][string
         Set-TelemetryOptimizationContext -ItemIds @() -Scheme baseline -ItemsComplete $true
       }
     }
-    try {
-      $restoreItemIds = $(if ($Mode -eq 'selected_items') { @($itemIds) } else { @($catalog.ActiveItemIds) })
-      $operation = New-OptimizationTelemetryOperation -Event restore -Source restore_manager -Reply $r -ItemIds $restoreItemIds -RestoreMode $Mode
-      Send-AnonymousTelemetry 'restore' $script:HardwareInfo $r.RestoredOps $failN $operation
-    } catch {}
     $bakName = $(if ($r.File) { Split-Path -Leaf $r.File } else { '' })
     if ($Mode -eq 'selected_items') {
       $ui.ProgText.Text = "按项目复原完成：$($r.RestoredItems) 项成功 / $failN 项失败"
@@ -8856,12 +8386,9 @@ function Set-PowerRecoveryNoticeAcknowledged {
     NoticeId = $script:PowerRecoveryNoticeId
     AcknowledgedAt = (Get-Date).ToString('s')
   }
-  if (Get-Command Write-DfbTelemetryConfigAtomic -ErrorAction SilentlyContinue) {
-    Write-DfbTelemetryConfigAtomic $script:PowerRecoveryNoticeStatePath $state
-  } else {
-    [IO.File]::WriteAllText($script:PowerRecoveryNoticeStatePath, ($state | ConvertTo-Json),
-      (New-Object Text.UTF8Encoding($true)))
-  }
+  # 原来这里优先用 telemetry-client.ps1 的原子写；那个文件已随遥测一起删除，
+  # 改用引擎里的 Write-BytesAtomic（同样是 CreateNew + Replace 的原子替换）。
+  Write-JsonStateAtomic $script:PowerRecoveryNoticeStatePath $state
 }
 
 function Show-PowerRecoveryVersionNotice {
@@ -9052,14 +8579,6 @@ $window.Add_ContentRendered({
     }
     $ui.ScanState.Text = '检测完成'
     Write-Log '检测完成。已默认选中「主推全套」方案，可改选其他方案或手动勾选后点「执行优化」。本次软件会话已在启动时完成管理员确认，执行优化、还原和自动调优不会再次弹出权限确认。'
-    Send-AnonymousTelemetry 'launch' $hw
-    # tuning 事件使用独立的持久 outbox。启动先恢复历史队列，运行中定时唤醒到期重试；
-    # 普通 launch/apply/restore 遥测仍保持原来的即时异步发送路径。
-    Start-TuningTelemetryOutboxFlush
-    $script:TuningTelemetryTimer = New-Object Windows.Threading.DispatcherTimer
-    $script:TuningTelemetryTimer.Interval = [TimeSpan]::FromSeconds(30)
-    $script:TuningTelemetryTimer.Add_Tick({ Start-TuningTelemetryOutboxFlush })
-    $script:TuningTelemetryTimer.Start()
     Start-UpdateCheck
     # 运行期间定时复查：DispatcherTimer 在 UI 线程触发，真正的网络请求仍在后台 runspace，
     # 静默失败的约定不变——断网/超时都不会打扰主界面
@@ -9104,7 +8623,6 @@ $window.Add_Closing({
     try { Save-AppUiPreferences $script:CurrentTheme (Get-PersistableAppWindowHeight) } catch {}
     Stop-LiveMetricsMonitor
     if ($script:PerformanceTimer) { $script:PerformanceTimer.Stop() }
-    if ($script:TuningTelemetryTimer) { $script:TuningTelemetryTimer.Stop() }
   }
 })
 $ui.CloseBtn.Add_Click({
@@ -9222,22 +8740,6 @@ $ui.CopyLogBtn.Add_Click({
 $ui.GuideBtn.Add_Click({ Show-GpuGuideDialog (Get-HardwareInfo) })
 
 $ui.DisclaimerBtn.Add_Click({ Show-DisclaimerDialog -ReadOnly | Out-Null })
-
-# 统计设置：开关状态与 ui-preferences.json 同步。Add_Click 在 IsChecked 变更之后触发，
-# 所以这里读到的就是用户刚选的值。写盘失败要回退勾选态，不能让界面显示的和实际生效的不一致。
-$ui.TelemetryChk.IsChecked = (Test-TelemetryOptIn)
-$ui.TelemetryChk.Add_Click({
-  $wanted = [bool]$ui.TelemetryChk.IsChecked
-  try {
-    Save-AppUiPreferences $script:CurrentTheme (Get-PersistableAppWindowHeight) $wanted
-    $actual = Test-TelemetryOptIn
-    if ($actual -ne $wanted) { throw '写入后回读校验不一致' }
-    Write-Log $(if ($wanted) { '已开启匿名使用统计。' } else { '已关闭匿名使用统计，本机不再上报任何数据。' })
-  } catch {
-    $ui.TelemetryChk.IsChecked = (Test-TelemetryOptIn)
-    Write-Log "统计设置保存失败，已恢复原状态：$($_.Exception.Message)"
-  }
-})
 
 # 导出诊断报告：先选择问题/改善，再组装脱敏报告并确认数据清单，最后才写文件。
 # 本分支没有服务端，报告只落到本机磁盘上，发不发、发给谁完全由用户决定。
@@ -9480,10 +8982,6 @@ $ui.ApplyBtn.Add_Click({
           -FallbackTier "$($beforeContext.ConfigTier)"
       }
     }
-    try {
-      $operation = New-OptimizationTelemetryOperation -Event apply -Source manual_selection -Reply $r -ItemIds @($selectedItems | ForEach-Object Id)
-      Send-AnonymousTelemetry 'apply' $script:HardwareInfo $okN $failList.Count $operation
-    } catch {}
     # 明确的完成度结论：进度条区和日志各给一份，失败项单独列出让用户一眼看到；
     # 体检发现的问题单列——那是检测项立功了，混进「失败」会让用户误以为工具坏了
     $att = $(if ($attList.Count -gt 0) { " / $($attList.Count) 项体检发现问题" })
