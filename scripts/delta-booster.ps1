@@ -3150,6 +3150,17 @@ function Assert-BackupItem($Item) {
   }
 }
 
+# 返回这份文档里**被 op 级校验拒绝**的操作清单（`@{ OpId; Index; Kind; Reason }`）。
+# 调用方必须接住返回值，别让它漏进自己的管道输出。
+#
+# 分界线：op 级判据（目标白名单、值域、字段集）只作废**那一条 op**；文档级判据
+# （schema 版本、文档未知字段、数量上限、Id/ItemId 重复、Items↔Ops 映射、HMAC）
+# 一条都没放宽，仍然整份 throw —— 那些说明整个文件都不可信。
+#
+# 为什么要分开：装过老版本、用过「关闭 NVIDIA App 自动优化」的用户，那一次执行里
+# 有一条现已停用的 file op。旧写法让它把**同一份**备份里的电源方案原 GUID、休眠状态、
+# 十几个注册表原值一起作废，那次优化的项目在还原清单里直接不出现。被拒绝的 op 仍然
+# 一条都不会被执行，变的只是它不再株连同批次最多 255 条好数据。
 function Assert-BackupDocument($Document, [bool]$RequireIntegrity) {
   if ($RequireIntegrity) {
     $schema = [int]$Document.SchemaVersion
@@ -3181,11 +3192,40 @@ function Assert-BackupDocument($Document, [bool]$RequireIntegrity) {
   if ($ops.Count -gt 256) { throw '备份操作超过 256 项上限' }
   $schemaForOps = $(if ($RequireIntegrity) { [int]$Document.SchemaVersion } else { 1 })
   $allowedLocal = $(if ($RequireIntegrity) { "$($Document.UserLocalAppData)" } else { $script:TargetLocalAppData })
-  foreach ($op in $ops) { Assert-BackupOperation $op $schemaForOps $allowedLocal }
+  $opFaults = New-Object System.Collections.Generic.List[object]
+  $faultedOpIds = @{}
+  for ($opIndex = 0; $opIndex -lt $ops.Count; $opIndex++) {
+    $op = $ops[$opIndex]
+    try { Assert-BackupOperation $op $schemaForOps $allowedLocal }
+    catch {
+      $faultOpId = "$($op.Id)"
+      if ($faultOpId) { $faultedOpIds[$faultOpId] = $true }
+      [void]$opFaults.Add([pscustomobject]@{
+        OpId = $faultOpId; Index = $opIndex; Kind = "$($op.Kind)"; Reason = "$($_.Exception.Message)" })
+    }
+  }
   if ($RequireIntegrity -and $schemaForOps -eq 3) {
     $items = @($Document.Items)
     if ($items.Count -gt 64) { throw '备份项目超过 64 项上限' }
-    foreach ($item in $items) { Assert-BackupItem $item }
+    # 项目元数据坏掉时，保守方向是把它名下的 op 全部连带标成 fault：项目归属不可信，
+    # 就不该拿它的 op 去写系统。OpIds 本身可能就是坏的，所以读它也要兜住。
+    foreach ($item in $items) {
+      try { Assert-BackupItem $item }
+      catch {
+        $itemReason = "$($_.Exception.Message)"
+        $itemOpIds = @()
+        try { $itemOpIds = @($item.OpIds | ForEach-Object { "$_" }) } catch { $itemOpIds = @() }
+        foreach ($itemOpId in $itemOpIds) {
+          if (-not $itemOpId -or $faultedOpIds.ContainsKey($itemOpId)) { continue }
+          $faultedOpIds[$itemOpId] = $true
+          $owningOp = @($ops | Where-Object { "$($_.Id)" -eq $itemOpId } | Select-Object -First 1)
+          [void]$opFaults.Add([pscustomobject]@{
+            OpId = $itemOpId; Index = -1
+            Kind = $(if ($owningOp.Count) { "$($owningOp[0].Kind)" } else { '' })
+            Reason = "所属项目记录无效（$itemReason）" })
+        }
+      }
+    }
     if (@($items | ForEach-Object ItemId | Select-Object -Unique).Count -ne $items.Count) { throw '备份项目 ItemId 重复' }
     $allOpIds = @($ops | ForEach-Object { "$($_.Id)" })
     if (@($allOpIds | Select-Object -Unique).Count -ne $allOpIds.Count) { throw '备份操作 Id 重复' }
@@ -3197,12 +3237,15 @@ function Assert-BackupDocument($Document, [bool]$RequireIntegrity) {
       if ($owner.Count -ne 1) { throw "备份操作缺少唯一项目归属：$($op.Id)" }
     }
   }
+  # HMAC 永远最后做，而且对**全文**复验：文档一个字节都没被改过，有没有 fault 都一样。
+  # 「收集 op 级 fault」绝不能变成绕过完整性校验的旁路。
   if ($RequireIntegrity) {
     $expected = Get-HmacHex (Get-BackupCanonicalPayload $Document) (Get-BackupHmacKey)
     $actualBytes = [Text.Encoding]::ASCII.GetBytes("$($Document.Integrity.Value)")
     $expectBytes = [Text.Encoding]::ASCII.GetBytes($expected)
     if (-not (Test-FixedTimeEqual $actualBytes $expectBytes)) { throw '备份完整性校验失败，文件可能已被修改' }
   }
+  @($opFaults.ToArray())
 }
 
 function Test-PathUnder([string]$Path, [string]$Root) {
@@ -3235,23 +3278,34 @@ function Read-ValidatedBackup([string]$Path, [string[]]$LegacyDirs) {
   $signed = [bool]$doc.PSObject.Properties['SchemaVersion']
   if ($signed) {
     if (-not $isProtected) { throw '带完整性签名的新备份必须位于受保护备份目录' }
-    Assert-BackupDocument $doc $true
-    return [pscustomobject]@{ Path = $full; Document = $doc; LegacySource = $null }
+    $signedFaults = @(Assert-BackupDocument $doc $true)
+    return [pscustomobject]@{ Path = $full; Document = $doc; LegacySource = $null; OpFaults = $signedFaults }
   }
 
   # 旧备份没有完整性签名：先做严格 schema/目标白名单校验，再复制为受保护且签名的新格式，
   # 后续只从内存中的已验证数据和受保护副本执行，不再信任可写的旧文件。
-  Assert-BackupDocument $doc $false
+  $legacyFaults = @(Assert-BackupDocument $doc $false)
   Initialize-ProtectedStore
   # 迁移文件名由“规范源路径 + 原始内容”确定：中断后重试不会重复制造备份。
   # 旧根由目标用户可写，提权进程绝不对其 Rename/Write（否则存在 junction 竞态）；
   # 已还原状态只由受保护目录内的 .restored 标记表示。
   $id = Get-LegacyMigrationId $full $raw
-  $ops = @($doc.Ops | ForEach-Object {
-    $h = [ordered]@{ Id = [guid]::NewGuid().ToString('D'); Status = 'applied'; Kind = "$($_.Kind)" }
-    foreach ($n in @(Get-BackupOpFields "$($_.Kind)" 1 | Select-Object -Skip 1)) { $h[$n] = $_.$n }
-    [pscustomobject]$h
-  })
+  # 签名副本里只能有可信数据：这个文件是工具自己盖章的，把校验没过的 op 写进去等于
+  # 替它背书。所以 fault op 在这里被剔除，剩下的好数据照常迁移——旧写法是整份拒绝，
+  # 那一次执行的全部原值一起没了。
+  # 已知取舍：剔除原因只在**本次迁移**时随返回值上报一次；下次读的是已签名副本，
+  # 里面已经没有这几条了。要长期留痕得改签名 schema，不值当。
+  $legacyFaultIndexes = @{}
+  foreach ($legacyFault in $legacyFaults) { $legacyFaultIndexes[[int]$legacyFault.Index] = $true }
+  $rawLegacyOps = @($doc.Ops)
+  $ops = @()
+  for ($legacyIndex = 0; $legacyIndex -lt $rawLegacyOps.Count; $legacyIndex++) {
+    if ($legacyFaultIndexes.ContainsKey($legacyIndex)) { continue }
+    $legacyOp = $rawLegacyOps[$legacyIndex]
+    $h = [ordered]@{ Id = [guid]::NewGuid().ToString('D'); Status = 'applied'; Kind = "$($legacyOp.Kind)" }
+    foreach ($n in @(Get-BackupOpFields "$($legacyOp.Kind)" 1 | Select-Object -Skip 1)) { $h[$n] = $legacyOp.$n }
+    $ops += [pscustomobject]$h
+  }
   $legacyWhen = [DateTime]::Parse("$($doc.Time)")
   $migrated = [pscustomobject][ordered]@{
     SchemaVersion = $script:LegacySignedBackupSchemaVersion; BackupId = $id
@@ -3264,14 +3318,17 @@ function Read-ValidatedBackup([string]$Path, [string[]]$LegacyDirs) {
   $restoredDest = $dest + '.restored'
   if (Test-Path -LiteralPath $restoredDest -PathType Leaf) {
     $consumed = Read-ValidatedBackup $restoredDest @()
-    return [pscustomobject]@{ Path = $consumed.Path; Document = $consumed.Document; LegacySource = $full; Consumed = $true }
+    return [pscustomobject]@{ Path = $consumed.Path; Document = $consumed.Document; LegacySource = $full
+      Consumed = $true; OpFaults = @($consumed.OpFaults); LegacyDroppedOps = @() }
   }
   if (Test-Path -LiteralPath $dest -PathType Leaf) {
     $existing = Read-ValidatedBackup $dest @()
-    return [pscustomobject]@{ Path = $existing.Path; Document = $existing.Document; LegacySource = $full; Consumed = $false }
+    return [pscustomobject]@{ Path = $existing.Path; Document = $existing.Document; LegacySource = $full
+      Consumed = $false; OpFaults = @($existing.OpFaults); LegacyDroppedOps = @() }
   }
   Write-BackupDocumentAtomic $dest $migrated
-  [pscustomobject]@{ Path = $dest; Document = $migrated; LegacySource = $full; Consumed = $false }
+  [pscustomobject]@{ Path = $dest; Document = $migrated; LegacySource = $full
+    Consumed = $false; OpFaults = @(); LegacyDroppedOps = @($legacyFaults) }
 }
 
 function New-BackupDocument([DateTime]$When, [string]$ApplyId) {
@@ -3954,7 +4011,8 @@ function Get-ValidatedRestoreRecords([string]$File, [bool]$AllowEmpty) {
           ([IO.Path]::GetFullPath("$($consumed.Document.UserLocalAppData)").TrimEnd('\') -ine $script:TargetLocalAppData.TrimEnd('\'))) {
         throw '指定备份属于另一个 Windows 用户，已拒绝跨用户还原'
       }
-      return [pscustomobject]@{ Records = @(); Notes = @('指定备份此前已完成还原，本次无需重复执行'); AlreadyConsumed = $true }
+      return [pscustomobject]@{ Records = @(); Notes = @('指定备份此前已完成还原，本次无需重复执行'); AlreadyConsumed = $true
+        SearchedRoots = @($script:BackupDir); UnreadableCount = 0; OpFaultCount = 0 }
     }
     if (-not (Test-PathUnder $candidate $script:BackupDir)) {
       $legacyDirs = @(Get-LegacyBackupDirs); $notes += @($script:LegacyBackupWarnings)
@@ -3971,7 +4029,11 @@ function Get-ValidatedRestoreRecords([string]$File, [bool]$AllowEmpty) {
     ) | Select-Object -Unique
   }
   if ($sourceFiles.Count -eq 0) {
-    if ($AllowEmpty) { return [pscustomobject]@{ Records = @(); Notes = $notes; AlreadyConsumed = $false } }
+    if ($AllowEmpty) {
+      return [pscustomobject]@{ Records = @(); Notes = $notes; AlreadyConsumed = $false
+        SearchedRoots = @(@($script:BackupDir) + @($legacyDirs) | Select-Object -Unique)
+        UnreadableCount = 0; OpFaultCount = 0 }
+    }
     $detail = $(if ($notes.Count -gt 0) { "（$($notes -join '；')）" } else { '' })
     throw "未找到任何备份文件，无法还原$detail"
   }
@@ -4017,19 +4079,71 @@ function Get-ValidatedRestoreRecords([string]$File, [bool]$AllowEmpty) {
     }
     throw '未找到属于当前目标用户的备份文件，无法还原'
   }
+  # 单条 op 校验没过不再作废整份备份，但也绝不能静默：逐条把「哪个设置、什么原因」
+  # 说出来，最多列 5 条，剩下的只报数。
+  $opFaultRecords = @($records | ForEach-Object { @($_.OpFaults) } | Where-Object { $_ })
+  $opFaultRecords += @($records | ForEach-Object { @($_.LegacyDroppedOps) } | Where-Object { $_ })
+  if ($opFaultRecords.Count -gt 0) {
+    $shownFaults = 0
+    foreach ($fault in $opFaultRecords) {
+      if ($shownFaults -ge 5) { break }
+      $notes += "备份里有一条改动无法自动还原（$(if ("$($fault.Kind)") { "类型 $($fault.Kind)" } else { '类型未知' })）：$($fault.Reason)"
+      $shownFaults++
+    }
+    if ($opFaultRecords.Count -gt $shownFaults) {
+      $notes += "另有 $($opFaultRecords.Count - $shownFaults) 条改动同样无法自动还原，明细见运行日志"
+    }
+  }
   [pscustomobject]@{
     Records = $records; Notes = $notes; AlreadyConsumed = $alreadyConsumed
-    # 下面两项只为可发现性：用户看到空列表时，得能分清「确实没有」和「找了但没找到」。
+    # 下面几项只为可发现性：用户看到空列表时，得能分清「确实没有」和「找了但没找到」。
     SearchedRoots = @(@($script:BackupDir) + @($legacyDirs) | Select-Object -Unique)
     UnreadableCount = $unreadable.Count
+    OpFaultCount = $opFaultRecords.Count
   }
+}
+
+# 这份备份里被 op 级校验拒绝的操作：opId → 原因。
+function Get-RestoreOpFaultMap($Record) {
+  $map = @{}
+  foreach ($fault in @($Record.OpFaults)) {
+    if (-not $fault) { continue }
+    $faultId = "$($fault.OpId)"
+    if ($faultId) { $map[$faultId] = "$($fault.Reason)" }
+  }
+  $map
+}
+
+# 被拒绝的 op 也得有人管：包装成和 Get-ActiveV3RestoreOps 同形的 wrapper 供界面和日志使用。
+# **故意单独放一个函数**：忘了调用它只会少显示一条提示，绝不会让校验没过的数据混进执行表。
+# v2 文档没有 Items，Item 字段为空，调用方按项目分组时会自然跳过——这正确，v2 本来就
+# 没有项目归属，只能整份还原。
+function Get-FaultedRestoreOps($Records) {
+  $list = New-Object System.Collections.Generic.List[object]
+  foreach ($record in @($Records)) {
+    $faults = Get-RestoreOpFaultMap $record
+    if ($faults.Count -eq 0) { continue }
+    $items = @{}; foreach ($item in @($record.Document.Items)) { $items["$($item.ItemId)"] = $item }
+    foreach ($op in @($record.Document.Ops)) {
+      $opId = "$($op.Id)"
+      if (-not $faults.ContainsKey($opId)) { continue }
+      [void]$list.Add([pscustomobject]@{
+        BackupId = "$($record.Document.BackupId)"; BackupPath = "$($record.Path)"
+        Item = $items["$($op.ItemId)"]; Op = $op; Reason = $faults[$opId]
+      })
+    }
+  }
+  @($list.ToArray())
 }
 
 function Get-ActiveV3RestoreOps($Records, $ConsumedSet) {
   $list = New-Object System.Collections.Generic.List[object]
   foreach ($record in @($Records | Where-Object { [int]$_.Document.SchemaVersion -eq 3 })) {
     $items = @{}; foreach ($item in @($record.Document.Items)) { $items["$($item.ItemId)"] = $item }
+    $faults = Get-RestoreOpFaultMap $record
     foreach ($op in @($record.Document.Ops)) {
+      # 校验没过的 op 一条都不许进执行表，理由和旧写法整份拒绝时完全一样
+      if ($faults.ContainsKey("$($op.Id)")) { continue }
       $key = ("$($record.Document.BackupId)|$($op.Id)".ToLowerInvariant())
       if ($ConsumedSet.ContainsKey($key)) { continue }
       [void]$list.Add([pscustomobject]@{
@@ -4068,6 +4182,17 @@ function Get-RestoreItemCatalog {
   $catalogNotes = @()
   if ($consumed.Blocked) { $catalogNotes += (Get-ConsumedRestoreBlockReason $consumed) }
   $active = @(Get-ActiveV3RestoreOps $state.Records $consumed.Set)
+  # 校验没过的 op 不进执行表，但它所属的项目必须继续出现在清单里并说清原因。
+  # 旧写法是整份备份作废，用户连「那次优化动过什么」都看不到；只把 op 剔掉而不显示，
+  # 等于把问题从「整份消失」缩小成「一项悄悄消失」——还是消失。
+  $faulted = @(Get-FaultedRestoreOps $state.Records)
+  $faultReasons = @{}
+  foreach ($faultWrapper in $faulted) {
+    $faultItemId = "$($faultWrapper.Op.ItemId)"
+    if (-not $faultItemId) { continue }
+    if (-not $faultReasons.ContainsKey($faultItemId)) { $faultReasons[$faultItemId] = @() }
+    $faultReasons[$faultItemId] += "$(Get-RestoreOpLabel $faultWrapper.Op)：$($faultWrapper.Reason)"
+  }
   $supported = @(Get-SelectiveRestoreItemIds)
   $shared = @{}
   foreach ($target in @($active | Group-Object { Get-RestoreOpKey $_.Op })) {
@@ -4081,7 +4206,10 @@ function Get-RestoreItemCatalog {
     if ($meta.Count -eq 0) { continue }
     $units = @(Get-SelectiveRestoreUnits $wrappers)
     $status = 'available'; $reason = ''; $canRestore = $true
-    if (@($wrappers | Where-Object { $_.Op.Kind -ne 'reg' }).Count -gt 0) {
+    if ($faultReasons.ContainsKey($itemGroup.Name)) {
+      $status = 'unsupported'; $canRestore = $false
+      $reason = "该项目有设置已停止支持自动还原，只能手动改回：$(@($faultReasons[$itemGroup.Name]) -join '；')"
+    } elseif (@($wrappers | Where-Object { $_.Op.Kind -ne 'reg' }).Count -gt 0) {
       $status = 'unsupported'; $reason = '该项目包含当前版本尚未开放的底层设置，仅支持全部复原'; $canRestore = $false
     } elseif ($shared.ContainsKey($itemGroup.Name)) {
       $status = 'shared_target'; $reason = '该项目与其他项目共享底层设置，请使用全部复原'; $canRestore = $false
@@ -4096,6 +4224,23 @@ function Get-RestoreItemCatalog {
       SettingCount = $units.Count; HistoryOpCount = $wrappers.Count; RebootRequired = [bool]$meta[0].RebootRequired
       Status = $status; StatusText = $(switch ($status) { 'available' { '可精确复原' }; 'conflict' { '发生后续修改' }; 'shared_target' { '存在共享设置' }; default { '仅支持全部复原' } })
       Reason = $reason; CanRestore = $canRestore
+    })
+  }
+  # 一个项目的 op **全部**校验没过时它压根不在 $active 里，上面的循环看不见它。
+  # 这正是最该被看见的情况：那次优化确实动过这一项，而工具已经还不回去了。
+  $listedItemIds = @{}
+  foreach ($listed in @($items.ToArray())) { $listedItemIds["$($listed.Id)"] = $true }
+  foreach ($faultGroup in @($faulted | Group-Object { "$($_.Op.ItemId)" })) {
+    $faultItemId = "$($faultGroup.Name)"
+    if (-not $faultItemId -or $listedItemIds.ContainsKey($faultItemId) -or $supported -notcontains $faultItemId) { continue }
+    $faultMeta = @($faultGroup.Group | ForEach-Object Item | Where-Object { $_ } | Select-Object -First 1)
+    if ($faultMeta.Count -eq 0) { continue }
+    [void]$items.Add([pscustomobject][ordered]@{
+      Id = $faultItemId; Name = "$($faultMeta[0].DisplayName)"; RestoreGroupId = "$($faultMeta[0].RestoreGroupId)"
+      SettingCount = 0; HistoryOpCount = @($faultGroup.Group).Count; RebootRequired = [bool]$faultMeta[0].RebootRequired
+      Status = 'unsupported'; StatusText = '仅支持全部复原'
+      Reason = "该项目的设置已停止支持自动还原，只能手动改回：$(@($faultReasons[$faultItemId]) -join '；')"
+      CanRestore = $false
     })
   }
   $legacyRecords = @($state.Records | Where-Object { [int]$_.Document.SchemaVersion -eq 2 -and @($_.Document.Ops).Count -gt 0 })
@@ -4115,6 +4260,8 @@ function Get-RestoreItemCatalog {
     # 把「搜了哪些目录」和「有几份读不了」一并回传：界面显示空列表时，
     # 用户必须能自己判断是「确实没有可还原的」还是「有但工具没找到/读不了」。
     SearchedRoots = @($state.SearchedRoots); UnreadableBackupCount = [int]$state.UnreadableCount
+    # 单条改动因为 op 级校验没过而还不回去：份数单列，别和「整份读不了」混为一谈
+    UnrestorableOpCount = $faulted.Count
     # 凭证读不了时目录**照常构建并返回** —— 用户要能看见清单、看见是哪个文件坏了。
     # 但执行入口会被 Blocked 拦住，界面据此禁用按钮。
     RestoreBlocked = [bool]$consumed.Blocked
@@ -4320,7 +4467,16 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
     if (-not $k -or $lastIdx[$k] -eq $i) { $ops += $flat[$i] }
   }
   $ops = @(Get-RestoreExecutionOps $ops)
+  # 校验没过的 op 不会进执行表，但必须逐条出现在失败清单里——带人话项名和原因。
+  # 「被拒绝」和「没人告诉你」是两件事，后者才是缺陷。
+  $faultedOps = @(Get-FaultedRestoreOps $records)
+  $faultedOpIds = @{}
   $restored = 0; $failed = @(); $skippedOps = @(); $seq = 0; $total = $ops.Count
+  foreach ($faultedOp in $faultedOps) {
+    $faultedOpIds["$($faultedOp.Op.Id)"] = $true
+    $faultedName = $(if ($faultedOp.Item) { "$($faultedOp.Item.DisplayName)（$(Get-RestoreOpLabel $faultedOp.Op)）" } else { Get-RestoreOpLabel $faultedOp.Op })
+    $failed += "$faultedName：该改动的备份记录未通过校验，已拒绝还原（$($faultedOp.Reason)）"
+  }
   # 记账跟着事实走，一条 op 一笔账（两个集合的作用域差别见 Test-RestoreOpAccounted）：
   #   $succeededKeys — 确认把原值写回去了（按目标键）
   #   $finalOpIds    — 执行了、没回到原样、而且重试也不可能回到原样（按 op 自己）
@@ -4478,7 +4634,11 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
   # v2 没有 op 级凭证，只能整份归档：仅当这份备份自己的 op 全部进了消费集合才改名，
   # 否则剩下那几条会随着 .restored 一起被永久勾销
   foreach ($record in @($records | Where-Object { [int]$_.Document.SchemaVersion -eq 2 })) {
+    # 校验没过的 op 算「已了结」：它永远不会被执行，扣着整份不归档换不来任何东西，
+    # 却会让同一份里已经写回的旧值在下次还原时被重放一遍，覆盖用户此后的手动修改。
+    # 原文件只是改名不是删除，理由已经逐条报给用户了。
     $pending = @(@($record.Document.Ops) | Where-Object { $_ } |
+      Where-Object { -not $faultedOpIds.ContainsKey("$($_.Id)") } |
       Where-Object { -not (Test-RestoreOpAccounted $_ $succeededKeys $finalOpIds) })
     if ($pending.Count -gt 0) { continue }
     $f = $record.Path
@@ -4501,6 +4661,18 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
     $row.Total = $row.Total + 1
     if ($succeededKeys.ContainsKey((Get-RestoreOpAccountingKey $wrapper.Op))) { $row.Succeeded = $row.Succeeded + 1 }
     elseif ($finalOpIds.ContainsKey("$($wrapper.Op.Id)")) { $row.Final = $row.Final + 1 }
+  }
+  # 校验没过的 op 不在 $activeV3 里，但它属于哪个项目是清楚的。不把它算进分母，
+  # 「这个项目已经回到优化前」就是假话——那条改动永远回不去。
+  foreach ($faultedOp in $faultedOps) {
+    $faultedItemId = "$($faultedOp.Op.ItemId)"
+    if (-not $faultedItemId) { continue }
+    if (-not $itemRowsMap.Contains($faultedItemId)) {
+      $itemRowsMap[$faultedItemId] = [pscustomobject]@{ Id=$faultedItemId; Item=$null; Total=0; Succeeded=0; Final=0 }
+    }
+    $faultedRow = $itemRowsMap[$faultedItemId]
+    if (-not $faultedRow.Item -and $faultedOp.Item) { $faultedRow.Item = $faultedOp.Item }
+    $faultedRow.Total = $faultedRow.Total + 1
   }
   $itemRows = @($itemRowsMap.Values)
   $restoredRows = @($itemRows | Where-Object { $_.Total -gt 0 -and $_.Succeeded -eq $_.Total })

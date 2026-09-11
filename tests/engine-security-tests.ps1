@@ -81,25 +81,63 @@ try {
   try { [void](Read-ValidatedBackup $path) } catch { $rejected = ($_.Exception.Message -like '*完整性校验失败*') }
   Assert-True $rejected '篡改后的 HMAC 备份必须拒绝'
 
-  $badLegacy = [pscustomobject]@{ Time = (Get-Date).ToString('s'); Ops = @([pscustomobject]@{
-    Kind = 'file'; Path = (Join-Path $temp 'outside.txt'); OrigB64 = [Convert]::ToBase64String([byte[]](1,2,3))
-  }) }
-  $rejected = $false
-  try { Assert-BackupDocument $badLegacy $false } catch { $rejected = ($_.Exception.Message -match '停用|白名单') }
-  Assert-True $rejected '旧备份的用户文件操作必须整类拒绝'
+  # ---- op 级 vs 文档级：这三条是分界线本身 ----
+  # op 级判据（目标白名单、值域、字段集）只作废那一条 op —— 被拒绝的 op 仍然一条都
+  # 不会被执行，变的只是它不再株连同一份备份里的其他原值。
+  # 文档级判据（未知字段、schema、上限、映射、HMAC）继续整份 throw，一个字都没放宽。
+  $badLegacy = [pscustomobject]@{ Time = (Get-Date).ToString('s'); Ops = @(
+    [pscustomobject]@{ Kind = 'file'; Path = (Join-Path $temp 'outside.txt'); OrigB64 = [Convert]::ToBase64String([byte[]](1,2,3)) },
+    [pscustomobject]@{ Kind='reg'; Path='HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'; Name='HwSchMode'
+      Existed=$true; OldValue=2; OldKind='DWord' }
+  ) }
+  $badLegacyFaults = @(Assert-BackupDocument $badLegacy $false)
+  Assert-True ($badLegacyFaults.Count -eq 1 -and "$($badLegacyFaults[0].Kind)" -eq 'file' -and
+    [int]$badLegacyFaults[0].Index -eq 0 -and $badLegacyFaults[0].Reason -match '停用|白名单') `
+    '旧备份的用户文件操作必须被拒绝（现在是 op 级拒绝，同一份里的其他原值不再陪葬）'
 
   $badRegValue = [pscustomobject]@{ Time = (Get-Date).ToString('s'); Ops = @([pscustomobject]@{
     Kind='reg'; Path='HKLM:\SYSTEM\CurrentControlSet\Services\SysMain'; Name='Start'
     Existed=$true; OldValue=99; OldKind='DWord'
   }) }
-  $rejected = $false
-  try { Assert-BackupDocument $badRegValue $false } catch { $rejected = ($_.Exception.Message -like '*启动类型*') }
-  Assert-True $rejected '未签名旧备份的旧值也必须经过目标特定值域校验'
+  $badRegFaults = @(Assert-BackupDocument $badRegValue $false)
+  Assert-True ($badRegFaults.Count -eq 1 -and $badRegFaults[0].Reason -like '*启动类型*') `
+    '未签名旧备份的旧值也必须经过目标特定值域校验'
 
+  # 文档级：一个字都不许放宽
   $unknown = [pscustomobject]@{ Time = (Get-Date).ToString('s'); Ops = @(); Extra = 'x' }
   $rejected = $false
-  try { Assert-BackupDocument $unknown $false } catch { $rejected = ($_.Exception.Message -like '*未知字段*') }
-  Assert-True $rejected '未知 schema 字段必须拒绝'
+  try { [void](Assert-BackupDocument $unknown $false) } catch { $rejected = ($_.Exception.Message -like '*未知字段*') }
+  Assert-True $rejected '未知 schema 字段必须整份拒绝'
+
+  $tooMany = [pscustomobject]@{ Time = (Get-Date).ToString('s'); Ops = @(1..257 | ForEach-Object {
+    [pscustomobject]@{ Kind='reg'; Path='HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'; Name='HwSchMode'
+      Existed=$true; OldValue=2; OldKind='DWord' } }) }
+  $rejected = $false
+  try { [void](Assert-BackupDocument $tooMany $false) } catch { $rejected = ($_.Exception.Message -like '*256*') }
+  Assert-True $rejected '操作数量上限必须整份拒绝，不得被 op 级收集绕过'
+
+  # HMAC 永远最后做、对全文复验：有 fault 收集也绝不能成为绕过完整性校验的旁路
+  $faultyDoc = New-BackupDocument (Get-Date)
+  $faultyDoc.State = 'complete'
+  $faultyOpId = [guid]::NewGuid().ToString('D')
+  $faultyDoc.Items = @([pscustomobject][ordered]@{
+    ItemId='fso-off';RestoreGroupId='fso-off';DisplayName='全屏优化';DefinitionHash=('a'*64)
+    RebootRequired=$false;OpIds=@($faultyOpId) })
+  $faultyDoc.Ops = @([pscustomobject][ordered]@{
+    Id=$faultyOpId;Status='applied';ApplyId=$faultyDoc.ApplyId;ItemId='fso-off';RestoreGroupId='fso-off'
+    OpIndex=0;Kind='file';Path=(Join-Path $temp 'outside.txt');OrigB64=[Convert]::ToBase64String([byte[]](1,2,3)) })
+  $faultyPath = Join-Path $script:BackupDir ("backup-$($faultyDoc.BackupId).json")
+  Write-BackupDocumentAtomic $faultyPath $faultyDoc
+  $faultyRead = Read-ValidatedBackup $faultyPath
+  Assert-True (@($faultyRead.OpFaults).Count -eq 1 -and $faultyRead.OpFaults[0].Reason -match '停用|白名单') `
+    '签名文档里的 op 级 fault 必须随读取结果一起回传'
+  $faultyTampered = Get-Content -LiteralPath $faultyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  $faultyTampered.State = 'pending'
+  [IO.File]::WriteAllText($faultyPath, ($faultyTampered | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding($false)))
+  $rejected = $false
+  try { [void](Read-ValidatedBackup $faultyPath) } catch { $rejected = ($_.Exception.Message -like '*完整性校验失败*') }
+  Assert-True $rejected '带 op fault 的文档被篡改后仍必须整份拒绝，fault 收集不得成为 HMAC 旁路'
+  Remove-Item -LiteralPath $faultyPath -Force
 
   [void][IO.Directory]::CreateDirectory($script:LegacyBackupDir)
   [IO.File]::WriteAllText($script:LegacyRootsFile, (([ordered]@{ SchemaVersion=1; Roots=@($legacyRoot) }) | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
@@ -117,6 +155,26 @@ try {
   Assert-True ($sameMigration.Path -eq $migrated.Path) '同一旧备份重试必须复用确定性受保护副本'
   Rename-Item -LiteralPath $migrated.Path -NewName ((Split-Path -Leaf $migrated.Path) + '.restored')
   Assert-True ((Read-ValidatedBackup $legacyPath).Consumed) '已还原的旧备份必须由受保护标记识别，不得再次消费'
+
+  # 混合旧备份：一条已停用的 file op + 一条合法 reg op。
+  # 旧写法整份拒绝，那次执行的全部原值一起没了；现在只剔掉 file 那条，其余照常迁移。
+  # 签名副本里**只能有可信数据** —— 这个文件是工具自己盖章的，把校验没过的 op 写进去
+  # 等于替它背书。
+  $mixedLegacyPath = Join-Path $script:LegacyBackupDir 'backup-20260811-000000.json'
+  $mixedLegacy = [pscustomobject]@{ Time = '2026-08-11T00:00:00'; Ops = @(
+    [pscustomobject]@{ Kind='file'; Path=(Join-Path $temp 'nvidia-app.cfg'); OrigB64=[Convert]::ToBase64String([byte[]](9,9)) },
+    [pscustomobject]@{ Kind='reg'; Path='HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'
+      Name='HwSchMode'; Existed=$true; OldValue=1; OldKind='DWord' },
+    [pscustomobject]@{ Kind='hib'; OldEnabled=$true }
+  ) }
+  [IO.File]::WriteAllText($mixedLegacyPath, ($mixedLegacy | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+  $mixedMigrated = Read-ValidatedBackup $mixedLegacyPath
+  $mixedKinds = @(@($mixedMigrated.Document.Ops) | ForEach-Object { "$($_.Kind)" })
+  Assert-True (($mixedKinds -join ',') -eq 'reg,hib') `
+    '一条已停用的 file op 仍然作废了同一份旧备份里的其他原值'
+  Assert-True (@($mixedMigrated.LegacyDroppedOps).Count -eq 1 -and
+    "$($mixedMigrated.LegacyDroppedOps[0].Kind)" -eq 'file') '被剔除的 op 必须随迁移结果上报，不能静默丢掉'
+  Assert-True ((Read-ValidatedBackup $mixedMigrated.Path).Document.Ops.Count -eq 2) '剔除 fault op 后的签名副本必须可复验'
 
   $older = [pscustomobject]@{ Path='backup-ffffffff.json'; Document=[pscustomobject]@{ CreatedUtc='2026-08-01T00:00:00Z' } }
   $newer = [pscustomobject]@{ Path='backup-00000000.json'; Document=[pscustomobject]@{ CreatedUtc='2026-08-02T00:00:00Z' } }

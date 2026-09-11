@@ -70,6 +70,7 @@ try {
   $gamesTaskPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games'
   $transparencyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
   $visualFxPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects'
+  $dwmPath = 'HKLM:\SOFTWARE\Microsoft\Windows\Dwm'
 
   # 每个 spec 一个项目一条 reg op，这样「哪一条被消费了」可以逐项断言
   function New-AccountingRegBackup([object[]]$Specs, [DateTime]$When = ([DateTime]::UtcNow)) {
@@ -473,6 +474,82 @@ try {
     Set-Item -LiteralPath Function:\Set-HibernateEnabled -Value $originalSetHibernateEnabled
     Set-Item -LiteralPath Function:\Remove-BcdEntryValue -Value $originalRemoveBcdEntryValue
   }
+
+  # ---------- 4e. 一条 op 校验没过，不得作废整份备份文档 ----------
+  # 用户症状：装过老版本、用过「关闭 NVIDIA App 自动优化」的用户，那一次执行产生的
+  # 整份备份作废——同一份里十几个注册表原值一起没了，还原清单里那次优化直接不出现。
+  # 现在只作废那一条，其余照常还原；被拒绝的 op 仍然一条都不执行，但必须逐条报出来。
+  $mixedFaultDoc = New-BackupDocument ([DateTime]::UtcNow)
+  $mixedFaultDoc.State = 'complete'
+  $faultOpId = [guid]::NewGuid().ToString('D')
+  $goodOpA = [guid]::NewGuid().ToString('D'); $goodOpB = [guid]::NewGuid().ToString('D')
+  $mixedOpId = [guid]::NewGuid().ToString('D'); $mixedFaultOpId = [guid]::NewGuid().ToString('D')
+  $mixedFaultDoc.Items = @(
+    [pscustomobject][ordered]@{ItemId='fso-off';RestoreGroupId='fso-off';DisplayName='全屏优化'
+      DefinitionHash=('2'*64);RebootRequired=$false;OpIds=@($faultOpId)},
+    [pscustomobject][ordered]@{ItemId='wsearch-off';RestoreGroupId='wsearch-off';DisplayName='Windows 搜索索引'
+      DefinitionHash=('3'*64);RebootRequired=$true;OpIds=@($goodOpA,$goodOpB)},
+    # 半好半坏的项目：好的那条照常还原，但它不算「回到优化前」，也不许被拿去按项目复原
+    [pscustomobject][ordered]@{ItemId='mpo-off';RestoreGroupId='mpo-off';DisplayName='多平面叠加'
+      DefinitionHash=('4'*64);RebootRequired=$false;OpIds=@($mixedOpId,$mixedFaultOpId)}
+  )
+  $mixedFaultDoc.Ops = @(
+    [pscustomobject][ordered]@{Id=$faultOpId;Status='applied';ApplyId=$mixedFaultDoc.ApplyId;ItemId='fso-off'
+      RestoreGroupId='fso-off';OpIndex=0;Kind='file';Path=(Join-Path $temp 'nvidia-app.cfg')
+      OrigB64=[Convert]::ToBase64String([byte[]](1,2))},
+    [pscustomobject][ordered]@{Id=$goodOpA;Status='applied';ApplyId=$mixedFaultDoc.ApplyId;ItemId='wsearch-off'
+      RestoreGroupId='wsearch-off';OpIndex=0;Kind='reg';Path=$wsearchPath;Name='Start'
+      Existed=$true;OldValue=2;OldKind='DWord';AppliedValue=4;AppliedKind='DWord'},
+    [pscustomobject][ordered]@{Id=$goodOpB;Status='applied';ApplyId=$mixedFaultDoc.ApplyId;ItemId='wsearch-off'
+      RestoreGroupId='wsearch-off';OpIndex=1;Kind='reg';Path=$sysmainPath;Name='Start'
+      Existed=$true;OldValue=2;OldKind='DWord';AppliedValue=4;AppliedKind='DWord'},
+    [pscustomobject][ordered]@{Id=$mixedOpId;Status='applied';ApplyId=$mixedFaultDoc.ApplyId;ItemId='mpo-off'
+      RestoreGroupId='mpo-off';OpIndex=0;Kind='reg';Path=$dwmPath;Name='OverlayTestMode'
+      Existed=$true;OldValue=0;OldKind='DWord';AppliedValue=5;AppliedKind='DWord'},
+    [pscustomobject][ordered]@{Id=$mixedFaultOpId;Status='applied';ApplyId=$mixedFaultDoc.ApplyId;ItemId='mpo-off'
+      RestoreGroupId='mpo-off';OpIndex=1;Kind='file';Path=(Join-Path $temp 'mpo.cfg')
+      OrigB64=[Convert]::ToBase64String([byte[]](3,4))}
+  )
+  $script:RegState[(Get-TestRegKey $wsearchPath 'Start')] = [pscustomobject]@{Value=4;Kind='DWord'}
+  $script:RegState[(Get-TestRegKey $sysmainPath 'Start')] = [pscustomobject]@{Value=4;Kind='DWord'}
+  $script:RegState[(Get-TestRegKey $dwmPath 'OverlayTestMode')] = [pscustomobject]@{Value=5;Kind='DWord'}
+  $mixedFaultPath = Join-Path $script:BackupDir ("backup-$($mixedFaultDoc.BackupId).json")
+  Write-BackupDocumentAtomic $mixedFaultPath $mixedFaultDoc
+
+  $faultCatalog = Get-RestoreItemCatalog
+  Assert-True (@($faultCatalog.Items | Where-Object Id -eq 'wsearch-off').Count -eq 1) `
+    '同一份备份里的好数据被那条校验没过的 op 一起埋掉了'
+  # 全部 op 都被拒绝的项目：压根不在活动集合里，只能靠单独一条路径补进清单
+  $faultItemRow = @($faultCatalog.Items | Where-Object Id -eq 'fso-off')
+  Assert-True ($faultItemRow.Count -eq 1 -and $faultItemRow[0].Status -eq 'unsupported' -and
+    -not $faultItemRow[0].CanRestore -and $faultItemRow[0].Reason -match '停用|白名单') `
+    '被拒绝的 op 所属项目必须继续出现在清单里并说清原因，不能悄悄消失'
+  # 半好半坏的项目：有活动 op，所以走主循环那条分支，必须被判成不可按项目复原
+  $mixedItemRow = @($faultCatalog.Items | Where-Object Id -eq 'mpo-off')
+  Assert-True ($mixedItemRow.Count -eq 1 -and $mixedItemRow[0].Status -eq 'unsupported' -and
+    -not $mixedItemRow[0].CanRestore -and $mixedItemRow[0].Reason -match '停用|白名单') `
+    '项目里只要有一条改动还不回去，就不能把它当成可精确复原'
+  Assert-True ([int]$faultCatalog.UnrestorableOpCount -eq 2) '还不回去的改动条数没有单独回传给界面'
+
+  $mixedFault = Invoke-Restore $mixedFaultPath
+  Assert-True ($mixedFault.RestoredOps -eq 3 -and
+    (Get-RegValue $wsearchPath 'Start') -eq 2 -and (Get-RegValue $sysmainPath 'Start') -eq 2 -and
+    (Get-RegValue $dwmPath 'OverlayTestMode') -eq 0) `
+    '一条 op 校验没过时，同一份里的其他原值必须照常写回'
+  Assert-True (@($mixedFault.Failed).Count -eq 2 -and
+    (@($mixedFault.Failed) -join '|') -like '*全屏优化*' -and
+    (@($mixedFault.Failed) -join '|') -match '停用|白名单') `
+    '被拒绝的 op 必须带人话项名和原因出现在失败清单里'
+  Assert-True (@($mixedFault.RestoredItemIds) -contains 'wsearch-off' -and
+    @($mixedFault.RestoredItemIds) -notcontains 'fso-off' -and
+    @($mixedFault.RestoredItemIds) -notcontains 'mpo-off' -and
+    @($mixedFault.RebootItems) -contains 'Windows 搜索索引') `
+    '项目里还有改动永远回不去时，不得说它已经回到优化前'
+  $script:RegWrites.Clear()
+  $mixedFaultRetry = Invoke-Restore $mixedFaultPath
+  Assert-True ($mixedFaultRetry.RestoredOps -eq 0 -and @($script:RegWrites.ToArray()).Count -eq 0 -and
+    "$($mixedFaultRetry.Notes)" -like '*此前已完成还原*') `
+    '好数据还原后不得因为那条被拒绝的 op 而反复重放'
 
   # ---------- 5. v2 整份归档的闸门跟着 op 走 ----------
   # v2 没有 op 级凭证，只能整份 .restored 归档。所以它的判据必须是「这份自己的 op
