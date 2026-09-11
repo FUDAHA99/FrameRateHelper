@@ -96,6 +96,31 @@ try {
     $path
   }
 
+  # 一个项目、多条 reg op（New-AccountingRegBackup 是一个 spec 一个项目，ItemId 不能重复）
+  function New-AccountingItemBackup([string]$ItemId, [string]$DisplayName, [string]$Hash, [object[]]$Specs) {
+    $doc = New-BackupDocument ([DateTime]::UtcNow)
+    $doc.State = 'complete'
+    $opIds = @(); $ops = @(); $index = 0
+    foreach ($spec in $Specs) {
+      $opId = [guid]::NewGuid().ToString('D')
+      $opIds += $opId
+      $ops += [pscustomobject][ordered]@{
+        Id=$opId;Status='applied';ApplyId=$doc.ApplyId;ItemId=$ItemId;RestoreGroupId=$ItemId
+        OpIndex=$index;Kind='reg';Path=$spec.Path;Name=$spec.Name;Existed=$true;OldValue=$spec.OldValue
+        OldKind='DWord';AppliedValue=$spec.AppliedValue;AppliedKind='DWord'
+      }
+      $script:RegState[(Get-TestRegKey $spec.Path $spec.Name)] = [pscustomobject]@{ Value=$spec.AppliedValue;Kind='DWord' }
+      $index++
+    }
+    $doc.Items = @([pscustomobject][ordered]@{
+      ItemId=$ItemId;RestoreGroupId=$ItemId;DisplayName=$DisplayName;DefinitionHash=$Hash
+      RebootRequired=$false;OpIds=$opIds })
+    $doc.Ops = $ops
+    $path = Join-Path $script:BackupDir ("backup-$($doc.BackupId).json")
+    Write-BackupDocumentAtomic $path $doc
+    $path
+  }
+
   function New-AccountingPowerBackup([string]$OldGuid, [DateTime]$When = ([DateTime]::UtcNow)) {
     $doc = New-BackupDocument $When
     $doc.State = 'complete'
@@ -646,6 +671,100 @@ try {
   Assert-True ($v2Retry.Failed.Count -eq 0 -and (Test-Path -LiteralPath ($v2Path + '.restored')) -and
     (Get-RegValue $mmPath 'NetworkThrottlingIndex') -eq 22) `
     'v2 备份补齐最后一条后必须归档'
+
+  # ---------- 8. 冲突判定三态：中断过一次不该把复原按钮永久变灰 ----------
+  # 旧写法只问一句「当前值还等于工具写进去的值吗」，不等于就一律判成「用户后来改过」。
+  # 可是「当前值已经等于要还原的原值」同样不等于——于是两类完全没被用户碰过的情况
+  # 被打成篡改，红字 + 复选框灰掉，而且是永久的（凭证只在成功时才写）。
+  $prioPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl'
+  $mousePath2 = 'HKCU:\Control Panel\Mouse'
+  $gameBarPath = 'HKCU:\Software\Microsoft\GameBar'
+
+  # 8a. 还原跑到一半中断：系统里已经是原值了，只是账没平
+  [void](New-AccountingRegBackup @(
+    [pscustomobject]@{ItemId='prio-separation';DisplayName='前台调度权重';Hash=('7'*64);RebootRequired=$false
+      Path=$prioPath;Name='Win32PrioritySeparation';OldValue=38;AppliedValue=40}
+  ))
+  $script:RegState[(Get-TestRegKey $prioPath 'Win32PrioritySeparation')] = [pscustomobject]@{Value=38;Kind='DWord'}
+  $settledRow = @((Get-RestoreItemCatalog).Items | Where-Object Id -eq 'prio-separation')
+  Assert-True ($settledRow.Count -eq 1 -and $settledRow[0].Status -eq 'already_restored' -and
+    $settledRow[0].CanRestore -and $settledRow[0].StatusText -eq '已恢复原值') `
+    '当前值已经等于原值时不得判成「发生后续修改」——用户从没动过'
+  $script:RegWrites.Clear()
+  $settledResult = Invoke-RestoreSelected @('prio-separation')
+  Assert-True ($settledResult.Failed.Count -eq 0 -and $settledResult.RestoredOps -eq 0 -and
+    @($script:RegWrites.ToArray()).Count -eq 0 -and
+    $settledResult.Receipt -and (Test-Path -LiteralPath $settledResult.Receipt)) `
+    '已经是原值的项目复原时不该再写一遍，但必须写凭证把账平掉'
+  Assert-True (@((Get-RestoreItemCatalog).Items | Where-Object Id -eq 'prio-separation').Count -eq 0) `
+    '把账平掉之后该项目必须从清单里消失，而不是永远挂着'
+
+  # 8b. 备份之后、写入之前抛异常留下的 prepared op：AppliedValue 从没落地
+  $preparedDoc = New-BackupDocument ([DateTime]::UtcNow)
+  $preparedDoc.State = 'complete'
+  $preparedOpId = [guid]::NewGuid().ToString('D')
+  $preparedDoc.Items = @([pscustomobject][ordered]@{
+    ItemId='visualfx-perf';RestoreGroupId='visualfx-perf';DisplayName='视觉效果按性能调整'
+    DefinitionHash=('8'*64);RebootRequired=$false;OpIds=@($preparedOpId)})
+  $preparedDoc.Ops = @([pscustomobject][ordered]@{
+    Id=$preparedOpId;Status='prepared';ApplyId=$preparedDoc.ApplyId;ItemId='visualfx-perf'
+    RestoreGroupId='visualfx-perf';OpIndex=0;Kind='reg';Path=$visualFxPath;Name='VisualFXSetting'
+    Existed=$true;OldValue=0;OldKind='DWord';AppliedValue=2;AppliedKind='DWord'})
+  $preparedPath = Join-Path $script:BackupDir ("backup-$($preparedDoc.BackupId).json")
+  Write-BackupDocumentAtomic $preparedPath $preparedDoc
+  $script:RegState[(Get-TestRegKey $visualFxPath 'VisualFXSetting')] = [pscustomobject]@{Value=0;Kind='DWord'}
+  $preparedRow = @((Get-RestoreItemCatalog).Items | Where-Object Id -eq 'visualfx-perf')
+  Assert-True ($preparedRow.Count -eq 1 -and $preparedRow[0].Status -eq 'already_restored' -and $preparedRow[0].CanRestore) `
+    'AppliedValue 从没落地的 prepared op 不得被判成「用户后来改过」'
+  [void](Invoke-RestoreSelected @('visualfx-perf'))
+
+  # 8c. 同一项目里一条已经是原值、一条还等着还原：两条都要处理掉
+  [void](New-AccountingItemBackup 'mouse-accel-off' '鼠标加速' ('a'*63+'b') @(
+    [pscustomobject]@{Path=$mousePath2;Name='MouseThreshold1';OldValue=6;AppliedValue=0},
+    [pscustomobject]@{Path=$mousePath2;Name='MouseThreshold2';OldValue=10;AppliedValue=0}
+  ))
+  $script:RegState[(Get-TestRegKey $mousePath2 'MouseThreshold1')] = [pscustomobject]@{Value=6;Kind='DWord'}
+  $mixedStateRow = @((Get-RestoreItemCatalog).Items | Where-Object Id -eq 'mouse-accel-off')
+  Assert-True ($mixedStateRow.Count -eq 1 -and $mixedStateRow[0].CanRestore) `
+    '一条已经是原值、一条还等着还原时，项目必须仍然可复原'
+  $mixedStateResult = Invoke-RestoreSelected @('mouse-accel-off')
+  Assert-True ($mixedStateResult.Failed.Count -eq 0 -and $mixedStateResult.RestoredOps -eq 1 -and
+    (Get-RegValue $mousePath2 'MouseThreshold2') -eq 10) `
+    '只该写回还没还原的那一条'
+  Assert-True (@((Get-RestoreItemCatalog).Items | Where-Object Id -eq 'mouse-accel-off').Count -eq 0) `
+    '两条都处理掉了，项目必须从清单里消失'
+
+  # 8d. 真正的第三方修改仍然保留现状，但不再锁死同项目里没被碰过的设置
+  [void](New-AccountingItemBackup 'game-mode' '游戏模式' ('c'*63+'d') @(
+    [pscustomobject]@{Path=$gameBarPath;Name='AutoGameModeEnabled';OldValue=0;AppliedValue=1},
+    [pscustomobject]@{Path=$gameBarPath;Name='AllowAutoGameMode';OldValue=0;AppliedValue=1}
+  ))
+  # 第三个值：既不是工具写进去的 1，也不是原值 0
+  $script:RegState[(Get-TestRegKey $gameBarPath 'AutoGameModeEnabled')] = [pscustomobject]@{Value=7;Kind='DWord'}
+  $conflictRow = @((Get-RestoreItemCatalog).Items | Where-Object Id -eq 'game-mode')
+  Assert-True ($conflictRow.Count -eq 1 -and $conflictRow[0].Status -eq 'conflict' -and
+    $conflictRow[0].CanRestore -and $conflictRow[0].Reason -like '*AutoGameModeEnabled*') `
+    '冲突必须逐条指出是哪个设置，并且不锁死同项目里没被碰过的那条'
+  $conflictMixResult = Invoke-RestoreSelected @('game-mode')
+  Assert-True ($conflictMixResult.Failed.Count -eq 0 -and $conflictMixResult.RestoredOps -eq 1 -and
+    (Get-RegValue $gameBarPath 'AutoGameModeEnabled') -eq 7 -and
+    (Get-RegValue $gameBarPath 'AllowAutoGameMode') -eq 0) `
+    '被改过的那条必须保留当前值，没被改过的那条必须写回原值'
+  $conflictAfter = @((Get-RestoreItemCatalog).Items | Where-Object Id -eq 'game-mode')
+  Assert-True ($conflictAfter.Count -eq 1 -and $conflictAfter[0].Status -eq 'conflict') `
+    '冲突那条不得被消费——用户把值改回去之后还要能复原它'
+
+  # 8e. 全部复原同样不许拿旧值抹掉用户的手改
+  $fullConflictPath = New-AccountingRegBackup @(
+    [pscustomobject]@{ItemId='wsearch-off';DisplayName='Windows 搜索索引';Hash=('e'*63+'f');RebootRequired=$false
+      Path=$wsearchPath;Name='Start';OldValue=2;AppliedValue=4}
+  )
+  $script:RegState[(Get-TestRegKey $wsearchPath 'Start')] = [pscustomobject]@{Value=3;Kind='DWord'}
+  $fullConflict = Invoke-Restore $fullConflictPath
+  Assert-True ($fullConflict.Failed.Count -eq 0 -and $fullConflict.RestoredOps -eq 0 -and
+    $fullConflict.Skipped.Count -eq 1 -and $fullConflict.Skipped[0] -like '*又被改过*' -and
+    (Get-RegValue $wsearchPath 'Start') -eq 3) `
+    '全部复原不得拿旧值抹掉用户在优化之后做的手动修改'
 
 } finally {
   if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }

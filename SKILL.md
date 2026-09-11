@@ -141,10 +141,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booste
 powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booster.ps1" -Restore
 ```
 
-`-ListRestoreItems` 返回当前可精确复原项目及冲突状态；`-RestoreItems` 支持单选和多选，
-统一恢复到各项目第一次被工具修改前。执行前会确认当前值仍是工具当时写入的值；检测到
-用户或其他程序的后续修改时保留当前状态。每个项目内部原子执行，任一子设置失败会写回
-本次复原前状态。成功操作通过签名 `restore-receipt-<GUID>.json` 消费，原始 v3 备份不改名。
+`-ListRestoreItems` 返回当前可精确复原项目及其状态；`-RestoreItems` 支持单选和多选，
+统一恢复到各项目第一次被工具修改前。
+
+**逐个底层设置**判三态，不是整项判一次：
+
+| 当前值 | Status | 会发生什么 |
+|---|---|---|
+| 等于工具当时写入的值 | `available` | 写回原值 |
+| 已经等于要还原的原值 | `already_restored` | 不写，只把记录归档（多半是上次复原中断在记账前） |
+| 既不是前者也不是后者 | `conflict` | 保留当前值，不覆盖，也不消费——用户改回去之后还能复原 |
+
+项目状态取最坏的那一条，但 `CanRestore` 只要**还有**可复原的设置就为真：一条冲突不会
+锁死同项目里没被碰过的其他设置，`Reason` 里会逐条列出是哪几个设置发生了冲突。
+`already_restored` 同样 `CanRestore = $true`——点一次就把账平掉，而不是永远挂在清单上。
+
+实际写入的那些设置内部原子执行，任一子设置失败会写回本次复原前状态。
+成功操作通过签名 `restore-receipt-<GUID>.json` 消费，原始 v3 备份不改名。
+全部复原（不带 `-RestoreItems`）对注册表类改动用同一套判据，冲突项进 `Skipped` 而不是
+被旧值覆盖；v2 旧备份没记录「工具写入的值」，判不了，仍按原契约无条件写回。
 第一阶段只开放八个无需重启且没有复杂依赖的项目：`game-mode`、`dvr-off`、
 `prio-separation`、`net-throttling-off`、`sys-responsiveness`、`mmcss-games`、`fso-off`、
 `gpu-pref`；其余项目继续使用全部复原。

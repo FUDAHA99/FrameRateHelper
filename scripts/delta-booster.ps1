@@ -4256,6 +4256,39 @@ function Get-SelectiveRestoreUnits($Wrappers) {
   @($units.ToArray())
 }
 
+# 冲突判定必须是三态。旧写法只问一句「当前值还等于工具写进去的值吗」，不等于就一律
+# 判成「优化后又被用户或其他程序修改」——可是「当前值已经等于要还原的原值」同样不等于。
+# 于是两类完全没被用户碰过的情况被打成篡改，红字 + 复选框灰掉，而且是永久的
+# （凭证只在成功时才写）：
+#   · 还原跑到一半断电 / 被杀软杀掉 / 某条 op 失败，**已经写回原值**的设置从此显示
+#     「发生后续修改」；
+#   · 更高频、不需要任何中断：一次正常执行里某条子操作在备份之后、写入之前抛异常，
+#     该 op 永久停在 Status='prepared'，AppliedValue 从没落地，该项目从此永远冲突。
+# 按**当前值**判而不是按 Status 判，prepared 的 op 天然落在 already_restored 上，
+# 不需要任何特判。真正的第三方修改（当前值是第三个值）仍然判 conflict 并保留现状，
+# 一个字都没放宽。
+function Get-RegUnitRestoreState($Unit) {
+  $restoreOp = $Unit.Restore
+  $kind = Get-RegValueKind $restoreOp.Path $restoreOp.Name
+  $value = $(if ($null -ne $kind) { Get-RegValue $restoreOp.Path $restoreOp.Name } else { $null })
+  if ($restoreOp.Existed) {
+    $oldValue = $restoreOp.OldValue
+    if ($restoreOp.OldKind -eq 'Binary') { $oldValue = [byte[]]@($oldValue) }
+    elseif ($restoreOp.OldKind -eq 'MultiString') { $oldValue = [string[]]@($oldValue) }
+    if ($null -ne $kind -and "$kind" -eq "$($restoreOp.OldKind)" -and (Test-ValueEqual $value $oldValue)) {
+      return 'already_restored'
+    }
+  } elseif ($null -eq $kind) {
+    # 原本就不存在、现在也不存在：已经是还原目标
+    return 'already_restored'
+  }
+  $latest = $Unit.Latest
+  if ($null -ne $kind -and "$kind" -eq "$($latest.AppliedKind)" -and (Test-ValueEqual $value $latest.AppliedValue)) {
+    return 'available'
+  }
+  'conflict'
+}
+
 function Test-RegOperationMatchesApplied($Op) {
   $kind = Get-RegValueKind $Op.Path $Op.Name
   $value = $(if ($null -ne $kind) { Get-RegValue $Op.Path $Op.Name } else { $null })
@@ -4302,15 +4335,28 @@ function Get-RestoreItemCatalog {
     } elseif ($shared.ContainsKey($itemGroup.Name)) {
       $status = 'shared_target'; $reason = '该项目与其他项目共享底层设置，请使用全部复原'; $canRestore = $false
     } else {
-      foreach ($unit in $units) {
-        $check = Test-RegOperationMatchesApplied $unit.Latest
-        if (-not $check.Matches) { $status = 'conflict'; $reason = '检测到优化后又被用户或其他程序修改，本次不会覆盖'; $canRestore = $false; break }
+      # 不再一条不匹配就 break：同一项目里真被改过的那条和没被改过的那些要分开算，
+      # 否则一条冲突把整项锁死，用户连没被碰过的设置都还原不了。
+      $unitStates = @($units | ForEach-Object { [pscustomobject]@{ Unit = $_; State = (Get-RegUnitRestoreState $_) } })
+      $conflictUnits = @($unitStates | Where-Object { $_.State -eq 'conflict' })
+      $availableUnits = @($unitStates | Where-Object { $_.State -eq 'available' })
+      if ($conflictUnits.Count -gt 0) {
+        # 逐条列出是哪个设置被改过，而不是整项一句话——用户才知道该去看什么
+        $conflictNames = @($conflictUnits | ForEach-Object { Get-RestoreOpLabel $_.Unit.Latest })
+        $status = 'conflict'; $canRestore = ($availableUnits.Count -gt 0)
+        $reason = "以下设置在优化后又被修改过，复原时会保留当前值：$($conflictNames -join '、')" +
+                  $(if ($canRestore) { "；其余 $($unitStates.Count - $conflictUnits.Count) 项仍可复原" })
+      } elseif ($availableUnits.Count -eq 0) {
+        # 全部已经等于原值：多半是上次还原跑到一半中断了，系统已经对了，只是账没平。
+        # 让用户点一下就把账平掉，而不是红字告诉他「你改过」。
+        $status = 'already_restored'; $canRestore = $true
+        $reason = '这些设置当前已经是优化前的值（多半是上次复原中断在记账前），点一次复原即可把记录归档'
       }
     }
     [void]$items.Add([pscustomobject][ordered]@{
       Id = $itemGroup.Name; Name = "$($meta[0].DisplayName)"; RestoreGroupId = "$($meta[0].RestoreGroupId)"
       SettingCount = $units.Count; HistoryOpCount = $wrappers.Count; RebootRequired = [bool]$meta[0].RebootRequired
-      Status = $status; StatusText = $(switch ($status) { 'available' { '可精确复原' }; 'conflict' { '发生后续修改' }; 'shared_target' { '存在共享设置' }; default { '仅支持全部复原' } })
+      Status = $status; StatusText = $(switch ($status) { 'available' { '可精确复原' }; 'already_restored' { '已恢复原值' }; 'conflict' { '发生后续修改' }; 'shared_target' { '存在共享设置' }; default { '仅支持全部复原' } })
       Reason = $reason; CanRestore = $canRestore
     })
   }
@@ -4429,19 +4475,35 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
       elseif (@($wrappers | Where-Object { $_.Op.Kind -ne 'reg' }).Count -gt 0) { $message = '该项目包含当前版本尚未开放的底层设置，请使用全部复原' }
       else {
         $units = @(Get-SelectiveRestoreUnits $wrappers)
-        $conflict = $false
-        foreach ($unit in $units) { if (-not (Test-RegOperationMatchesApplied $unit.Latest).Matches) { $conflict = $true; break } }
-        if ($conflict) { $message = '检测到优化后又被用户或其他程序修改，已保留当前状态' }
+        $unitStates = @($units | ForEach-Object { [pscustomobject]@{ Unit = $_; State = (Get-RegUnitRestoreState $_) } })
+        $conflictUnits = @($unitStates | Where-Object { $_.State -eq 'conflict' } | ForEach-Object Unit)
+        $writeUnits = @($unitStates | Where-Object { $_.State -eq 'available' } | ForEach-Object Unit)
+        # already_restored：系统里已经是原值了（上次还原中断在记账前）。跳过写入，
+        # 但**照常进消费凭证**——这正是把中断留下的账平掉的机制，否则那一项永远挂在清单上。
+        $settledUnits = @($unitStates | Where-Object { $_.State -eq 'already_restored' } | ForEach-Object Unit)
+        $conflictNote = $(if ($conflictUnits.Count -gt 0) {
+          "；以下设置在优化后又被改过，已保留当前值：$(@($conflictUnits | ForEach-Object { Get-RestoreOpLabel $_.Latest }) -join '、')"
+        } else { '' })
+        if ($writeUnits.Count -eq 0 -and $settledUnits.Count -eq 0) {
+          $message = "检测到优化后又被用户或其他程序修改，已保留当前状态：$(@($conflictUnits | ForEach-Object { Get-RestoreOpLabel $_.Latest }) -join '、')"
+        }
         else {
+          $handledUnits = @($writeUnits) + @($settledUnits)
           $snapshots = [ordered]@{}; $touched = New-Object System.Collections.Generic.List[string]
           try {
-            foreach ($unit in $units) { $snapshots[$unit.TargetKey] = Get-RegRestoreSnapshot $unit.Latest }
-            foreach ($unit in $units) {
+            foreach ($unit in $writeUnits) { $snapshots[$unit.TargetKey] = Get-RegRestoreSnapshot $unit.Latest }
+            foreach ($unit in $writeUnits) {
               [void]$touched.Add($unit.TargetKey)
               Invoke-RestoreRegOperation $unit.Restore
             }
-            $ok = $true; $message = "已复原 $($units.Count) 个底层设置"
-            [void]$successes.Add([pscustomobject]@{ Id=$itemId;Name=$name;Wrappers=$wrappers;Snapshots=$snapshots;Units=$units;RebootRequired=[bool]$meta[0].RebootRequired })
+            $ok = $true
+            $message = "已复原 $($writeUnits.Count) 个底层设置" +
+                       $(if ($settledUnits.Count -gt 0) { "（另有 $($settledUnits.Count) 项本来就已经是原值，仅归档记录）" }) +
+                       $conflictNote
+            # 只消费真正处理掉的那些 unit；冲突那条不消费，用户改回去之后还能复原
+            [void]$successes.Add([pscustomobject]@{ Id=$itemId;Name=$name
+              Wrappers=@($handledUnits | ForEach-Object { @($_.Wrappers) })
+              Snapshots=$snapshots;Units=$handledUnits;RebootRequired=[bool]$meta[0].RebootRequired })
           } catch {
             $restoreError = $_.Exception.Message; $rollbackErrors = @()
             $rollbackKeys = @($touched.ToArray()); if ($rollbackKeys.Count -gt 1) { [array]::Reverse($rollbackKeys) }
@@ -4481,7 +4543,8 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
     $files = @($successArray | ForEach-Object { @($_.Wrappers | ForEach-Object BackupPath) } | Select-Object -Unique)
     [pscustomobject][ordered]@{
       Mode='selected_items'; File=$(if($files.Count){$files[0]}else{$null}); Files=$files; MergedCount=$files.Count
-      RestoredOps=@($successArray | ForEach-Object { @($_.Units).Count } | Measure-Object -Sum).Sum
+      # 只数真正写回去的：already_restored 的 unit 进了凭证但一个字节都没写
+      RestoredOps=@($successArray | ForEach-Object { @($_.Snapshots.Keys).Count } | Measure-Object -Sum).Sum
       RestoredItems=$successArray.Count; Failed=@($failed.ToArray()); Skipped=@(); Notes=@($state.Notes)
       # 按项目复原的凭证写入失败会整体回滚（事务语义，见上面的 catch），所以这里永远
       # 不会有「已还原但没记上账」的中间态；字段仍然要在，两条还原路径的结果形状必须一致
@@ -4545,9 +4608,15 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
   }
   # 同一目标只保留最后出现的那条：列表按新→旧排列，最后出现的正是最早备份里的记录
   $lastIdx = @{}
+  # 同一目标最新的那条记录：它带着「工具当时写进去的值」，是判断「这之后有没有人改过」
+  # 的唯一依据。列表按新→旧排，第一次出现的就是最新的。
+  $latestByKey = @{}
   for ($i = 0; $i -lt $flat.Count; $i++) {
     $k = Get-RestoreOpKey $flat[$i]
-    if ($k) { $lastIdx[$k] = $i }
+    if ($k) {
+      $lastIdx[$k] = $i
+      if (-not $latestByKey.ContainsKey($k)) { $latestByKey[$k] = $flat[$i] }
+    }
   }
   $ops = @()
   for ($i = 0; $i -lt $flat.Count; $i++) {
@@ -4699,18 +4768,34 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
         }
         'reg'     {
           if ($op.Path -like 'HKLM:*' -and -not (Test-Admin)) { throw '需要管理员权限' }
-          if ($op.Existed) {
-            # JSON 往返后二进制/多字符串会变成普通数组，必须转回强类型才能写回注册表
-            $val = $op.OldValue
-            if ($op.OldKind -eq 'Binary') { $val = [byte[]]@($val) }
-            elseif ($op.OldKind -eq 'MultiString') { $val = [string[]]@($val) }
-            Set-RegValue $op.Path $op.Name $val $op.OldKind
-            if ("$(Get-RegValueKind $op.Path $op.Name)" -ne "$($op.OldKind)" -or -not (Test-ValueEqual (Get-RegValue $op.Path $op.Name) $val)) { throw '注册表还原后回读验证失败' }
-          } else {
-            Remove-RegValue $op.Path $op.Name
-            if ($null -ne (Get-RegValueKind $op.Path $op.Name)) { throw '注册表删除后回读验证失败' }
+          # 当前值既不是工具写进去的值、也不是要写回的原值 ⇒ 这之后有人改过它。
+          # 直接覆盖等于拿旧值抹掉用户的手改——按项目复原早就这么判了，全部复原不该更粗暴。
+          # v2 备份没记 AppliedValue，判不了，照旧无条件写回（旧契约不变）。
+          $latestRegOp = $(if ($latestByKey.ContainsKey($opKey)) { $latestByKey[$opKey] } else { $null })
+          $regState = 'available'
+          if ($latestRegOp -and $latestRegOp.PSObject.Properties['AppliedKind']) {
+            $regState = Get-RegUnitRestoreState ([pscustomobject]@{ Restore = $op; Latest = $latestRegOp })
           }
-          $restored++; $succeededKeys[$opKey] = $true
+          if ($regState -eq 'conflict') {
+            $skippedOps += "$(Get-RestoreOpLabel $op)：优化后这个设置又被改过，已保留当前值，没有写回原值"
+            $finalOpIds[$opId] = $true
+          } elseif ($regState -eq 'already_restored') {
+            # 系统里已经是原值了（多半是上次还原中断在记账前）：不用再写，把账平掉就行
+            $restored++; $succeededKeys[$opKey] = $true
+          } else {
+            if ($op.Existed) {
+              # JSON 往返后二进制/多字符串会变成普通数组，必须转回强类型才能写回注册表
+              $val = $op.OldValue
+              if ($op.OldKind -eq 'Binary') { $val = [byte[]]@($val) }
+              elseif ($op.OldKind -eq 'MultiString') { $val = [string[]]@($val) }
+              Set-RegValue $op.Path $op.Name $val $op.OldKind
+              if ("$(Get-RegValueKind $op.Path $op.Name)" -ne "$($op.OldKind)" -or -not (Test-ValueEqual (Get-RegValue $op.Path $op.Name) $val)) { throw '注册表还原后回读验证失败' }
+            } else {
+              Remove-RegValue $op.Path $op.Name
+              if ($null -ne (Get-RegValueKind $op.Path $op.Name)) { throw '注册表删除后回读验证失败' }
+            }
+            $restored++; $succeededKeys[$opKey] = $true
+          }
         }
         default   { throw "未知备份类型：$($op.Kind)" }
       }
