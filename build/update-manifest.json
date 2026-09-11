@@ -2,9 +2,9 @@
     "version":  "0.23.0.13",
     "displayVersion":  "0.23.0.13",
     "minimumSupportedVersion":  "0.23.0.8",
-    "notes":  "- 修复从早期版本升级后，还原游戏进程优先级可能提示“备份注册表目标不在白名单”、导致还原列表读取失败的问题。\n- 历史兼容仅开放 DeltaForceClient.exe 的 CpuPriorityClass 与 IoPriority 原优化项，其他进程名和 IFEO 值继续按安全白名单拒绝。\n- v0.23.0.8 以前的版本仍需完成更新后继续使用。",
+    "notes":  "- 修复从早期版本升级后，还原游戏进程优先级可能提示“备份注册表目标不在白名单”、导致还原列表读取失败的问题。\r\n- 历史兼容仅开放 DeltaForceClient.exe 的 CpuPriorityClass 与 IoPriority 原优化项，其他进程名和 IFEO 值继续按安全白名单拒绝。\r\n- v0.23.0.8 以前的版本仍需完成更新后继续使用。",
     "url":  "https://upstream-host.invalid/",
     "setupUrl":  "https://upstream-host.invalid/DeltaForceBooster-Setup.exe",
-    "sha256":  "ade70ce1efa21c210bfa39a095701d2faed33be025db5e33aced8f00d64610e1",
-    "size":  5438976
+    "sha256":  "5c9878f3a760ba08e3fa7371ca3b87c699822164a354e2a0e348411079ea6f4f",
+    "size":  942080
 }

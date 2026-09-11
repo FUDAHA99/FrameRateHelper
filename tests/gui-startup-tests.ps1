@@ -46,7 +46,7 @@ Assert-True ($raw -match 'Start-Process\s+-FilePath\s+\$PresentMon\s+-WorkingDir
   'PresentMon does not use the trusted neutral working directory'
 Assert-True ($raw -match 'Start-Process\s+-FilePath\s+\$SetupFile\s+-WorkingDirectory\s+\(\[Environment\]::SystemDirectory\)') `
   'inline setup still inherits the product working directory'
-Assert-True ($raw.Contains('Content="上传完整诊断"') -and
+Assert-True ($raw.Contains('Content="导出完整诊断"') -and
   $raw.Contains("`$lines.Add('== 运行环境与显示 / 音频 ==')") -and
   $raw.Contains("`$lines.Add('== 关键环境变量（脱敏） ==')")) `
   'expanded negative-effect diagnostic collection is missing from the report button'
@@ -206,7 +206,7 @@ Assert-True ($raw.Contains('x:Name="InlineRestorePanel"') -and
   $raw.Contains('Invoke-ElevatedEngineAction -Action Restore -RestoreItemIds')) `
   'optimization page does not expose inline single/multi/select-all plus full restore through the protected engine'
 Assert-True ($raw.Contains("'SystemRoot','WINDIR','ProgramData','ProgramFiles','ProgramFiles(x86)','TEMP','TMP','PATH','PSModulePath','COMSPEC','PATHEXT','__COMPAT_LAYER'") -and
-  $raw.Contains('（仅记录名称，不上传值）')) `
+  $raw.Contains('（仅记录名称，不记录值）')) `
   'diagnostic environment collection is not value-allowlisted or does not redact injection values'
 Assert-True ($raw.Contains("`$lines.Add('== 分析字段（schema v3） ==')") -and
   $raw.Contains('feedback_issue_ids=') -and $raw.Contains('cpu_visible_cores=') -and
@@ -442,7 +442,7 @@ Assert-True ($raw.Contains("Join-Path `$script:UserConfigDir 'run-logs'") -and
   $runLogHistoryFunction.Extent.Text.Contains('Test-ProtectedFileAcl $file.FullName') -and
   $writeLogFunction.Extent.Text.Contains('Add-PersistentRunLogLine $line') -and
   $raw.Contains('== 本次与最近历史运行日志 ==') -and
-  $raw.Contains('关闭软件后仍保留最近运行日志；重新打开可直接复制或上传')) `
+  $raw.Contains('关闭软件后仍保留最近运行日志；重新打开可直接复制或导出')) `
   'runtime logs are not retained in the protected per-user store or included after reopening'
 & {
   param([string]$TailText, [string]$AppendText)

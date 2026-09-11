@@ -1517,9 +1517,9 @@ $xaml = @'
       </Border>
       <StackPanel Grid.Row="2" Margin="0,9,0,0">
         <StackPanel Orientation="Horizontal">
-          <!-- 把诊断信息打包发给作者排查；上传前列清单请用户确认，不会静默发送 -->
-          <Button x:Name="ReportBtn" Content="上传完整诊断" Style="{StaticResource Ghost}" Width="132"/>
-          <TextBlock Text="关闭软件后仍保留最近运行日志；重新打开可直接复制或上传" Style="{StaticResource Mono}"
+          <!-- 把诊断信息打包成文件供用户自行发给别人排查；写文件前列清单请用户确认，不会静默生成 -->
+          <Button x:Name="ReportBtn" Content="导出完整诊断" Style="{StaticResource Ghost}" Width="132"/>
+          <TextBlock Text="关闭软件后仍保留最近运行日志；重新打开可直接复制或导出" Style="{StaticResource Mono}"
                      Margin="12,0,0,0"/>
         </StackPanel>
         <!-- 统计设置。免责声明里承诺了「可在软件的统计设置中关闭」，上游却没有这个界面，
@@ -5906,7 +5906,7 @@ function Complete-TuningVariantApplyDisposition {
       catch{$state.status='failed';$state.phase='failed';$state.stopReason='rollback_failed';$state.lastMessage=$_.Exception.Message;Complete-GuiTuningExperimentTerminal $true;throw}
     }elseif($UnsafeFailure){
       $state.status='failed';$state.phase='failed';$state.stopReason='apply_without_backup'
-      $state.lastMessage='套用后没有可信的指定备份，已停止。请使用普通「还原设置」或上传诊断报告。'
+      $state.lastMessage='套用后没有可信的指定备份，已停止。请使用普通「还原设置」或导出诊断报告。'
       Complete-GuiTuningExperimentTerminal $false;throw $state.lastMessage
     }
     $state.pendingActionId='';$state.pendingResumePhase='';$state.lastMessage="已跳过 $($Candidate.displayName)：$Reason"
@@ -6408,7 +6408,7 @@ function Load-ActiveTuningExperiment {
     } elseif("$($state.phase)" -eq 'applying'){
       $candidate=@($state.candidates|Where-Object activeBackup|Select-Object -First 1)
       if(-not $candidate){
-        $state.status='failed';$state.phase='failed';$state.stopReason='apply_failed';$state.lastMessage='上次 Apply 在备份路径回传前中断。已拒绝继续写系统；请使用普通「还原设置」或上传诊断报告。'
+        $state.status='failed';$state.phase='failed';$state.stopReason='apply_failed';$state.lastMessage='上次 Apply 在备份路径回传前中断。已拒绝继续写系统；请使用普通「还原设置」或导出诊断报告。'
         Complete-GuiTuningExperimentTerminal $false
         Show-ConfirmDialog '实验中断' 'CRASH WINDOW DETECTED' $state.lastMessage '知道了' -InfoOnly|Out-Null
       } else {
@@ -6426,9 +6426,9 @@ function Load-ActiveTuningExperiment {
   }
 }
 
-# ---------- 诊断报告（本地组装 + 脱敏 + 用户确认后上传） ----------
+# ---------- 诊断报告（本地组装 + 脱敏 + 用户确认后另存为文件） ----------
 
-$script:ReportUploadUrl = 'https://upstream-host.invalid/report/upload'
+$script:ReportExportPrefix = '帧率优化助手-诊断报告'
 $script:ReportMaxBytes = 256KB
 
 $script:DiagnosticIssueChoices = @(
@@ -6465,7 +6465,7 @@ $script:DiagnosticBenefitChoices = @(
   [pscustomobject]@{ Id = 'better_stability'; Label = '游戏稳定性提高 / 闪退减少' }
 )
 
-# “上传完整诊断”的第一步：先让用户标记当前问题和已经感受到的改善。两组都支持多选；
+# “导出完整诊断”的第一步：先让用户标记当前问题和已经感受到的改善。两组都支持多选；
 # 至少选择一项才进入隐私确认页，避免收到没有反馈上下文的完整诊断。
 function Show-DiagnosticFeedbackDialog {
   $fxaml = @'
@@ -6557,10 +6557,10 @@ function Show-DiagnosticFeedbackDialog {
     </Grid>
     <Grid Grid.Row="2" Margin="14,4,14,14">
       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-      <TextBlock x:Name="HintTxt" Grid.Column="0" Text="选择内容会写入诊断报告，上传前仍会显示完整数据清单。"
+      <TextBlock x:Name="HintTxt" Grid.Column="0" Text="选择内容会写入诊断报告，保存前仍会显示完整数据清单。"
                  Foreground="{DynamicResource TextMut}" FontSize="10" VerticalAlignment="Center" TextWrapping="Wrap" Margin="2,0,10,0"/>
       <Button x:Name="CancelBtn" Grid.Column="1" Content="取消" Width="82" Height="34" IsCancel="True"/>
-      <Button x:Name="NextBtn" Grid.Column="2" Content="下一步：确认上传" Width="158" Height="34"
+      <Button x:Name="NextBtn" Grid.Column="2" Content="下一步：确认导出" Width="158" Height="34"
               IsDefault="True" Margin="9,0,0,0"/>
     </Grid>
   </Grid>
@@ -6821,7 +6821,7 @@ function New-DiagnosticReport($Feedback) {
   $injectionNames = @([Environment]::GetEnvironmentVariables('Process').Keys | Where-Object {
     "$_" -match '^(?i:COR_|COMPlus_|DOTNET_|PSExecutionPolicyPreference$)'
   } | ForEach-Object { "$_" } | Sort-Object)
-  $lines.Add("运行时注入变量：$(if ($injectionNames.Count) { ($injectionNames -join '、') + '（仅记录名称，不上传值）' } else { '未检测到' })")
+  $lines.Add("运行时注入变量：$(if ($injectionNames.Count) { ($injectionNames -join '、') + '（仅记录名称，不记录值）' } else { '未检测到' })")
   try {
     $powercfg = Join-Path ([Environment]::SystemDirectory) 'powercfg.exe'
     $activePlan = (& $powercfg /getactivescheme 2>&1 | Out-String).Trim()
@@ -6893,12 +6893,46 @@ function New-DiagnosticReport($Feedback) {
   $txt
 }
 
-# 真正发请求的唯一出口：验证时整体替换成桩，绝不往服务器发测试数据
-function Invoke-ReportUpload([string]$Body) {
-  $bytes = [Text.Encoding]::UTF8.GetBytes($Body)
-  $r = Invoke-WebRequest -Uri $script:ReportUploadUrl -Method Post -Body $bytes `
-        -ContentType 'text/plain; charset=utf-8' -TimeoutSec 30 -UseBasicParsing
-  ($r.Content | ConvertFrom-Json).code
+# 报告落地的唯一出口：本分支不再有服务端，改为在原登录用户的桌面另存为 .txt。
+# 高权限 GUI 不能用 [Environment]::GetFolderPath(Desktop) —— 那取到的是 UAC 审批
+# 账户的桌面，不是当前用户的。原登录用户身份在启动时已认证并复验过。
+function Get-DiagnosticExportDir {
+  $candidates = [Collections.Generic.List[string]]::new()
+  $profileRoot = Split-Path -Parent (Split-Path -Parent $script:OriginalUserLocalAppData)
+  if ($profileRoot) {
+    # OneDrive 会把「桌面」重定向到 OneDrive\桌面。写到 C:\Users\X\Desktop 的话
+    # 文件会落在一个用户根本看不见的目录里 —— 那正是我们要消灭的「找不到」。
+    # 所以先读原用户配置单元里的 User Shell Folders，失败再退回默认位置。
+    try {
+      $shellKey = "Registry::HKEY_USERS\$($script:OriginalUserSid)\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+      $raw = "$((Get-ItemProperty -LiteralPath $shellKey -Name Desktop -ErrorAction Stop).Desktop)"
+      # %USERPROFILE% 在高权限进程里会展开成管理员的 profile，只能手工替换。
+      if ($raw -match '(?i)^%USERPROFILE%') { $raw = $profileRoot + $raw.Substring(13) }
+      $raw = [Environment]::ExpandEnvironmentVariables($raw)
+      if ($raw -and [IO.Path]::IsPathRooted($raw)) { [void]$candidates.Add($raw) }
+    } catch {}
+    [void]$candidates.Add((Join-Path $profileRoot 'Desktop'))
+  }
+  # 最后兜底：受保护目录一定存在，也一定可写。
+  [void]$candidates.Add((Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'DeltaForceBooster\diagnostics'))
+  foreach ($dir in $candidates) {
+    try {
+      if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+        [void][IO.Directory]::CreateDirectory($dir)
+      }
+      return $dir
+    } catch {}
+  }
+  throw '找不到任何可写的导出位置'
+}
+
+function Save-DiagnosticReportFile([string]$Body) {
+  $dir = Get-DiagnosticExportDir
+  $name = '{0}-{1:yyyyMMdd-HHmmss}.txt' -f $script:ReportExportPrefix, [DateTime]::Now
+  $path = Join-Path $dir $name
+  # 带 BOM：用户多半用记事本打开，PS 5.1 之外的工具也靠它认出 UTF-8。
+  [IO.File]::WriteAllText($path, $Body, (New-Object Text.UTF8Encoding($true)))
+  $path
 }
 
 # ---------- 显卡指引对话框（驱动层设置 + 控制面板入口） ----------
@@ -9221,12 +9255,13 @@ $ui.TelemetryChk.Add_Click({
   }
 })
 
-# 上传诊断报告：先选择问题/改善，再组装脱敏报告并确认数据清单，最后才上传。绝不静默发送
+# 导出诊断报告：先选择问题/改善，再组装脱敏报告并确认数据清单，最后才写文件。
+# 本分支没有服务端，报告只落到本机磁盘上，发不发、发给谁完全由用户决定。
 $ui.ReportBtn.Add_Click({
   try {
     $feedback = Show-DiagnosticFeedbackDialog
     if (-not $feedback) {
-      Write-Log '已取消上传诊断报告。'
+      Write-Log '已取消导出诊断报告。'
       return
     }
     Write-Log '正在收集诊断信息…'
@@ -9235,37 +9270,39 @@ $ui.ReportBtn.Add_Click({
     $selectedIssues = $(if (@($feedback.IssueLabels).Count) { @($feedback.IssueLabels) -join '、' } else { '未选择' })
     $selectedBenefits = $(if (@($feedback.BenefitLabels).Count) { @($feedback.BenefitLabels) -join '、' } else { '未选择' })
     $msg = @(
-      "将把以下内容上传到作者的服务器（$script:ReportUploadUrl），仅用于排查你反馈的问题："
+      '将把以下内容写成一个 .txt 文件保存到你的桌面，不会上传到任何服务器：'
       ''
       "· 你选择的当前问题：$selectedIssues"
       "· 你选择的已有改善：$selectedBenefits"
       '· 硬件型号与系统版本（CPU / 显卡 / 内存 / Windows 版本）'
       '· 显示器分辨率/刷新率、音频设备、页面文件、系统启动时间与相关进程名'
-      '· 排障所需的关键环境变量（路径会脱敏；敏感变量只记录名称，不上传值）'
+      '· 排障所需的关键环境变量（路径会脱敏；敏感变量只记录名称，不记录值）'
       '· 已定位的游戏主程序路径（用户名和机器名会脱敏）'
       '· 各优化项的当前状态'
       '· 本次运行日志与软件关闭前保留的最近历史日志'
       '· 受保护备份的位置，以及本次日志中的备份文件名与执行结果（不会读取注册表原值）'
       '· 本工具的版本号'
       ''
-      "路径中的用户名、机器名已替换为 <user> / <pc>。报告大小约 $kb KB。"
-      '上传成功后会给你一个取件码，发给开发者即可。'
+      '路径中的用户名、机器名仍然会替换为 <user> / <pc> —— 这份文件多半是要发给别人的，'
+      "默认脱敏比事后后悔安全。报告大小约 $kb KB。"
+      ''
+      '保存后请自行把文件发给愿意帮你看的人。文件存放位置会写进下面的运行日志。'
     ) -join "`n"
-    if (-not (Show-ConfirmDialog '上传诊断报告' 'UPLOAD REPORT' $msg '确认上传')) {
-      Write-Log '已取消上传诊断报告。'
+    if (-not (Show-ConfirmDialog '导出诊断报告' 'EXPORT REPORT' $msg '确认导出')) {
+      Write-Log '已取消导出诊断报告。'
       return
     }
     Set-BusyState $true
-    Write-Log '正在上传诊断报告…'
+    Write-Log '正在写出诊断报告…'
     $window.Dispatcher.Invoke([action]{}, [Windows.Threading.DispatcherPriority]::Render)
-    $code = Invoke-ReportUpload $report
-    if (-not $code) { throw '服务器没有返回取件码' }
-    Write-Log "诊断报告上传成功，取件码：$code"
-    Show-ConfirmDialog '上传成功' 'UPLOAD OK' "取件码：$code`n`n把这个码发给开发者，他就能取到你这份报告。`n（取件码也已写进上面的运行日志，可用「复制」按钮一并带走）" '知道了' -InfoOnly | Out-Null
+    $path = Save-DiagnosticReportFile $report
+    if (-not $path) { throw '报告没有写成文件' }
+    Write-Log "诊断报告已保存：$path"
+    Show-ConfirmDialog '导出成功' 'EXPORT OK' "报告已保存到：`n`n$path`n`n把这个文件发给愿意帮你看的人即可。`n（路径也已写进上面的运行日志，可用「复制」按钮一并带走）" '知道了' -InfoOnly | Out-Null
   } catch {
     # 失败绝不含糊：说清原因并引导走「复制日志」手工发送
-    Write-Log "诊断报告上传失败：$($_.Exception.Message)"
-    Show-ConfirmDialog '上传失败' 'UPLOAD FAILED' "上传失败：$($_.Exception.Message)`n`n可能是网络不通、服务暂时不可用，或短时间内上传次数过多。`n`n改用手工方式：点运行日志右侧的「复制」按钮，把日志粘贴发给开发者即可。" '知道了' -InfoOnly | Out-Null
+    Write-Log "诊断报告导出失败：$($_.Exception.Message)"
+    Show-ConfirmDialog '导出失败' 'EXPORT FAILED' "导出失败：$($_.Exception.Message)`n`n可能是桌面所在磁盘满了、被安全软件拦截，或目录权限异常。`n`n改用手工方式：点运行日志右侧的「复制」按钮，把日志粘贴发给开发者即可。" '知道了' -InfoOnly | Out-Null
   } finally { Set-BusyState $false }
 })
 
@@ -9479,7 +9516,7 @@ $ui.ApplyBtn.Add_Click({
               $(if ($lost.Count -gt 0) { @($lost | ForEach-Object { "· $_" }) -join "`n" } else { '（无）' }) +
               "`n`n失败原因：$($r.BackupError)" +
               $(if ($r.Backup) { "`n`n已抢救出部分备份：$(Split-Path -Leaf $r.Backup)，「还原设置」可还原其中已记录的部分。" }) +
-              "`n`n其余项如需回退，请按上面的项名手动处理，或点「上传诊断报告」联系开发者。"
+              "`n`n其余项如需回退，请按上面的项名手动处理，或点「导出诊断报告」发给开发者。"
       Show-ConfirmDialog '备份写入失败' 'BACKUP WRITE FAILED' $warn '我已知晓' -InfoOnly | Out-Null
     }
     Write-Log "执行完成：共 $total 项 — $okN 成功、$($failList.Count) 失败、$($skipList.Count) 跳过$(if ($attList.Count -gt 0) { "、$($attList.Count) 项体检发现问题" })。"
