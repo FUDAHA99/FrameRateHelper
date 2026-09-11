@@ -22,7 +22,7 @@ function Get-GuiFunctionText([string]$Name) {
   $node[0].Extent.Text
 }
 
-foreach ($name in 'Get-SavedUiPreferences','Get-SavedAppTheme','Get-SavedAppWindowHeight','Save-AppUiPreferences') {
+foreach ($name in 'Get-SavedUiPreferences','Get-SavedAppTheme','Get-SavedAppWindowHeight','Save-AppUiPreferences','Test-TelemetryOptIn') {
   Invoke-Expression (Get-GuiFunctionText $name)
 }
 
@@ -55,6 +55,41 @@ try {
 
   [IO.File]::WriteAllText($script:UiPreferencesPath,'{"schemaVersion":1,"theme":"dark","windowHeight":400}',[Text.UTF8Encoding]::new($false))
   Assert-True ((Get-SavedAppWindowHeight) -eq 1200) 'unsafe short window height was not rejected'
+
+  # --- telemetry opt-in switch: negative assertions guarding "off by default" ---
+  # NOTE: this file has no UTF-8 BOM, so every message here must stay ASCII.
+  # Any failure below means the build reports telemetry without user consent.
+
+  Remove-Item -LiteralPath $script:UiPreferencesPath -Force
+  Assert-True ((Test-TelemetryOptIn) -eq $false) 'missing preference file did not fail closed'
+
+  [IO.File]::WriteAllText($script:UiPreferencesPath,'{"schemaVersion":1,"theme":"dark"}',[Text.UTF8Encoding]::new($false))
+  Assert-True ((Test-TelemetryOptIn) -eq $false) 'missing telemetryEnabled field did not fail closed'
+
+  [IO.File]::WriteAllText($script:UiPreferencesPath,'{"schemaVersion":1,"theme":"dark","telemetry',[Text.UTF8Encoding]::new($false))
+  Assert-True ((Test-TelemetryOptIn) -eq $false) 'corrupt JSON did not fail closed'
+
+  [IO.File]::WriteAllText($script:UiPreferencesPath,'{"schemaVersion":1,"theme":"dark","telemetryEnabled":"true"}',[Text.UTF8Encoding]::new($false))
+  Assert-True ((Test-TelemetryOptIn) -eq $false) 'string "true" was coerced to boolean true'
+
+  [IO.File]::WriteAllText($script:UiPreferencesPath,'{"schemaVersion":1,"theme":"dark","telemetryEnabled":1}',[Text.UTF8Encoding]::new($false))
+  Assert-True ((Test-TelemetryOptIn) -eq $false) 'number 1 was coerced to boolean true'
+
+  # schemaVersion other than 1 makes Get-SavedUiPreferences return $null
+  [IO.File]::WriteAllText($script:UiPreferencesPath,'{"schemaVersion":2,"telemetryEnabled":true}',[Text.UTF8Encoding]::new($false))
+  Assert-True ((Test-TelemetryOptIn) -eq $false) 'unknown schemaVersion did not fail closed'
+
+  # only an explicit boolean true enables it
+  [IO.File]::WriteAllText($script:UiPreferencesPath,'{"schemaVersion":1,"theme":"dark","telemetryEnabled":true}',[Text.UTF8Encoding]::new($false))
+  Assert-True ((Test-TelemetryOptIn) -eq $true) 'explicit opt-in was not honoured'
+
+  # the two-argument save (theme change / window close) must not silently reset it
+  Save-AppUiPreferences 'dark' 1188.4
+  Assert-True ((Test-TelemetryOptIn) -eq $true) 'two-argument save reset an enabled opt-in'
+
+  # only an explicit $false turns it back off
+  Save-AppUiPreferences 'dark' 1188.4 $false
+  Assert-True ((Test-TelemetryOptIn) -eq $false) 'explicit opt-out was not persisted'
 } finally {
   Remove-Item -LiteralPath $case -Recurse -Force -ErrorAction SilentlyContinue
 }

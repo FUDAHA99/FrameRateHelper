@@ -127,6 +127,89 @@
 
 $ErrorActionPreference = 'Stop'
 
+# ---------- 启动引导日志：必须在一切之前，且不依赖任何东西 ----------
+# Write-Log（本文件后段）依赖 $ui.LogBox 这个 WPF 控件，持久化日志路径又要更晚才设置，
+# 所以主界面前三千行里任何失败都不产生任何磁盘记录 —— 用户只会看到一个 MessageBox，
+# 开发者拿不到任何线索。这是「软件打不开」这类反馈最难定位的根本原因。
+#
+# 本节的三条硬约束：
+#   1. 只用 .NET 静态方法，不调用任何 cmdlet —— 避免触发模块自动加载，因此不受
+#      下面 PSModulePath 收紧的影响，也能放在它之前跑。
+#   2. 自身绝不抛异常。日志器把程序弄崩比没有日志更糟，所以每一处都 try/catch 吞掉，
+#      失败就把路径清空、静默降级成「没有日志」。
+#   3. 落盘位置不依赖任何环境变量（%TEMP% 在闸门失败时本身就可能是错的），
+#      直接从 CommonApplicationData 推导。
+$script:BootLogPath = ''
+try {
+  $bootLogRoot = [IO.Path]::Combine(
+    [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData),
+    'DeltaForceBooster')
+  # 绝不创建这个根目录 —— 只在它已经存在时才继续。
+  # 原因：根目录必须由 New-ProtectedDirectory 以 Admin/SYSTEM 独占 ACL 建立，而它在
+  # 发现已有目录的 Owner 或权限不安全时会直接 throw「已拒绝接管」。若本层抢先用
+  # CreateDirectory 建出来，它会继承 ProgramData 的默认 ACL（Owner=当前用户、
+  # BUILTIN\Users:Write），于是引擎初始化必然失败 —— 一个专门用来诊断「打不开」的
+  # 功能反而会让全新安装的机器永远打不开。
+  # 代价：全新安装的第一次启动若在引擎初始化之前就失败，这一次拿不到日志。
+  # 之后每次启动都有（根目录在首次成功运行时由引擎建立）。
+  if (-not [IO.Directory]::Exists($bootLogRoot)) { throw '受保护根目录尚未建立，跳过引导日志' }
+  $bootLogDir = [IO.Path]::Combine($bootLogRoot, 'startup-logs')
+  [void][IO.Directory]::CreateDirectory($bootLogDir)
+  # 只留最近 20 份，避免长期累积。用 .NET 排序，不用 Sort-Object
+  try {
+    $existingBootLogs = [IO.Directory]::GetFiles($bootLogDir, 'startup-*.log')
+    if ($existingBootLogs.Length -gt 20) {
+      [Array]::Sort($existingBootLogs)
+      for ($i = 0; $i -lt ($existingBootLogs.Length - 20); $i++) {
+        try { [IO.File]::Delete($existingBootLogs[$i]) } catch {}
+      }
+    }
+  } catch {}
+  $script:BootLogPath = [IO.Path]::Combine($bootLogDir,
+    ('startup-{0:yyyyMMdd-HHmmss}-{1}.log' -f [DateTime]::Now, $PID))
+} catch { $script:BootLogPath = '' }
+
+function Write-BootLog([string]$Line) {
+  if (-not $script:BootLogPath) { return }
+  try {
+    [IO.File]::AppendAllText($script:BootLogPath,
+      ('[{0:HH:mm:ss.fff}] {1}{2}' -f [DateTime]::Now, $Line, [Environment]::NewLine),
+      [Text.UTF8Encoding]::new($true))
+  } catch { $script:BootLogPath = '' }
+}
+
+# 环境快照。排查「在我机器上打不开」时，这几行往往直接指出原因，
+# 所以要在任何校验之前就写下来 —— 哪怕下一行就崩了，这些也已经落盘。
+Write-BootLog '================ 主界面启动 ================'
+try {
+  Write-BootLog ("PowerShell {0} ({1})  CLR {2}  64位进程={3}" -f
+    $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, [Environment]::Version, [Environment]::Is64BitProcess)
+  Write-BootLog ("系统 {0}  区域 {1}" -f
+    [Environment]::OSVersion.VersionString, [Globalization.CultureInfo]::CurrentCulture.Name)
+  Write-BootLog ("脚本 {0}" -f $PSCommandPath)
+  # 会话标记只记前 8 位：它是命名管道名 DeltaForceBooster.Engine.<32hex> 的组成部分，
+  # 而这份日志对普通用户可读。前缀足够把日志和本次会话对上，又不是完整的管道名。
+  $sessionText = "$env:DFB_ENGINE_HOST_SESSION"
+  $sessionShort = $(if ($sessionText.Length -ge 8) { $sessionText.Substring(0, 8) + '…' } else { '(空或过短)' })
+  Write-BootLog ("父进程环境 HOSTPID={0} LAUNCHERPID={1} SESSION={2} REPAIR={3}" -f
+    "$env:DFB_ENGINE_HOST_PID", "$env:DFB_LAUNCHER_PID",
+    $sessionShort, "$env:DFB_REPAIR_ONLY")
+  Write-BootLog ("TEMP={0}" -f "$env:TEMP")
+} catch { Write-BootLog "环境快照采集失败：$($_.Exception.Message)" }
+
+# 兜底陷阱：只处理没有被任何 try/catch 接住的终止性错误（被接住的走各自的 catch）。
+# break 保持原有的「出错即终止」语义不变，只是终止前留下记录。
+trap {
+  try {
+    Write-BootLog ("!! 未捕获错误 {0}：{1}" -f $_.Exception.GetType().Name, $_.Exception.Message)
+    if ($_.InvocationInfo) {
+      Write-BootLog ("   位置 第 {0} 行：{1}" -f
+        $_.InvocationInfo.ScriptLineNumber, "$($_.InvocationInfo.Line)".Trim())
+    }
+  } catch {}
+  break
+}
+
 # 这两个 Get-CimInstance 运行在引擎点源之前。UAC 过程会继承原用户环境，
 # 所以必须在第一次模块自动加载之前去掉用户可写 PSModulePath，防止高权限加载同名模块。
 $trustedBootstrapModuleRoots = @(
@@ -161,12 +244,40 @@ function Test-BootstrapPathHasReparsePoint([string]$Path) {
   } catch { $true }
 }
 
+# 把内部校验原因翻译成用户能据此行动的一句话。原来只把内部措辞原样抛给用户
+# （「EngineHost 会话标记缺失或无效」），用户看不懂也不知道该做什么。
+function Get-StartupFailureHint([string]$Reason) {
+  switch -Regex ("$Reason") {
+    '会话标记(缺失|无效)|修复会话标记' { '这通常是直接双击了 .ps1 脚本，或被其他程序间接启动。请改用安装目录里的「启动优化工具.exe」打开。' }
+    '没有管理员令牌'                   { '提权没有完成。请在 UAC 提示里点「是」；若公司或网吧策略禁止提权，本机无法使用需要管理员权限的功能。' }
+    'UAC 策略'                         { '当前系统的 UAC 策略需要受限兼容会话。启动时请在场景选择里选「网吧 / 公共电脑」。' }
+    'LocalAppData'                     { '读不到原登录用户的用户目录。常见于用户配置文件损坏、目录被重定向到网络盘或移动盘。' }
+    'SID'                              { '识别不出原登录用户账户。常见于内置 Administrator、域账户异常或用户配置文件损坏。' }
+    '受保护用户状态初始化失败'         { '写不进 %ProgramData%\DeltaForceBooster。常见于杀毒软件拦截，或该目录被上一次安装留下了错误权限。' }
+    '父进程|ExecutablePath|安装根'     { '启动链校验不通过，安装目录可能不完整或被改动过。建议重新安装一次完整版本。' }
+    default                            { '若重新安装后仍然出现，请把下面这份启动日志一起提交。' }
+  }
+}
+
 function Stop-UntrustedGuiStartup([string]$Reason) {
-  Add-Type -AssemblyName PresentationFramework
-  [Windows.MessageBox]::Show(
-    "软件已停止启动：$Reason`n`n请只通过「启动优化工具.exe」打开。如果仍然出现，请从官网重新安装完整版本。",
-    '三角洲行动 · 画面优化助手', [Windows.MessageBoxButton]::OK,
-    [Windows.MessageBoxImage]::Error) | Out-Null
+  # 先落盘再弹窗：弹窗本身（Add-Type / WPF）也可能失败，那时日志是唯一的线索
+  Write-BootLog "!! 启动被拒：$Reason"
+  $hint = ''
+  try { $hint = Get-StartupFailureHint $Reason } catch {}
+  if ($hint) { Write-BootLog "   处理建议：$hint" }
+  $logLine = $(if ($script:BootLogPath) { "启动日志：$($script:BootLogPath)" }
+               else { '启动日志写入失败，未能保存诊断信息。' })
+  Write-BootLog '================ 启动终止 ================'
+  try {
+    Add-Type -AssemblyName PresentationFramework
+    [Windows.MessageBox]::Show(
+      "软件已停止启动。`n`n原因：$Reason`n`n$hint`n`n$logLine",
+      '帧率优化助手', [Windows.MessageBoxButton]::OK,
+      [Windows.MessageBoxImage]::Error) | Out-Null
+  } catch {
+    # 连 WPF 都起不来（.NET 组件缺失 / 精简系统）。日志已经落盘，这里只保证进程退出
+    Write-BootLog "!! 连失败提示窗口都无法显示：$($_.Exception.Message)"
+  }
   exit 1
 }
 
@@ -413,6 +524,18 @@ function Initialize-ProtectedUserStateStore {
   # updater.ps1 点源时优先使用这个受保护位置；不要依赖 elevated 账户的
   # Environment.SpecialFolder.LocalApplicationData。
   $script:BoosterUserConfigDir = $configRoot
+
+  # 启动引导日志目录：唯一一个对普通用户「可读」的受保护子目录（$UsersRead = $true）。
+  # 必须可读，否则「软件打不开」时用户无法以普通权限导出诊断包 —— 而要求提权才能
+  # 诊断「提权失败」是个死锁。目录里只有环境快照和失败原因，会话标记已截断。
+  #
+  # 整段包在 try/catch 里：这是纯诊断设施，任何失败都不许影响启动。
+  # （本层的第一版就因为抢先创建受保护根目录而会让全新安装的机器永远打不开。）
+  try {
+    New-ProtectedDirectory (Join-Path $script:ProgramDataRoot 'startup-logs') $true
+  } catch {
+    Write-BootLog "启动日志目录初始化失败（不影响启动）：$($_.Exception.Message)"
+  }
 }
 
 try { Initialize-ProtectedUserStateStore }
@@ -1404,11 +1527,21 @@ $xaml = @'
                  VerticalScrollBarVisibility="Auto" BorderThickness="0" Background="Transparent"
                  Foreground="{DynamicResource TextSec}" FontFamily="Consolas" FontSize="11" Padding="10,7"/>
       </Border>
-      <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,9,0,0">
-        <!-- 把诊断信息打包发给作者排查；上传前列清单请用户确认，不会静默发送 -->
-        <Button x:Name="ReportBtn" Content="上传完整诊断" Style="{StaticResource Ghost}" Width="132"/>
-        <TextBlock Text="关闭软件后仍保留最近运行日志；重新打开可直接复制或上传" Style="{StaticResource Mono}"
-                   Margin="12,0,0,0"/>
+      <StackPanel Grid.Row="2" Margin="0,9,0,0">
+        <StackPanel Orientation="Horizontal">
+          <!-- 把诊断信息打包发给作者排查；上传前列清单请用户确认，不会静默发送 -->
+          <Button x:Name="ReportBtn" Content="上传完整诊断" Style="{StaticResource Ghost}" Width="132"/>
+          <TextBlock Text="关闭软件后仍保留最近运行日志；重新打开可直接复制或上传" Style="{StaticResource Mono}"
+                     Margin="12,0,0,0"/>
+        </StackPanel>
+        <!-- 统计设置。免责声明里承诺了「可在软件的统计设置中关闭」，上游却没有这个界面，
+             Enabled 字段也只被写成 $true 过 —— 这里把承诺补成真的。默认关闭，
+             Test-TelemetryOptIn 在读不到或读坏配置时一律返回 $false。 -->
+        <CheckBox x:Name="TelemetryChk" Style="{StaticResource TacCheck}" Margin="0,11,0,0">
+          <TextBlock Text="发送匿名使用统计" Foreground="{DynamicResource TextPri}"/>
+        </CheckBox>
+        <TextBlock x:Name="TelemetryHint" Style="{StaticResource Mono}" Margin="19,1,0,0" TextWrapping="Wrap"
+                   Text="默认关闭。勾选后才会上报版本、硬件概况与优化项结果；不含路径、账号名与注册表内容。"/>
       </StackPanel>
     </Grid>
 
@@ -1706,7 +1839,7 @@ foreach ($n in 'TitleBar','MinBtn','CloseBtn','UpdateBtn','NoticeBtn','NoticeTex
                'InlineRestorePanel','InlineRestoreItemsPanel','InlineRestoreEmptyText',
                'InlineRestoreLegacyNotice','InlineRestoreLegacyText','InlineRestoreSelectedText','InlineRestoreAllSummary',
                'InlineRestoreSelectAllBtn','InlineRestoreClearBtn','InlineRestoreSelectedBtn','InlineRestoreAllBtn','InlineRestoreCloseBtn',
-               'ReportBtn','DisclaimerBtn','LogBox',
+               'ReportBtn','DisclaimerBtn','LogBox','TelemetryChk','TelemetryHint',
                'PresetBox','SavePresetBtn','DelPresetBtn','PresetNote',
                'TabOptBtn','TabTuneBtn','TabFrameFixBtn','TabRefBtn','TabLogBtn','LogBadge','LogBadgeTxt',
                'OptPage','TunePage','FrameFixPage','RefPage','LogPage','RefPanel','ActionRow',
@@ -1815,6 +1948,19 @@ function Get-SavedAppWindowHeight {
   [double]$script:DefaultAppWindowHeight
 }
 
+# 匿名统计的唯一真相来源。默认关闭：读不到配置、字段缺失、JSON 损坏、类型不对
+# 一律返回 $false（fail-closed）。上游把开关存在 telemetry.json 里，那个文件位于
+# Admin/SYSTEM-only 目录且被多个后台 runspace 抢写，不适合承载用户开关。
+function Test-TelemetryOptIn {
+  try {
+    $value = Get-SavedUiPreferences
+    if ($value -and $value.PSObject.Properties['telemetryEnabled'] -and $value.telemetryEnabled -is [bool]) {
+      return [bool]$value.telemetryEnabled
+    }
+  } catch {}
+  $false
+}
+
 function Get-PersistableAppWindowHeight {
   $height = $(if ($window.WindowState -eq [Windows.WindowState]::Normal) { [double]$window.Height } else { [double]$window.RestoreBounds.Height })
   if ([double]::IsNaN($height) -or [double]::IsInfinity($height) -or $height -lt 640) {
@@ -1829,16 +1975,20 @@ function Set-SavedAppWindowHeight {
   $window.Height = [math]::Min($maximum,[math]::Max(640.0,(Get-SavedAppWindowHeight)))
 }
 
-function Save-AppUiPreferences([string]$Theme, [double]$WindowHeight) {
+function Save-AppUiPreferences([string]$Theme, [double]$WindowHeight, $TelemetryEnabled = $null) {
   if (-not $script:LightThemeEnabled) { $Theme = 'dark' }
   if ($Theme -notin 'dark','light') { $Theme = 'dark' }
   if ([double]::IsNaN($WindowHeight) -or [double]::IsInfinity($WindowHeight) -or $WindowHeight -lt 640) {
     $WindowHeight = [double]$script:DefaultAppWindowHeight
   }
+  # 默认值必须是「读回当前磁盘值」而不是 $false/$true：Save-AppTheme 与关窗保存
+  # 都只传两个参数，写死任一常量都会在用户没操作开关时把它悄悄改掉。
+  if ($null -eq $TelemetryEnabled) { $TelemetryEnabled = (Test-TelemetryOptIn) }
   $payload = [pscustomobject][ordered]@{
     schemaVersion=1
     theme=$Theme
     windowHeight=[math]::Round($WindowHeight,0)
+    telemetryEnabled=[bool]$TelemetryEnabled
   }
   $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($payload | ConvertTo-Json -Compress))
   Write-BytesAtomic $script:UiPreferencesPath $bytes
@@ -3679,13 +3829,19 @@ $script:TelemetryStorageCache = @{}
 $script:TelemetryDeviceSecurityCache = $null
 
 function Get-TelemetryInstallId {
+  # 全部自动上报的总闸门。installId 是三条上传链路的唯一凭据，调用方
+  # （gui Send-AnonymousTelemetry / 性能采样 worker / 调优事件生成器）都已写好
+  # $null 分支，因此在这里断掉即可，不需要逐个删除上报代码。
+  # 闸门必须在 try 之外：放进 try 里，异常仍会掉到下面的重建分支重新开启上报。
+  if (-not (Test-TelemetryOptIn)) { return $null }
   $dir = $script:UserConfigDir
   if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
   $path = Join-Path $dir 'telemetry.json'
   try {
     if (Test-Path -LiteralPath $path) {
       $cfg = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-      if ($cfg.Enabled -eq $false) { return $null }
+      # 正向判断：原先写 -eq $false，JSON 损坏或字段缺失时会落到重建分支写 Enabled=$true
+      if ($cfg.Enabled -ne $true) { return $null }
       if ("$($cfg.InstallId)" -match '^[0-9a-fA-F-]{32,64}$') { return "$($cfg.InstallId)" }
     }
   } catch {}
@@ -3771,16 +3927,19 @@ function Set-TelemetryOptimizationContext {
     $dir = $script:UserConfigDir
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $path = Join-Path $dir 'telemetry.json'
-    $enabled = $true
-    $installId = [guid]::NewGuid().ToString()
+    # 上游在这里无条件铸造一个匿名标识并把 Enabled 默认成 $true，于是用户第一次点
+    # 「执行优化」就会在磁盘上留下稳定追踪 ID —— 即便总闸门已关。改为以用户开关为准，
+    # 关闭时不生成任何标识。
+    $enabled = (Test-TelemetryOptIn)
+    $installId = $(if ($enabled) { [guid]::NewGuid().ToString() } else { '' })
     $createdAt = (Get-Date).ToUniversalTime().ToString('o')
     $currentTier = 'baseline'
     $deviceToken = ''
     $tokenExpiresAt = 0L
     if (Test-Path -LiteralPath $path) {
       $cfg = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-      if ($cfg.Enabled -eq $false) { $enabled = $false }
-      if ("$($cfg.InstallId)" -match '^[0-9a-fA-F-]{32,64}$') { $installId = "$($cfg.InstallId)" }
+      # 不再从文件回读 Enabled：ui-preferences.json 的开关是唯一真相来源。
+      if ($enabled -and "$($cfg.InstallId)" -match '^[0-9a-fA-F-]{32,64}$') { $installId = "$($cfg.InstallId)" }
       if ("$($cfg.CreatedAt)") { $createdAt = "$($cfg.CreatedAt)" }
       if ("$($cfg.DeviceToken)" -match '^v1\.') { $deviceToken = "$($cfg.DeviceToken)" }
       try { $tokenExpiresAt = [long]$cfg.TokenExpiresAt } catch {}
@@ -9441,6 +9600,22 @@ $ui.CopyLogBtn.Add_Click({
 $ui.GuideBtn.Add_Click({ Show-GpuGuideDialog (Get-HardwareInfo) })
 
 $ui.DisclaimerBtn.Add_Click({ Show-DisclaimerDialog -ReadOnly | Out-Null })
+
+# 统计设置：开关状态与 ui-preferences.json 同步。Add_Click 在 IsChecked 变更之后触发，
+# 所以这里读到的就是用户刚选的值。写盘失败要回退勾选态，不能让界面显示的和实际生效的不一致。
+$ui.TelemetryChk.IsChecked = (Test-TelemetryOptIn)
+$ui.TelemetryChk.Add_Click({
+  $wanted = [bool]$ui.TelemetryChk.IsChecked
+  try {
+    Save-AppUiPreferences $script:CurrentTheme (Get-PersistableAppWindowHeight) $wanted
+    $actual = Test-TelemetryOptIn
+    if ($actual -ne $wanted) { throw '写入后回读校验不一致' }
+    Write-Log $(if ($wanted) { '已开启匿名使用统计。' } else { '已关闭匿名使用统计，本机不再上报任何数据。' })
+  } catch {
+    $ui.TelemetryChk.IsChecked = (Test-TelemetryOptIn)
+    Write-Log "统计设置保存失败，已恢复原状态：$($_.Exception.Message)"
+  }
+})
 
 # 上传诊断报告：先选择问题/改善，再组装脱敏报告并确认数据清单，最后才上传。绝不静默发送
 $ui.ReportBtn.Add_Click({

@@ -23,11 +23,17 @@ $functions=@{}
 foreach($name in 'ConvertTo-TelemetryOptimizationItemIds','Get-TelemetryOptimizationItemSetHash',
   'Get-SelectedTelemetryConfigTier','Get-TelemetryOptimizationContext','Set-TelemetryOptimizationContext',
   'Update-TelemetryOptimizationContextFromCatalog','ConvertTo-OptimizationTelemetryIds',
-  'New-OptimizationTelemetryOperation','Send-AnonymousTelemetry','New-TuningTelemetryPayload') {
+  'New-OptimizationTelemetryOperation','Send-AnonymousTelemetry','New-TuningTelemetryPayload',
+  'Test-TelemetryOptIn') {
   $node=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)|Select-Object -First 1)
   Assert-True ($node.Count -eq 1) "missing GUI function: $name"
   $functions[$name]=$node[0].Extent.Text
 }
+# Test-TelemetryOptIn gates Enabled/InstallId in Set-TelemetryOptimizationContext. It is not
+# stubbed: with no Get-SavedUiPreferences in this harness it falls through its own try/catch to
+# $false, which is the fail-closed path we want these fixtures to run against. Tier, scheme and
+# item attribution must still be written -- the diagnostic report depends on them.
+Invoke-Expression $functions['Test-TelemetryOptIn']
 Invoke-Expression $functions['ConvertTo-TelemetryOptimizationItemIds']
 Invoke-Expression $functions['Get-TelemetryOptimizationItemSetHash']
 Invoke-Expression $functions['Get-SelectedTelemetryConfigTier']
