@@ -154,7 +154,7 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("帧率优化助手 安全启动器")]
 [assembly: AssemblyProduct("DeltaForceBooster")]
 [assembly: AssemblyCompany("DeltaForceBooster 开源项目")]
-[assembly: AssemblyCopyright("DeltaForceBooster MIT 开源项目")]
+[assembly: AssemblyCopyright("MIT License · Copyright (c) 2026 Leonard8818, FUDAHA99")]
 [assembly: AssemblyVersion("$ver4")]
 [assembly: AssemblyFileVersion("$ver4")]
 

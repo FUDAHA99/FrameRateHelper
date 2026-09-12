@@ -42,6 +42,7 @@ try {
 using System.Reflection;
 [assembly: AssemblyProduct("DeltaForceBooster")]
 [assembly: AssemblyCompany("DeltaForceBooster 开源项目")]
+[assembly: AssemblyCopyright("MIT License · Copyright (c) 2026 Leonard8818, FUDAHA99")]
 [assembly: AssemblyVersion("$ver4")]
 [assembly: AssemblyFileVersion("$ver4")]
 "@

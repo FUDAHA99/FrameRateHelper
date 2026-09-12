@@ -480,7 +480,7 @@ function Copy-BoosterSetupToAdminStaging {
     throw '更新 helper 脚本路径不存在'
   }
   if (-not (Test-BoosterProtectedCodeFile $script:BoosterUpdaterPath)) {
-    throw '更新 helper 脚本不在受保护代码目录，已拒绝提权执行；请从官网安装到 Program Files'
+    throw '更新 helper 脚本不在受保护代码目录，已拒绝提权执行；请从发布页重新下载安装包，安装到 Program Files'
   }
   # helper 代码必须来自受保护的已安装 scripts\updater.ps1；启动器发布哈希也覆盖该文件。
   $id = [Guid]::NewGuid().ToString('N')

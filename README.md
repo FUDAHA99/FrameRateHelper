@@ -9,13 +9,11 @@
 
 面向《三角洲行动》玩家的 Windows 画面与帧率优化工具，支持 AI Agent 调用 Skill，完成系统检测、优化执行与一键还原。
 
-网址：upstream-site.invalid
-
 工具覆盖电源计划、进程与 IO 优先级、HAGS、后台录制、系统服务和显卡层设置。所有写入操作都会先保存原值，支持一键还原；不修改游戏目录内的文件，不注入游戏进程，也不与反作弊交互。
 
 [下载](https://github.com/FUDAHA99/FrameRateHelper/releases/latest) · [快速开始](#安装与快速开始) · [Agent Skill](#agent-skill) · [命令行](#命令行) · [安全](#安全与风险提示) · [贡献](#贡献)
 
-> **仓库范围**：本仓库只公开 Windows 客户端、安装/更新工具及客户端测试。官网、数据接收服务和运营看板在独立的私有部署工作区维护。
+> **这是一个分支**：本项目基于 [Leonard8818/-Delta-Force-Graphics-Optimizer](https://github.com/Leonard8818/-Delta-Force-Graphics-Optimizer)（MIT），删掉了遥测、通知轮询、诊断上传与内置的第三方传感器组件和内核驱动。**本分支没有任何服务端**：更新走 GitHub Releases，诊断报告只写到本机桌面。上游作者不对本分支负责，问题请提到本仓库。改动清单与版权说明见 [NOTICE.md](NOTICE.md)。
 
 ## 为什么选择这个工具？
 
@@ -92,7 +90,7 @@ Agent 不会直接开始修改系统。它会先检测硬件和当前设置，�
 将下面的指令发送给 Agent：
 
 ```text
-读取 https://raw.githubusercontent.com/Leonard8818/-Delta-Force-Graphics-Optimizer/main/SKILL.md
+读取 https://raw.githubusercontent.com/FUDAHA99/FrameRateHelper/fork/main/SKILL.md
 并按其中的流程帮我优化《三角洲行动》的帧率
 ```
 
@@ -191,17 +189,32 @@ SHA256 和启动器内置的发布文件哈希可以发现传输后或安装后�
 
 ## 贡献
 
-欢迎提交 [Issue](https://github.com/Leonard8818/-Delta-Force-Graphics-Optimizer/issues) 或 [Pull Request](https://github.com/Leonard8818/-Delta-Force-Graphics-Optimizer/pulls)。
+欢迎提交 [Issue](https://github.com/FUDAHA99/FrameRateHelper/issues) 或 [Pull Request](https://github.com/FUDAHA99/FrameRateHelper/pulls)。
+
+**请提到本仓库，不要提到上游。** 本分支删改了不少东西，在这里遇到的问题多半与上游无关。
 
 新增优化项必须满足一个硬性条件：能够准确检测当前状态、在写入前完整备份，并可靠恢复到原始状态。提交代码前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)。
 
 ### 贡献者
 
-- [@Leonard8818](https://github.com/Leonard8818) — 项目作者与维护者
+本分支：
+
+- [@FUDAHA99](https://github.com/FUDAHA99) — 分支维护者
+
+上游项目 [-Delta-Force-Graphics-Optimizer](https://github.com/Leonard8818/-Delta-Force-Graphics-Optimizer)：
+
+- [@Leonard8818](https://github.com/Leonard8818) — 上游项目作者与维护者
 - [@codex](https://github.com/codex) — OpenAI 编程协作助手
 
 ## 许可证
 
-本项目基于 [MIT License](LICENSE) 开源。
+本项目基于 [MIT License](LICENSE) 开源，版权为上游作者与本分支维护者共同持有：
+
+```
+Copyright (c) 2026 Leonard8818   ← 上游项目
+Copyright (c) 2026 FUDAHA99      ← 本分支的修改
+```
+
+上游的版权行不会被移除——本分支绝大部分代码仍出自上游，MIT 也要求保留它。
 
 这是一个非官方个人项目，与腾讯公司及《三角洲行动》官方没有关联。商标、免责声明及其他说明见 [NOTICE.md](NOTICE.md) 和 [DISCLAIMER.md](DISCLAIMER.md)。

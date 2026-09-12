@@ -366,6 +366,35 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\delta-booster.ps1 -L
 
 ---
 
+### 2.9 分支归属与双版权（提交 <A>）
+
+本项目是 Leonard8818 那个仓库的分支。MIT 要求保留上游版权声明，本分支自己的修改也要
+署名，所以 `LICENSE` 里是两行版权，发布二进制的「版权」字段也写了两个人。
+
+**这一节真正的风险不在文案，在一个容易被顺手改掉的身份闸门。**
+
+`AssemblyCompany("DeltaForceBooster 开源项目")` 看起来像品牌文案，实际上
+`setup-wizard.cs` 用 `StringComparison.Ordinal` 把 PE 的 CompanyName 与它逐字比对（两处），
+不一致就拒绝把那个文件当成本产品的文件。它原来**不在冻结清单里** —— 本次一并钉住。
+失败发生在**安装阶段**，本地构建-运行一遍根本碰不到。
+
+1. 出一次正式包（不是 `-TestBuild`），右键 `DeltaForceBooster-Setup-vX.Y.exe` →
+   属性 → 详细信息。**期望**：
+   - 版权 = `MIT License · Copyright (c) 2026 Leonard8818, FUDAHA99`
+   - 产品名称 = `DeltaForceBooster`（**没变**，这是安装身份闸门）
+   - 公司 = `DeltaForceBooster 开源项目`（**没变**，同上）
+   - 文件说明 = `帧率优化助手 安装向导`
+   `启动优化工具.exe`、`EngineHost.exe`、卸载助手同理。
+2. **在装有旧版本的机器上做一次覆盖安装。** 这是上面那两个「没变」唯一的真实检验：
+   身份闸门若被改动，表现是安装向导不认识已装的版本，或者 D 盘 anchor 识别失败。
+3. 卸载后重装一次，确认受保护数据目录里的旧备份仍能被新版本读到。
+
+**文档侧**（`tests/identity-freeze-tests.ps1` 已经断言，这里只是说明为什么）：
+`README.md` 和 `CONTRIBUTING.md` 里不允许再出现 `数据接收服务`、`运营看板`、
+`upstream-site.invalid` —— 那是上游的服务端布局和官网，本分支一个服务端都没有，留着就是在说假话。
+
+---
+
 ## 3. 我最不确定的地方（请重点打）
 
 1. **`trap` 的副作用**。我在脚本作用域加了 `trap { ...; break }`。理论上它只接

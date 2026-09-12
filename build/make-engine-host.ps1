@@ -87,7 +87,7 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("帧率优化助手 管理员助手")]
 [assembly: AssemblyProduct("DeltaForceBooster")]
 [assembly: AssemblyCompany("DeltaForceBooster 开源项目")]
-[assembly: AssemblyCopyright("DeltaForceBooster MIT 开源项目")]
+[assembly: AssemblyCopyright("MIT License · Copyright (c) 2026 Leonard8818, FUDAHA99")]
 [assembly: AssemblyVersion("$ver4")]
 [assembly: AssemblyFileVersion("$ver4")]
 
@@ -585,7 +585,7 @@ $hashRowsText
 
     static void ShowError(string message) {
         MessageBox.Show("管理员助手已停止启动：" + message +
-            "\n\n请只通过“启动优化工具.exe”打开；如果持续出现，请从官网重新安装完整版本。",
+            "\n\n请只通过“启动优化工具.exe”打开；如果持续出现，请从发布页重新下载安装包，安装完整版本。",
             "帧率优化助手 管理员助手", MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 

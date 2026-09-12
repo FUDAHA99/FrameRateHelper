@@ -112,6 +112,42 @@ foreach ($f in 'build\make-launcher.ps1','build\make-engine-host.ps1','build\uni
 }
 Assert-Frozen '''ProductId=DeltaForceBooster''' '卸载器 here-string 里的身份校验' @('build\make-installer.ps1')
 
+# AssemblyCompany 和 AssemblyProduct 一样是闸门，不是元数据：setup-wizard.cs 用
+# StringComparison.Ordinal 把 PE 的 CompanyName 与这个字面量逐字比对（两处），
+# 不一致就拒绝把它当成本产品的文件。改名时它很容易被当成「品牌文案」顺手换掉，
+# 而失败发生在**安装阶段**，本地构建-运行一遍根本碰不到。
+foreach ($f in 'build\make-launcher.ps1','build\make-engine-host.ps1','build\make-uninstall-host.ps1','build\setup-wizard.cs') {
+  Assert-Frozen '[assembly: AssemblyCompany("DeltaForceBooster 开源项目")]' 'PE 的 CompanyName 是安装向导的身份闸门' @($f)
+}
+Assert-True ((@([regex]::Matches((Get-Source 'build\setup-wizard.cs'),
+  [regex]::Escape('!string.Equals(vi.CompanyName, "DeltaForceBooster 开源项目", StringComparison.Ordinal)')))).Count -eq 2) `
+  '安装向导里比对 CompanyName 的两处校验被改动或删除了'
+
+# ---------- 7b. 上游版权不得被移除 ----------
+# 本分支是 Leonard8818/-Delta-Force-Graphics-Optimizer 的 fork，绝大部分代码仍出自上游。
+# MIT 明确要求「上述版权声明与本许可声明须包含在软件的所有副本或实质部分中」——
+# 删掉上游那一行不是改名，是许可违规。这里连同本分支自己的版权行一起钉住。
+$license = Get-Source 'LICENSE'
+foreach ($line in 'Copyright (c) 2026 Leonard8818', 'Copyright (c) 2026 FUDAHA99') {
+  Assert-True ($license.Contains($line)) "LICENSE 少了一行版权声明：$line"
+}
+Assert-True ($license.Contains('The above copyright notice and this permission notice shall be included in all')) `
+  'LICENSE 的 MIT 正文被改动了'
+foreach ($f in 'build\make-launcher.ps1','build\make-engine-host.ps1','build\make-uninstall-host.ps1','build\setup-wizard.cs') {
+  Assert-Frozen '[assembly: AssemblyCopyright("MIT License · Copyright (c) 2026 Leonard8818, FUDAHA99")]' `
+    '发布二进制的版权字段必须同时写明上游与本分支' @($f)
+}
+$notice = Get-Source 'NOTICE.md'
+foreach ($needle in '这是一个分支（fork）', '上游作者不对本分支负责', 'Leonard8818/-Delta-Force-Graphics-Optimizer') {
+  Assert-True ($notice.Contains($needle)) "NOTICE.md 缺少分支归属说明：$needle"
+}
+# 上游的服务端布局与官网不属于本分支：这几句留着就是在说假话
+foreach ($f in 'README.md','CONTRIBUTING.md') {
+  foreach ($stale in '数据接收服务', '运营看板', 'upstream-site.invalid') {
+    Assert-True (-not (Get-Source $f).Contains($stale)) "$f 里还留着上游专有的说法：$stale（本分支没有服务端，也没有官网）"
+  }
+}
+
 # ---------- 8. 已写在用户磁盘上的目录 schema ----------
 Assert-True ($engine.Contains('^\.DeltaForceBooster\.migrated-')) '旧根隔离目录名 schema 被改。读侧改了就再也认不出用户盘上已有的那些目录'
 Assert-True ((Get-Source 'build\setup-wizard.cs').Contains('".DeltaForceBooster.migrated-"')) '写侧的隔离目录名与读侧脱钩'

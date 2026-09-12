@@ -61,7 +61,7 @@ using WinForms = System.Windows.Forms;
 [assembly: AssemblyDescription("帧率优化助手 安装向导（可选择安装磁盘）")]
 [assembly: AssemblyProduct("DeltaForceBooster")]
 [assembly: AssemblyCompany("DeltaForceBooster 开源项目")]
-[assembly: AssemblyCopyright("DeltaForceBooster MIT 开源项目")]
+[assembly: AssemblyCopyright("MIT License · Copyright (c) 2026 Leonard8818, FUDAHA99")]
 [assembly: AssemblyVersion("__VER4__")]
 [assembly: AssemblyFileVersion("__VER4__")]
 
