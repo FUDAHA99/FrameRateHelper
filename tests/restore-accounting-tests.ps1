@@ -993,8 +993,51 @@ try {
 $guiRaw = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'gui\DeltaForceBooster-GUI.ps1'), [Text.Encoding]::UTF8)
 Assert-True ($guiRaw.Contains('$r.BookkeepingFailed')) '界面没有读取 BookkeepingFailed —— 记账失败对用户完全不可见'
 Assert-True ($guiRaw.Contains('[记账失败]')) '记账失败没有进运行日志，导出的诊断报告里也就没有'
-Assert-True ($guiRaw.Contains("if (`$failN -eq 0 -and `$bookN -gt 0) { `$restoreDialogTitle = '还原部分完成'")) `
-  '记账失败时对话框仍然会说「还原完成」'
+# 三态标题：二态时「没失败」就被说成「完成」，可是「14 项全进了安全回退」同样没有失败。
+# 断言的是「这三个信号都参与标题判定」，不是对某个字符串——不变式是三态，不是文案。
+$titleTokens = $null; $titleErrors = $null
+$titleAst = [Management.Automation.Language.Parser]::ParseFile(
+  (Join-Path (Split-Path -Parent $PSScriptRoot) 'gui\DeltaForceBooster-GUI.ps1'), [ref]$titleTokens, [ref]$titleErrors)
+$restoreActionFn = @($titleAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $n.Name -eq 'Invoke-InlineRestoreAction' }, $true) | Select-Object -First 1)
+Assert-True ($restoreActionFn.Count -eq 1) '找不到 Invoke-InlineRestoreAction'
+$restoreActionText = $restoreActionFn[0].Extent.Text
+# 断言落在**标题赋值表达式自己身上**，不是「函数里某处出现过这个字符串」——
+# 后者用一个 elseif ($false) 的死分支就能糊弄过去。
+$titleAssignments = @($restoreActionFn[0].FindAll({ param($n)
+  $n -is [Management.Automation.Language.AssignmentStatementAst] -and
+  $n.Left.Extent.Text -in @('$restoreDialogTitle','$restoreDialogCode') }, $true))
+Assert-True ($titleAssignments.Count -eq 2) '找不到还原对话框标题/代号的赋值'
+foreach ($assignment in $titleAssignments) {
+  $assignText = $assignment.Extent.Text
+  foreach ($signal in '$failN', '$skipN', '$bookN', '$unreadableN', '$unrestorableN') {
+    Assert-True ($assignText.Contains($signal)) "还原对话框标题判定没有把 $signal 算进去：$($assignment.Left.Extent.Text)"
+  }
+}
+Assert-True ((($titleAssignments | ForEach-Object { $_.Extent.Text }) -join '') -like '*还原部分完成*RESTORE PARTIAL*' -or
+  (($titleAssignments | ForEach-Object { $_.Extent.Text }) -join '') -like '*RESTORE PARTIAL*还原部分完成*') `
+  '还原对话框没有第三态——「全部进了安全回退」会被说成「还原完成」'
+# 绝对断言只允许在四个信号全为 0 时出现
+# 只看**字符串字面量**，不看注释：注释里引用这句话是为了说明它被删掉了。
+$restoreActionStrings = @($restoreActionFn[0].FindAll({ param($n)
+  $n -is [Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { "$($_.Value)" })
+Assert-True ($restoreActionText.Contains('$failN -eq 0 -and $skipN -eq 0 -and $unreadableN -eq 0 -and $unrestorableN -eq 0') -and
+  @($restoreActionStrings | Where-Object { $_ -like '*其余全部还原成功*' }).Count -eq 0) `
+  '「全部还原成功，各项已回到优化前的状态」的出现条件不够严——所有 op 都进 skipped 时根本没有「其余」'
+Assert-True ($guiRaw.Contains('其中记录的改动本次没有还原，仍然留在系统里')) `
+  '有备份读不了时，弹窗里没有那句无条件硬提示'
+
+# 面板文案和引擎文案都写着「见运行日志」。这个函数原先一次 Write-Log 都没调过——
+# 那里什么都没有，导出的诊断报告里也没有。这是在把用户指向一份不存在的证据。
+$panelFn = @($titleAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+  $n.Name -eq 'Initialize-InlineRestorePanel' }, $true) | Select-Object -First 1)
+Assert-True ($panelFn.Count -eq 1) '找不到 Initialize-InlineRestorePanel'
+$panelWriteLogs = @($panelFn[0].FindAll({ param($n)
+  $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Write-Log' }, $true))
+Assert-True ($panelWriteLogs.Count -ge 2) `
+  '还原清单面板一次 Write-Log 都没调——文案却让用户「见运行日志」'
+Assert-True (($panelWriteLogs | ForEach-Object { $_.Extent.Text }) -join '|' -like '*还原清单*') `
+  '面板日志没有可辨识的前缀，用户在运行日志里找不到它们'
 
 # CLI 同样不能让它消失：脚本化调用方（含 SKILL.md 指引 agent 跑 -Restore）只看得到输出和退出码
 $engineRaw = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts\delta-booster.ps1'), [Text.Encoding]::UTF8)

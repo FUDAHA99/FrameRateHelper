@@ -7414,9 +7414,17 @@ function Invoke-ElevatedEngineAction {
     if ($resultInfo.Length -le 0 -or $resultInfo.Length -gt 4MB) { throw '管理员执行结果文件大小无效' }
     try { $reply = Get-Content -LiteralPath $resultFile -Raw -Encoding UTF8 | ConvertFrom-Json }
     catch { throw "管理员执行结果读取失败：$($_.Exception.Message)" }
-    if ([int]$reply.SchemaVersion -ne 1 -or "$($reply.ResultId)" -ne $resultId -or "$($reply.Action)" -ne $Action -or
-        [int]$reply.ExitCode -ne $exitCode) {
+    # 身份三项对不上 = 这份结果不是这次请求的，必须拒绝。
+    if ([int]$reply.SchemaVersion -ne 1 -or "$($reply.ResultId)" -ne $resultId -or "$($reply.Action)" -ne $Action) {
       throw '管理员执行结果校验失败'
+    }
+    # 带内应答优先于带外退出码：结果文件是引擎在退出前 Flush(true) 原子发布的，
+    # 里面写着它自己认定的结论；进程退出码则可能被外壳、安全软件、或 PowerShell
+    # 自己的错误处理改写。身份对得上却因为退出码不一致而整份丢弃，等于把一次
+    # **已经完成**的还原报成「执行结果校验失败」，用户会去重试——而重试会重放旧值。
+    if ([int]$reply.ExitCode -ne $exitCode) {
+      try { Write-Log "管理员引擎退出码($exitCode)与结果文件($([int]$reply.ExitCode))不一致，以结果文件为准" } catch {}
+      $reply.Data | Add-Member -NotePropertyName EngineExitCodeMismatch -NotePropertyValue $true -Force -ErrorAction SilentlyContinue
     }
     if ($null -eq $reply.Data) {
       throw $(if ("$($reply.Error)") { "$($reply.Error)" } else { "执行失败（退出码 $($reply.ExitCode)）" })
@@ -7629,11 +7637,26 @@ function Initialize-InlineRestorePanel($Catalog) {
     $restoreNotices += "检测到 $($Catalog.LegacyBackupCount) 份旧版本备份，缺少项目归属信息，仅支持下方「全部复原」。"
   }
   if ([int]$Catalog.UnsupportedV3ItemCount -gt 0) {
-    $restoreNotices += "另有 $($Catalog.UnsupportedV3ItemCount) 个尚未开放按项目精确复原的项目，本阶段仅支持「全部复原」。"
+    # 只给一个数字，用户连「我要恢复的那项在不在里面」都判断不了。引擎已经把名字传过来了。
+    $unsupportedNames = @(@($Catalog.UnsupportedV3ItemNames) | Where-Object { "$_".Trim() })
+    $restoreNotices += "另有 $($Catalog.UnsupportedV3ItemCount) 个尚未开放按项目精确复原的项目，本阶段仅支持「全部复原」" +
+      $(if ($unsupportedNames.Count -gt 0) { "：$(@($unsupportedNames | Select-Object -First 8) -join '、')$(if ($unsupportedNames.Count -gt 8) { ' 等' })。" } else { '。' })
+  }
+  if ([int]$Catalog.UnrestorableOpCount -gt 0) {
+    $restoreNotices += "有 $($Catalog.UnrestorableOpCount) 条改动的备份记录未通过校验，本工具无法自动还原，需要手动改回（明细见运行日志）。"
+  }
+  if ([int]$Catalog.EnumerationFailureCount -gt 0) {
+    $restoreNotices += "有备份目录读不出来（原因见上方与运行日志）。这不等于「没有备份」——请先修复目录权限再判断。"
   }
   if ($restoreNotices.Count -gt 0) {
     $ui.InlineRestoreLegacyText.Text = $restoreNotices -join "`n"
     $ui.InlineRestoreLegacyNotice.Visibility = 'Visible'
+  }
+  # 面板文案和引擎文案都写着「见运行日志」，而这个函数原先一次 Write-Log 都没调过——
+  # 那里什么都没有，导出的诊断报告里也没有。这是在把用户指向一份不存在的证据。
+  foreach ($notice in $restoreNotices) { Write-Log "[还原清单] $notice" }
+  foreach ($item in @($Catalog.Items | Where-Object { -not $_.CanRestore })) {
+    Write-Log "[还原清单] 不可选：$($item.Name)（$($item.StatusText)）$(if ("$($item.Reason)") { " — $($item.Reason)" })"
   }
   $ui.InlineRestoreAllSummary.Text = "恢复所有仍由工具管理的改动：$($Catalog.ActiveItemCount) 个新版本项目、$($Catalog.ActiveOpCount) 个底层设置、$($Catalog.ActiveBackupCount) 份活动备份。"
   $ui.InlineRestorePanel.Visibility = 'Visible'
@@ -7682,6 +7705,18 @@ function Invoke-InlineRestoreAction([ValidateSet('selected_items','all')][string
     # 记账失败：系统设置确实写回去了，只是这次还原没记上账。它既不是失败也不是完成，
     # 而且后续动作和失败完全相反——不要重试还原，先把备份目录修好
     $bookN = @($r.BookkeepingFailed | Where-Object { $_ }).Count
+    # 读不了的备份、还不回去的改动：这两类的共同点是「那些改动**仍然留在系统里**」。
+    # 绝对断言「全部还原成功」只有在它们全为 0 时才允许出现。
+    $unreadableN = [int]$r.UnreadableBackupCount
+    $unrestorableN = [int]$r.UnrestorableOpCount
+    # 弹窗里直接列项目名（最多 5 个）。「明细见运行日志」是把用户支去别处，
+    # 而他此刻最想知道的就是「哪几项没弄好」。
+    $nameList = {
+      param([string[]]$Lines)
+      $shown = @(@($Lines) | Select-Object -First 5 | ForEach-Object { "· $_" })
+      $rest = @($Lines).Count - $shown.Count
+      (@($shown) -join "`n") + $(if ($rest -gt 0) { "`n· 另有 $rest 项，见运行日志" })
+    }
     try {
       $updatedCatalog = Invoke-ElevatedEngineAction -Action Restore -ListRestoreItems
       Update-TelemetryOptimizationContextFromCatalog -Catalog $updatedCatalog
@@ -7697,10 +7732,14 @@ function Invoke-InlineRestoreAction([ValidateSet('selected_items','all')][string
       $ui.ProgText.Text = "按项目复原完成：$($r.RestoredItems) 项成功 / $failN 项失败"
       $ui.ProgCount.Text = "$($r.RestoredOps) 个底层设置已写回"
       foreach ($itemResult in @($r.ItemResults)) {
-        Write-Log "$(if ($itemResult.Ok) { '[复原成功]' } else { '[复原失败]' }) $($itemResult.Name) — $($itemResult.Message)"
+        $outcomeTag = $(switch ("$($itemResult.Outcome)") {
+          'restored' { '[复原成功]' }; 'already_restored' { '[本来就是原值]' }
+          'conflict' { '[保留后续修改]' }; 'unsupported' { '[不支持自动还原]' }
+          'no_record' { '[没有可复原记录]' }; default { '[复原失败]' } })
+        Write-Log "$outcomeTag $($itemResult.Name) — $($itemResult.Message)"
       }
     } else {
-      $ui.ProgText.Text = "$(if ($failN -gt 0) { '全部复原未完成' } else { '全部复原完成' })：$($r.RestoredOps) 项已还原 / $failN 项失败$(if ($skipN -gt 0) { " / $skipN 项带提示" })"
+      $ui.ProgText.Text = "$(if ($failN -gt 0) { '全部复原未完成' } elseif ($skipN -gt 0 -or $bookN -gt 0 -or $unreadableN -gt 0 -or $unrestorableN -gt 0) { '全部复原部分完成' } else { '全部复原完成' })：$($r.RestoredOps) 项已还原 / $failN 项失败$(if ($skipN -gt 0) { " / $skipN 项未回到原值" })"
       $ui.ProgCount.Text = "备份：$bakName"
       Write-Log "本次已还原 $($r.RestoredOps) 项改动（备份：$($r.File)）"
     }
@@ -7711,23 +7750,38 @@ function Invoke-InlineRestoreAction([ValidateSet('selected_items','all')][string
     Update-ItemList
     Hide-InlineRestorePanel
 
+    # 有备份读不了时，这句必须排在最前面且无条件出现：那些改动**还在系统里**，
+    # 而用户正准备关掉这个对话框认为事情结束了。
+    $hardWarning = $(if ($unreadableN -gt 0) {
+      "有 $unreadableN 份备份无法读取，其中记录的改动本次没有还原，仍然留在系统里（原因见运行日志，请勿删除这些备份文件）。`n`n"
+    } else { '' }) + $(if ($unrestorableN -gt 0) {
+      "有 $unrestorableN 条改动的备份记录未通过校验，工具无法自动还原，需要手动改回。`n`n"
+    } else { '' })
     if ($Mode -eq 'selected_items') {
-      $sum = "$($r.RestoredItems) 个项目、$($r.RestoredOps) 个底层设置已恢复到第一次被工具修改前。" +
-             $(if ($failN -gt 0) { "`n`n$failN 个项目未复原；发生冲突或执行失败的项目保持原状，明细见运行日志。" } else { "`n`n其他未选项目保持不变。" })
+      $sum = $hardWarning + "$($r.RestoredItems) 个项目、$($r.RestoredOps) 个底层设置已恢复到第一次被工具修改前。" +
+             $(if ($failN -gt 0) { "`n`n以下 $failN 个项目复原失败，改动仍留在系统中：`n$(& $nameList @($r.Failed))" }) +
+             $(if ($skipN -gt 0) { "`n`n以下 $skipN 个项目没有复原（发生后续修改或暂不支持），已保持原状：`n$(& $nameList @($r.Skipped))" }) +
+             $(if ($failN -eq 0 -and $skipN -eq 0) { "`n`n其他未选项目保持不变。" })
     } else {
-      $sum = "已按$(if ($r.MergedCount -gt 1) { "合并的 $($r.MergedCount) 份备份" } else { "备份「$bakName」" })还原 $($r.RestoredOps) 项改动。" +
-             $(if ($skipN -gt 0) { "`n`n另有 $skipN 项未按原状写回或使用了安全回退，具体原因见运行日志。" }) +
-             $(if ($failN -gt 0) { "`n`n有 $failN 项还原失败，对应改动仍留在系统中（备份已保留，可排查后重试还原），明细见运行日志。" }
-               elseif ($skipN -gt 0) { "`n`n其余全部还原成功，各项已回到优化前的状态。" }
-               else { "`n`n全部还原成功，各项已回到优化前的状态。" })
+      # 删掉了原来那句「其余全部还原成功，各项已回到优化前的状态」——当所有 op 都进了
+      # skipped 时根本没有「其余」，这句话在那种情况下是纯粹的假话。
+      $sum = $hardWarning + "已按$(if ($r.MergedCount -gt 1) { "合并的 $($r.MergedCount) 份备份" } else { "备份「$bakName」" })还原 $($r.RestoredOps) 项改动。" +
+             $(if ($skipN -gt 0) { "`n`n以下 $skipN 项没有回到原来的值，已按安全方案兜底或保留了你后来的修改：`n$(& $nameList @($r.Skipped))" }) +
+             $(if ($failN -gt 0) { "`n`n以下 $failN 项还原失败，对应改动仍留在系统中（备份已保留，可排查后重试还原）：`n$(& $nameList @($r.Failed))" }) +
+             $(if ($failN -eq 0 -and $skipN -eq 0 -and $unreadableN -eq 0 -and $unrestorableN -eq 0) {
+                 "`n`n全部还原成功，各项已回到优化前的状态。" })
     }
     if ($bookN -gt 0) {
       $sum += "`n`n注意：系统设置已经按上面的结果还原，但本次还原没有记上账（$bookN 处）。请不要立刻重试还原——重试会把同样的旧值再写回一遍，可能覆盖你之后的手动修改。原因见运行日志。"
     }
-    $restoreDialogTitle = $(if ($failN -gt 0) { '还原未完成' } else { '还原完成' })
-    $restoreDialogCode = $(if ($failN -gt 0) { 'RESTORE INCOMPLETE' } else { 'RESTORE DONE' })
-    # 记账失败时绝不能说「完成」：改动写回去了，账没记上，下次还原会重放同样的旧值
-    if ($failN -eq 0 -and $bookN -gt 0) { $restoreDialogTitle = '还原部分完成'; $restoreDialogCode = 'RESTORE PARTIAL' }
+    # 三态标题。二态时「没失败」就被说成「完成」，可是「14 项全进了安全回退」
+    # 同样没有失败——用户会关掉窗口以为回到优化前了。
+    $restoreDialogTitle = $(if ($failN -gt 0) { '还原未完成' }
+      elseif ($skipN -gt 0 -or $bookN -gt 0 -or $unreadableN -gt 0 -or $unrestorableN -gt 0) { '还原部分完成' }
+      else { '还原完成' })
+    $restoreDialogCode = $(if ($failN -gt 0) { 'RESTORE INCOMPLETE' }
+      elseif ($skipN -gt 0 -or $bookN -gt 0 -or $unreadableN -gt 0 -or $unrestorableN -gt 0) { 'RESTORE PARTIAL' }
+      else { 'RESTORE DONE' })
     Show-ConfirmDialog $restoreDialogTitle $restoreDialogCode $sum '知道了' -InfoOnly | Out-Null
     if (@($r.RebootItems).Count -gt 0 -and (Show-RebootDialog @($r.RebootItems))) {
       Start-ConfirmedSystemReboot
@@ -8440,19 +8494,24 @@ function Set-PowerRecoveryNoticeAcknowledged {
 function Show-PowerRecoveryVersionNotice {
   if ($script:PowerRecoveryNoticePromptedThisRun -or (Test-PowerRecoveryNoticeAcknowledged)) { return }
   $script:PowerRecoveryNoticePromptedThisRun = $true
+  # 这段文案原来教用户「勾选三个电源项 → 复原所选项目」，而这三项
+  # （power-ultimate / power-tuning / powerplan-lock）根本不在
+  # Get-SelectiveRestoreItemIds 里 —— 面板上连行都不会出现，按钮因为一个都没勾而禁用。
+  # 它是升级后强制弹一次的「重要提醒」，看到它的正是已经出问题的用户，
+  # 把他们指进死路比不提醒更糟。
   $message = @(
-    '如果你在执行优化后出现游戏或电脑卡顿、异常掉帧、黑屏、闪屏、无法进入游戏或游戏异常退出，请先恢复电源相关选项。'
-    '使用过「主推全套」也不必全部还原，可以只恢复下面的电源项。'
+    '如果你在执行优化后出现游戏或电脑卡顿、异常掉帧、黑屏、闪屏、无法进入游戏或游戏异常退出，请先恢复电源相关设置。'
     ''
     '操作方法：'
     '1. 进入「优化」页，点击「还原设置」。'
-    '2. 勾选你执行过的电源项：'
-    '   · 电源计划切换到「卓越性能」'
-    '   · 电源计划隐藏项深度调优'
-    '   · 锁定电源计划'
-    '3. 点击「复原所选项目」，完成后重启电脑。'
+    '2. 点击面板下方的「全部复原」。'
+    '3. 完成后重启电脑。'
     ''
-    '只执行过其中一项就只恢复对应项；也可同时多选恢复。'
+    '为什么不是「复原所选项目」：电源相关的三项（切换到「卓越性能」、电源计划隐藏项深度调优、锁定电源计划）'
+    '目前只能通过「全部复原」恢复，它们不会出现在上方的勾选清单里。'
+    ''
+    '「全部复原」只会回退本工具实际改过的设置，你没有执行过的项目不受影响；'
+    '每一项的结果（成功／没回到原值／失败）都会逐条列出来。'
   ) -join "`n"
   if (Show-ConfirmDialog '重要提醒' 'POWER RECOVERY NOTICE' $message '我知道了' -InfoOnly `
       -Banner '优化后出现异常：先恢复电源选项并重启电脑') {

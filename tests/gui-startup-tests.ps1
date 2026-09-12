@@ -130,13 +130,20 @@ Assert-True ($raw.Contains("`$script:PowerRecoveryNoticeId = 'v0.23.0.8-power-pl
   $raw.Contains('function Set-PowerRecoveryNoticeAcknowledged') -and
   $raw.Contains('function Show-PowerRecoveryVersionNotice')) `
   'v0.23.0.8 does not persist the per-user one-time power recovery notice'
+# 这条提醒是升级后强制弹一次的，看到它的正是已经出问题的用户。原文案教他们
+# 「勾选三个电源项 → 复原所选项目」，而这三项根本不在按项目复原的白名单里，
+# 面板上连行都不会出现、按钮因为一个都没勾而禁用——把人指进死路比不提醒更糟。
+$powerNoticeFn = @($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+  $n.Name -eq 'Show-PowerRecoveryVersionNotice'},$true)|Select-Object -First 1)
+Assert-True ($powerNoticeFn.Count -eq 1) 'Show-PowerRecoveryVersionNotice not found'
+$powerNoticeText = $powerNoticeFn[0].Extent.Text
 Assert-True ($raw.Contains("Show-ConfirmDialog '重要提醒' 'POWER RECOVERY NOTICE'") -and
   $raw.Contains('优化后出现异常：先恢复电源选项并重启电脑') -and
-  $raw.Contains('使用过「主推全套」也不必全部还原') -and
-  $raw.Contains('复原所选项目') -and
-  $raw.Contains('只执行过其中一项就只恢复对应项') -and
+  $powerNoticeText.Contains('点击面板下方的「全部复原」') -and
+  -not $powerNoticeText.Contains('勾选你执行过的电源项') -and
+  -not $powerNoticeText.Contains('点击「复原所选项目」') -and
   $raw -match '(?s)\$window\.Add_ContentRendered\(\{\s*Show-PowerRecoveryVersionNotice\s*Initialize-LiveMetricsDashboard') `
-  'the per-user power recovery notice is not forced once when the updated UI first renders'
+  'the per-user power recovery notice still walks users into the disabled per-item path'
 # Write-JsonStateAtomic 取代了原来来自 telemetry-client.ps1 的原子写；它调 Write-BytesAtomic，
 # 那个函数在引擎里，所以从引擎源码里一并取出来，而不是打桩 —— 打桩就测不到真的落盘了。
 $engineAst = [Management.Automation.Language.Parser]::ParseFile(
@@ -448,10 +455,18 @@ Assert-True ($confirmedRebootFunction.Extent.Text.Contains('Invoke-SystemReboot 
   Assert-True ($script:RebootDialogCalls -eq 1 -and ($script:RebootLogs -join "`n").Contains('[重启未启动]')) `
     'restart command rejection is not surfaced to the user and run log'
 } $confirmedRebootFunction.Extent.Text
-Assert-True ($restoreActionFunction.Extent.Text.Contains("if (`$failN -gt 0) { '还原未完成' } else { '还原完成' }") -and
-  $restoreActionFunction.Extent.Text.Contains("if (`$failN -gt 0) { 'RESTORE INCOMPLETE' } else { 'RESTORE DONE' }") -and
-  $restoreActionFunction.Extent.Text.Contains("if (`$failN -gt 0) { '全部复原未完成' } else { '全部复原完成' }")) `
-  'full restore still presents a partial failure as completed'
+# 二态 → 三态：不变式确实变了。旧断言钉的是「失败要说未完成」，而漏掉的那一半是
+# 「没失败 ≠ 完成」——14 项全进了安全回退时同样没有失败，用户会关掉窗口以为回到优化前了。
+# 所以断言的是三个态都在、且四个信号都参与判定，不是对某个具体字符串。
+$restoreActionText = $restoreActionFunction.Extent.Text
+Assert-True ($restoreActionText.Contains("'还原未完成'") -and $restoreActionText.Contains("'还原部分完成'") -and
+  $restoreActionText.Contains("'还原完成'") -and $restoreActionText.Contains("'RESTORE INCOMPLETE'") -and
+  $restoreActionText.Contains("'RESTORE PARTIAL'") -and $restoreActionText.Contains("'RESTORE DONE'") -and
+  $restoreActionText.Contains("'全部复原部分完成'")) `
+  'full restore dialog lost one of the three states'
+foreach ($signal in '$failN', '$skipN', '$bookN', '$unreadableN', '$unrestorableN') {
+  Assert-True ($restoreActionText.Contains($signal)) "restore dialog title ignores $signal"
+}
 Assert-True ($raw.Contains("Join-Path `$script:UserConfigDir 'run-logs'") -and
   $raw.Contains('Initialize-RunLogStore') -and
   $runLogInitFunction.Extent.Text.Contains('New-ProtectedDirectory $script:RunLogDir $false') -and

@@ -580,13 +580,27 @@ function Write-IpcResult([string]$Id, [string]$Action, $Data, [int]$ExitCode, [s
     Ok = ($ExitCode -eq 0); Data = $Data; Error = $ErrorMessage
   }
   $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($body | ConvertTo-Json -Depth 10))
-  Write-BytesAtomic $outputPath $bytes
   if ($script:EngineResultFile) {
-    Set-ProtectedFileAcl $outputPath
-    if ((Test-PathHasReparsePoint $outputPath) -or -not (Test-ProtectedFileAcl $outputPath)) {
-      throw '管理员引擎结果文件权限校验失败'
+    # 「发布」必须是最后一步：先在临时文件上打好 ACL、校验通过，再原子改名到最终路径。
+    # 原写法是先发布再加 ACL —— 中间存在一个窗口，文件已经可见但权限还没收紧；
+    # 而且 ACL 那步抛错时结果文件**已经在那儿了**，调用方读到一份「引擎认为发布失败」
+    # 的结果，退出码和文件内容就此分叉。
+    $stagePath = "$outputPath.staging"
+    if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Force -ErrorAction SilentlyContinue }
+    Write-BytesAtomic $stagePath $bytes
+    try {
+      Set-ProtectedFileAcl $stagePath
+      if ((Test-PathHasReparsePoint $stagePath) -or -not (Test-ProtectedFileAcl $stagePath)) {
+        throw '管理员引擎结果文件权限校验失败'
+      }
+      if (Test-Path -LiteralPath $outputPath) { [IO.File]::Delete($outputPath) }
+      [IO.File]::Move($stagePath, $outputPath)
+    } finally {
+      if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Force -ErrorAction SilentlyContinue }
     }
+    return
   }
+  Write-BytesAtomic $outputPath $bytes
 }
 
 function Enter-EngineMutex {
@@ -4412,10 +4426,17 @@ function Get-RestoreItemCatalog {
   $legacyRecords = @($state.Records | Where-Object { [int]$_.Document.SchemaVersion -eq 2 -and @($_.Document.Ops).Count -gt 0 })
   $pendingRecords = @($state.Records | Where-Object { "$($_.Path)" -like '*.pending.json' })
   $unsupportedIds = @($active | Where-Object { $supported -notcontains "$($_.Op.ItemId)" } | ForEach-Object { "$($_.Op.ItemId)" } | Select-Object -Unique)
+  # 只回一个数字，用户连「我要恢复的那项在不在里面」都判断不了。名字本来就在 Item 里。
+  $unsupportedNames = @($unsupportedIds | ForEach-Object {
+    $uid = $_
+    $meta = @($active | Where-Object { "$($_.Op.ItemId)" -eq $uid } | ForEach-Object Item | Where-Object { $_ } | Select-Object -First 1)
+    $(if ($meta.Count) { "$($meta[0].DisplayName)" } else { $uid })
+  })
   $activeV3BackupCount = @($active | ForEach-Object BackupId | Select-Object -Unique).Count
   [pscustomobject][ordered]@{
     SchemaVersion = 1; Items = @($items.ToArray()); LegacyBackupCount = $legacyRecords.Count
-    UnsupportedV3ItemCount = $unsupportedIds.Count; ActiveBackupCount = $activeV3BackupCount + $legacyRecords.Count
+    UnsupportedV3ItemCount = $unsupportedIds.Count; UnsupportedV3ItemNames = @($unsupportedNames)
+    ActiveBackupCount = $activeV3BackupCount + $legacyRecords.Count
     ActiveItemIds = @($active | ForEach-Object { "$($_.Op.ItemId)" } | Select-Object -Unique)
     ActiveItemCount = @($active | ForEach-Object { "$($_.Op.ItemId)" } | Select-Object -Unique).Count
     ActiveOpCount = $active.Count + @($legacyRecords | ForEach-Object { @($_.Document.Ops) }).Count
@@ -4426,6 +4447,8 @@ function Get-RestoreItemCatalog {
     # 把「搜了哪些目录」和「有几份读不了」一并回传：界面显示空列表时，
     # 用户必须能自己判断是「确实没有可还原的」还是「有但工具没找到/读不了」。
     SearchedRoots = @($state.SearchedRoots); UnreadableBackupCount = [int]$state.UnreadableCount
+    # 目录读不出来 ≠ 目录里没有备份。界面在空态必须能分清这两件事
+    EnumerationFailureCount = [int]$state.EnumerationFailureCount
     # 单条改动因为 op 级校验没过而还不回去：份数单列，别和「整份读不了」混为一谈
     UnrestorableOpCount = $faulted.Count
     # 凭证读不了时目录**照常构建并返回** —— 用户要能看见清单、看见是哪个文件坏了。
