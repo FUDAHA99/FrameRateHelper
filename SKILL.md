@@ -208,6 +208,33 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booste
 
 优先级即上表顺序：4 最严重，其次 6（有数据在危险里），再次 5。
 
+## 工具残留反查
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booster.ps1" -ListResidue [-Json]
+powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booster.ps1" -RemoveResidueKind <kind> -RemoveResidueId <id>
+```
+
+还原「成功」之后系统里仍然留着以本产品命名、用户自己查不到也删不掉的东西。
+还原成功会消费掉备份，此后连 GUID / 任务名都不可达——所以这是**纯探测**，
+不依赖任何持久化清单：清单文件自己会丢、会过期，而且对「装过老版本、从没写过它」
+的用户完全无效，恰恰是残留最多的那批人。
+
+| Kind | 是什么 | 可清理 |
+|---|---|---|
+| `power-scheme` | 工具自建的电源方案（还原时刻意保留，用户可能已经在用） | 不是当前活动方案时可删 |
+| `sched-task` | 锁定电源计划的计划任务，含换过安装目录留下的孤儿任务 | 可删 |
+| `sched-task-oneshot` | 一次性 SYSTEM 清理任务的残骸（上次还原中断留下的） | 可删 |
+| `reg-empty-key` | IFEO 里以**游戏主程序**命名的空键（杀软和反作弊的重点扫描位） | 可删 |
+| `programdata` | 受保护数据目录 | **不删**，只报告位置和原因 |
+
+`Kind` / `Id` 一律当**不可信输入**：每一类在删除前都会重新做一次身份复验
+（电源方案过 `Test-ToolPowerScheme` 且不是当前活动方案；计划任务过身份复验或命名空间；
+注册表键必须**等于**白名单里的某一条、且为空）。列表和删除之间隔着一次 IPC 往返，
+不能因为「它是刚才列出来的」就放行。
+
+还原收尾会自动清理 IFEO 空键（同一套白名单和「只删空键」判据），结果进 `Notes`。
+
 ## 优化项一览（Id 供 -Items 使用）
 
 所有项分两档：`safe`（下表全部）与 `risky`。**不带 `-Items` 且不指定预设时只执行 safe

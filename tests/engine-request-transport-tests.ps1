@@ -59,6 +59,7 @@ try {
     UserStateRoot='C:\ProgramData\DeltaForceBooster\users\S-1-5-21-1-2-3-1001'
     Action='Restore';ListRestoreItems=$true;ItemIds=[string[]]@();GamePath=$null
     AllowRisky=$false;BackupFile=$null;RestoreItemIds=[string[]]@()
+    ResidueKind=$null;ResidueId=$null
   }
   $restoreHydrated = & $requestFileHarness -RequestFile 'C:\fixture-request.json'
   Assert-True ($restoreHydrated.ListRestoreItems -and -not $restoreHydrated.Restore -and
@@ -218,7 +219,7 @@ try {
     SchemaVersion=1;ResultId=$id;Action='Apply';ItemIds=[string[]]@('game-mode','gpu-pref')
     GamePath='D:\Games\DeltaForce.exe';AllowRisky=$false;BackupFile=$null
     ListRestoreItems=$false;RestoreItemIds=[string[]]@();UserSid=$sid
-    UserLocalAppData=$local;UserStateRoot=$state
+    UserLocalAppData=$local;UserStateRoot=$state;ResidueKind=$null;ResidueId=$null
   }
   Write-RequestFixture $applyPath $applyDocument
   $applyRequest = Import-EngineActionRequest $applyPath $temp
@@ -233,6 +234,7 @@ try {
     SchemaVersion=1;ResultId=$restoreId;Action='Restore';ItemIds=[string[]]@();GamePath=$null
     AllowRisky=$false;BackupFile=$null;ListRestoreItems=$true
     RestoreItemIds=[string[]]@();UserSid=$sid;UserLocalAppData=$local;UserStateRoot=$state
+    ResidueKind=$null;ResidueId=$null
   }
   Write-RequestFixture $restorePath $restoreDocument
   $restoreRequest = Import-EngineActionRequest $restorePath $temp
@@ -258,6 +260,52 @@ try {
   $caught = ''
   try { [void](Import-EngineActionRequest $extraPath $temp) } catch { $caught = $_.Exception.Message }
   Assert-True ($caught -like '*未知字段*') "unknown request fields must be rejected (actual: $caught)"
+
+  # 残留清理动作走同一条受保护通道，参数组合同样严格：Kind 和 Id 必须成对出现，
+  # 且绝不允许和 Apply / Restore 的参数混在一起——否则一次普通还原请求能顺带删东西。
+  $residueReqId = [guid]::NewGuid().ToString('D')
+  $residuePath = Join-Path $temp "engine-request-$residueReqId.json"
+  $residueDocument = [ordered]@{
+    SchemaVersion=1;ResultId=$residueReqId;Action='Residue';ItemIds=[string[]]@();GamePath=$null
+    AllowRisky=$false;BackupFile=$null;ListRestoreItems=$false;RestoreItemIds=[string[]]@()
+    UserSid=$sid;UserLocalAppData=$local;UserStateRoot=$state
+    ResidueKind='sched-task';ResidueId='DeltaForceBooster-PowerPlanLock-aabbccdd1122'
+  }
+  Write-RequestFixture $residuePath $residueDocument
+  $residueRequest = Import-EngineActionRequest $residuePath $temp
+  Assert-True ($residueRequest.Action -eq 'Residue' -and $residueRequest.ResidueKind -eq 'sched-task' -and
+    $residueRequest.ResidueId -eq 'DeltaForceBooster-PowerPlanLock-aabbccdd1122') `
+    'valid residue request did not round-trip through strict transport schema'
+
+  foreach ($bad in @(
+    @{ Name='unknown kind'; Field='ResidueKind'; Value='rm -rf'; Match='*残留类型无效*' }
+    @{ Name='kind without id'; Field='ResidueId'; Value=$null; Match='*缺少目标*' }
+    @{ Name='id without kind'; Field='ResidueKind'; Value=$null; Match='*缺少目标*' }
+    @{ Name='apply params mixed in'; Field='ItemIds'; Value=[string[]]@('game-mode'); Match='*参数组合无效*' }
+    @{ Name='restore params mixed in'; Field='ListRestoreItems'; Value=$true; Match='*参数组合无效*' }
+  )) {
+    $badId = [guid]::NewGuid().ToString('D')
+    $badPath = Join-Path $temp "engine-request-$badId.json"
+    $badDoc = [ordered]@{} + $residueDocument
+    $badDoc.ResultId = $badId
+    $badDoc[$bad.Field] = $bad.Value
+    Write-RequestFixture $badPath $badDoc
+    $badCaught = ''
+    try { [void](Import-EngineActionRequest $badPath $temp) } catch { $badCaught = $_.Exception.Message }
+    Assert-True ($badCaught -like $bad.Match) "residue request [$($bad.Name)] was not rejected (actual: $badCaught)"
+  }
+
+  $smuggleId = [guid]::NewGuid().ToString('D')
+  $smugglePath = Join-Path $temp "engine-request-$smuggleId.json"
+  $smuggleDoc = [ordered]@{} + $restoreDocument
+  $smuggleDoc.ResultId = $smuggleId
+  $smuggleDoc.ResidueKind = 'sched-task'
+  $smuggleDoc.ResidueId = 'DeltaForceBooster-PowerPlanLock-aabbccdd1122'
+  Write-RequestFixture $smugglePath $smuggleDoc
+  $smuggleCaught = ''
+  try { [void](Import-EngineActionRequest $smugglePath $temp) } catch { $smuggleCaught = $_.Exception.Message }
+  Assert-True ($smuggleCaught -like '*Residue*') `
+    "restore request smuggling residue parameters was not rejected (actual: $smuggleCaught)"
 
   $mixedId = [guid]::NewGuid().ToString('D')
   $mixedPath = Join-Path $temp "engine-request-$mixedId.json"

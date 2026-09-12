@@ -76,6 +76,9 @@ param(
   [switch]$Apply,
   [switch]$Restore,
   [switch]$ListRestoreItems,
+  [switch]$ListResidue,
+  [string]$RemoveResidueKind,
+  [string]$RemoveResidueId,
   [switch]$ListItems,
   [switch]$ListPresets,
   [string]$Preset,
@@ -2919,7 +2922,8 @@ function Import-EngineActionRequest([string]$Path, [string]$ExpectedSessionRoot)
   catch { throw "管理员引擎请求 JSON 无效：$($_.Exception.Message)" }
   Assert-ExactProperties $document @(
     'SchemaVersion','ResultId','Action','ItemIds','GamePath','AllowRisky',
-    'BackupFile','ListRestoreItems','RestoreItemIds','UserSid','UserLocalAppData','UserStateRoot'
+    'BackupFile','ListRestoreItems','RestoreItemIds','UserSid','UserLocalAppData','UserStateRoot',
+    'ResidueKind','ResidueId'
   ) @() '管理员引擎请求'
   if (($document.SchemaVersion -isnot [int] -and $document.SchemaVersion -isnot [long]) -or
       [int]$document.SchemaVersion -ne 1) { throw '管理员引擎请求版本不受支持' }
@@ -2928,7 +2932,7 @@ function Import-EngineActionRequest([string]$Path, [string]$ExpectedSessionRoot)
   if (-not [guid]::TryParseExact("$($document.ResultId)", 'D', [ref]$parsedResultId) -or
       $parsedResultId -ne $parsedFileResultId) { throw '管理员引擎请求 ResultId 与文件名不匹配' }
   $resultId = $parsedResultId.ToString('D')
-  if ($document.Action -isnot [string] -or "$($document.Action)" -notin @('Apply','Restore')) {
+  if ($document.Action -isnot [string] -or "$($document.Action)" -notin @('Apply','Restore','Residue')) {
     throw '管理员引擎请求动作无效'
   }
   if ($document.AllowRisky -isnot [bool] -or $document.ListRestoreItems -isnot [bool]) {
@@ -2941,6 +2945,12 @@ function Import-EngineActionRequest([string]$Path, [string]$ExpectedSessionRoot)
   $userSid = Get-EngineRequestOptionalString $document.UserSid 'UserSid' 184
   $userLocalAppData = Get-EngineRequestOptionalString $document.UserLocalAppData 'UserLocalAppData'
   $userStateRoot = Get-EngineRequestOptionalString $document.UserStateRoot 'UserStateRoot'
+  # 残留清理的目标由引擎自己的白名单决定，这里只做形状校验；Kind 用枚举，Id 长度设上限。
+  $residueKind = Get-EngineRequestOptionalString $document.ResidueKind 'ResidueKind' 32
+  $residueId = Get-EngineRequestOptionalString $document.ResidueId 'ResidueId' 512
+  if ($residueKind -and $residueKind -notin @('power-scheme','sched-task','sched-task-oneshot','reg-empty-key','programdata')) {
+    throw '管理员引擎请求残留类型无效'
+  }
   if (-not $userSid -or -not $userLocalAppData -or -not $userStateRoot) {
     throw '管理员引擎请求缺少目标用户上下文'
   }
@@ -2949,7 +2959,18 @@ function Import-EngineActionRequest([string]$Path, [string]$ExpectedSessionRoot)
   if (-not $sid.IsAccountSid() -or -not [IO.Path]::IsPathRooted($userLocalAppData) -or
       -not [IO.Path]::IsPathRooted($userStateRoot)) { throw '管理员引擎请求用户上下文无效' }
 
-  if ("$($document.Action)" -eq 'Apply') {
+  if ("$($document.Action)" -ne 'Residue' -and ($residueKind -or $residueId)) {
+    throw '管理员引擎请求在非 Residue 动作里携带了残留参数'
+  }
+  if ("$($document.Action)" -eq 'Residue') {
+    if ($itemIds.Count -gt 0 -or $gamePath -or $document.AllowRisky -or $document.ListRestoreItems -or
+        $restoreItemIds.Count -gt 0 -or $backupFile) {
+      throw '管理员引擎 Residue 请求参数组合无效'
+    }
+    # Kind 和 Id 必须成对出现：只给一个是删除请求写坏了，宁可拒绝也不猜
+    if ([bool]$residueKind -ne [bool]$residueId) { throw '管理员引擎 Residue 请求缺少目标' }
+  }
+  elseif ("$($document.Action)" -eq 'Apply') {
     if ($itemIds.Count -eq 0 -or $document.ListRestoreItems -or $restoreItemIds.Count -gt 0 -or $backupFile) {
       throw '管理员引擎 Apply 请求参数组合无效'
     }
@@ -2964,7 +2985,8 @@ function Import-EngineActionRequest([string]$Path, [string]$ExpectedSessionRoot)
     ResultId = $resultId; Action = "$($document.Action)"; ItemIds = [string[]]$itemIds
     GamePath = $gamePath; AllowRisky = [bool]$document.AllowRisky
     BackupFile = $backupFile; ListRestoreItems = [bool]$document.ListRestoreItems
-    RestoreItemIds = [string[]]$restoreItemIds; UserSid = $userSid
+    RestoreItemIds = [string[]]$restoreItemIds; ResidueKind = $residueKind; ResidueId = $residueId
+    UserSid = $userSid
     UserLocalAppData = [IO.Path]::GetFullPath($userLocalAppData)
     UserStateRoot = [IO.Path]::GetFullPath($userStateRoot); SessionRoot = $sessionRoot
     ResultFile = Join-Path $sessionRoot ("engine-result-$resultId.json")
@@ -4980,6 +5002,20 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
     try { Rename-Item -LiteralPath $f -NewName ((Split-Path -Leaf $f) + '.restored') -ErrorAction Stop }
     catch { $bookkeeping += "备份「$(Split-Path -Leaf $f)」已还原但完成标记失败：$($_.Exception.Message)；下次还原会把同样的旧值再写回一遍" }
   }
+  # 还原把 IFEO 里的值删干净之后，会剩一个以**游戏主程序**命名的空键。它是杀软和
+  # 反作弊的重点扫描位，留着对用户和任何安全审计都是无法解释的。只删空键、只删
+  # 白名单里那三条路径，删不掉就如实报，绝不静默。
+  foreach ($ifeoPath in @(Get-BoosterIfeoResiduePaths)) {
+    foreach ($candidatePath in @("$ifeoPath\PerfOptions", $ifeoPath)) {
+      if (-not ((Test-RegKeyExists $candidatePath) -and (Test-RegKeyEmpty $candidatePath))) { continue }
+      try {
+        Remove-EmptyRegKey $candidatePath
+        $restoreNotes += "已清理还原后残留的空注册表键：$candidatePath"
+      } catch {
+        $restoreNotes += "还原后残留的空注册表键未能清理：$candidatePath（$($_.Exception.Message)）"
+      }
+    }
+  }
   # 项目级结论也按这个项目自己的 op 算：旧实现用一个全局 $allSucceeded 闸门，14 项里
   # 失败 1 项就把 RebootItems 整个清空，用户做完 13 项需要重启的改动却再也看不到重启提示。
   # 两个字段的判据故意不同，别统一：
@@ -5029,6 +5065,224 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
                      UnreadableReceiptCount = @($consumed.Unreadable).Count
                      Receipt=$receiptPath }
   } finally { Exit-EngineMutex $engineMutex }
+}
+
+# ---------- 工具残留反查 ----------
+#
+# 还原「成功」之后，系统里仍然留着三类以本产品命名的东西：工具自建的电源方案、
+# 锁定电源计划的计划任务、一次性 SYSTEM 清理任务中断后的残骸；另外还有一个以
+# **游戏主程序**命名的 IFEO 空键。普通用户在控制面板和任务计划程序库里看得到名字，
+# 却不知道能不能删、怎么删；而还原成功会消费掉备份，此后连 GUID / 任务名都不可达。
+# IFEO 更是杀软和反作弊的重点扫描位——留一个以游戏主程序命名的空键，对用户和任何
+# 安全审计都是无法解释的。
+#
+# **纯探测，不落任何持久化清单**。审计原方案是写一份 residue.json 随时登记，
+# 但那份文件自己会丢、会过期、会被篡改，而且对「装过老版本、从没写过它」的用户
+# 完全无效——恰恰是残留最多的那批人。从系统现状反查没有这些问题：
+#   电源方案 → Test-ToolPowerScheme（方案名是冻结标识，见 identity-freeze-tests）
+#   计划任务 → 按前缀枚举 + 身份复验（D 组已经把这套探测建好了）
+#   IFEO 空键 → 两条固定白名单路径直接探
+# 代价是多花几十毫秒扫描，换来的是「清单本身丢了也照样能查出来」。
+
+function Get-BoosterIfeoResiduePaths {
+  # 只认本工具真的写过的那三个游戏主程序名。绝不接受任何来自调用方的路径。
+  @('DeltaForceClient-Win64-Shipping.exe', 'DeltaForce.exe', 'DeltaForceClient.exe') | ForEach-Object {
+    "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$_"
+  }
+}
+
+function Test-RegKeyEmpty([string]$Path) {
+  # 「空」= 没有子键、也没有值（含默认值）。判不了就返回 $false —— 删除路径上
+  # 「不确定」必须等于「不删」。
+  try {
+    $base, $sub = Split-RegPath $Path
+    $k = $base.OpenSubKey($sub)
+    if (-not $k) { return $false }
+    try { return ($k.SubKeyCount -eq 0 -and $k.ValueCount -eq 0) } finally { $k.Close() }
+  } catch { return $false }
+}
+
+function Test-RegKeyExists([string]$Path) {
+  try {
+    $base, $sub = Split-RegPath $Path
+    $k = $base.OpenSubKey($sub)
+    if (-not $k) { return $false }
+    $k.Close(); $true
+  } catch { $false }
+}
+
+# 真正下手删的那一行单独一个函数：测试可以把它换成记账桩，而**判据**
+# （空不空、删完还在不在）留在 Remove-EmptyRegKey 里被真的执行到。
+# 把判据和动作放在同一个函数里，测试一旦打桩就把判据一起打没了——那是假绿。
+function Remove-RegSubKey([string]$Path) {
+  $base, $sub = Split-RegPath $Path
+  $base.DeleteSubKey($sub, $false)
+}
+
+function Remove-EmptyRegKey([string]$Path) {
+  # 只删空键。路径白名单由调用方 Remove-ToolResidue 把关，这里守的是「非空不删」。
+  if (-not (Test-RegKeyEmpty $Path)) { throw "注册表键非空或读不到，已拒绝删除：$Path" }
+  Remove-RegSubKey $Path
+  if (Test-RegKeyExists $Path) { throw "注册表空键删除后回读仍存在：$Path" }
+}
+
+# 返回系统里所有以本产品命名、用户自己查不到也删不掉的残留。
+# 每条都带 Removable 和人话 Reason —— 「能看见但不知道能不能动」和看不见一样糟。
+function Get-ToolResidue {
+  $items = New-Object System.Collections.Generic.List[object]
+
+  # 1. 工具自建的电源方案。还原时刻意不删（用户可能已经在用它），但必须让他知道它在
+  $activeGuid = ''
+  try { $act = Get-ActiveScheme; if ($act) { $activeGuid = "$($act.Guid)" } } catch {}
+  try {
+    foreach ($scheme in @(Get-PowerSchemes)) {
+      if (-not (Test-ToolPowerScheme $scheme)) { continue }
+      $isActive = ("$($scheme.Guid)" -ieq $activeGuid)
+      [void]$items.Add([pscustomobject][ordered]@{
+        Kind = 'power-scheme'; Id = "$($scheme.Guid)"; Name = "电源方案「$($scheme.Name)」"
+        Detail = "GUID $($scheme.Guid)"
+        Removable = (-not $isActive)
+        Reason = $(if ($isActive) { '这是当前正在使用的电源方案，删除前请先在控制面板里切换到别的方案' }
+                   else { '还原后保留下来的工具专属方案，可以删除' })
+      })
+    }
+  } catch {}
+
+  # 2. 锁定电源计划的计划任务。按前缀枚举 —— 换过安装目录的用户会留下孤儿任务，
+  #    只查当前安装根算出来的那一个是查不到它的
+  $lockNames = New-Object System.Collections.Generic.List[string]
+  [void]$lockNames.Add($script:LockTask)
+  foreach ($candidate in @(Get-BoosterLockTaskCandidates)) {
+    if ($lockNames -notcontains "$candidate") { [void]$lockNames.Add("$candidate") }
+  }
+  foreach ($name in $lockNames) {
+    if ((Get-TaskQueryState $name) -ne 'present') { continue }
+    if (-not (Test-BoosterLockTask $name)) { continue }
+    $isCurrent = ("$name" -ceq "$script:LockTask")
+    [void]$items.Add([pscustomobject][ordered]@{
+      Kind = 'sched-task'; Id = "$name"; Name = "计划任务 $name"
+      Detail = $(if ($isCurrent) { '当前安装目录创建的锁定任务' } else { '来自另一个安装目录的锁定任务' })
+      Removable = $true
+      Reason = $(if ($isCurrent) { '它每分钟把电源方案切回优化方案；还原电源设置前应先删掉它' }
+                 else { '旧安装目录留下的孤儿任务，现在的软件管不到它，建议删除' })
+    })
+  }
+
+  # 3. 一次性 SYSTEM 清理任务的残骸。正常路径会在 finally 里删掉它，中断（断电、
+  #    被杀软杀掉）才会留下。它以 SYSTEM 身份存在，普通用户删不掉
+  foreach ($name in @(Get-BoosterCleanupTaskCandidates)) {
+    if ((Get-TaskQueryState $name) -ne 'present') { continue }
+    [void]$items.Add([pscustomobject][ordered]@{
+      Kind = 'sched-task-oneshot'; Id = "$name"; Name = "计划任务 $name"
+      Detail = '一次性电源项清理任务'
+      Removable = $true
+      Reason = '上次还原中断时残留的一次性任务，它以 SYSTEM 身份存在，建议删除'
+    })
+  }
+
+  # 4. 以游戏主程序命名的 IFEO 空键
+  foreach ($ifeoPath in @(Get-BoosterIfeoResiduePaths)) {
+    $perfPath = "$ifeoPath\PerfOptions"
+    if ((Test-RegKeyExists $perfPath) -and (Test-RegKeyEmpty $perfPath)) {
+      [void]$items.Add([pscustomobject][ordered]@{
+        Kind = 'reg-empty-key'; Id = $perfPath; Name = "注册表空键 $(Split-Path -Leaf $ifeoPath)\PerfOptions"
+        Detail = $perfPath; Removable = $true
+        Reason = 'IFEO 里以游戏主程序命名的空键，里面已经没有任何设置了。这个位置是杀毒软件和反作弊的重点扫描位，建议删除'
+      })
+    } elseif ((Test-RegKeyExists $ifeoPath) -and (Test-RegKeyEmpty $ifeoPath)) {
+      [void]$items.Add([pscustomobject][ordered]@{
+        Kind = 'reg-empty-key'; Id = $ifeoPath; Name = "注册表空键 $(Split-Path -Leaf $ifeoPath)"
+        Detail = $ifeoPath; Removable = $true
+        Reason = 'IFEO 里以游戏主程序命名的空键，里面已经没有任何设置了。这个位置是杀毒软件和反作弊的重点扫描位，建议删除'
+      })
+    }
+  }
+
+  # 5. 受保护数据目录。它按设计在卸载后保留（备份要留着给用户还原），但用户自己
+  #    **删不掉**——ACL 只授权 Administrators 和 SYSTEM。至少要让他知道它在哪、为什么
+  if (Test-Path -LiteralPath $script:ProgramDataRoot) {
+    [void]$items.Add([pscustomobject][ordered]@{
+      Kind = 'programdata'; Id = "$script:ProgramDataRoot"; Name = '受保护数据目录'
+      Detail = "$script:ProgramDataRoot"
+      Removable = $false
+      Reason = '里面是备份、完整性密钥和按用户区分的配置。它按设计在卸载后保留，好让你以后还能还原；需要管理员权限才能删除，本工具不会替你删'
+    })
+  }
+
+  @($items.ToArray())
+}
+
+# 按前缀枚举一次性清理任务的候选名。和 Get-BoosterLockTaskCandidates 同构：
+# 枚举失败时返回空集合，调用方靠 Get-TaskQueryState 的三态兜底。
+function Get-BoosterCleanupTaskCandidates {
+  $service = $null
+  try {
+    $service = New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    $rx = '^' + [regex]::Escape($script:PowerCleanupTaskPrefix) + '-[0-9a-f]{32}$'
+    @($service.GetFolder('\').GetTasks(0) | ForEach-Object { "$($_.Name)" } | Where-Object { $_ -match $rx })
+  } catch { @() }
+  finally { if ($service) { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($service) } catch {} } }
+}
+
+# 删除一条残留。Kind/Id 一律当**不可信输入**对待：每一类都重新做一次身份复验，
+# 绝不因为「它是我刚才列出来的」就放行——列表和删除之间隔着一次 IPC 往返。
+function Remove-ToolResidue([string]$Kind, [string]$Id) {
+  if (-not (Test-Admin)) { throw '清理工具残留需要管理员权限' }
+  switch ($Kind) {
+    'power-scheme' {
+      $parsed = [guid]::Empty
+      if (-not [guid]::TryParseExact("$Id", 'D', [ref]$parsed)) { throw '电源方案 GUID 无效' }
+      $scheme = @(Get-PowerSchemes | Where-Object { "$($_.Guid)" -ieq "$Id" } | Select-Object -First 1)
+      if ($scheme.Count -eq 0) { throw '该电源方案已不存在' }
+      # 身份复验：只删名字是本工具专属方案的那一个，绝不碰用户/OEM 的同档方案
+      if (-not (Test-ToolPowerScheme $scheme[0])) { throw '该电源方案不是本工具创建，已拒绝删除' }
+      $act = Get-ActiveScheme
+      if ($act -and "$($act.Guid)" -ieq "$Id") { throw '这是当前正在使用的电源方案，请先在控制面板里切换到别的方案再删除' }
+      $ErrorActionPreference = 'SilentlyContinue'
+      $out = & $script:PowerCfgExe -delete $Id 2>&1
+      $code = $LASTEXITCODE
+      $ErrorActionPreference = 'Stop'
+      if ($code -ne 0 -or @(Get-PowerSchemes | Where-Object { "$($_.Guid)" -ieq "$Id" }).Count -gt 0) {
+        throw "电源方案删除失败（退出码 $code）：$(("$out").Trim())"
+      }
+      "已删除电源方案 $Id"
+    }
+    'sched-task' {
+      if (-not (Test-BoosterLockTask "$Id")) { throw '该计划任务不是本工具创建，已拒绝删除' }
+      Remove-BoosterTask "$Id"
+      "已删除计划任务 $Id"
+    }
+    'sched-task-oneshot' {
+      if ("$Id" -notmatch ('^' + [regex]::Escape($script:PowerCleanupTaskPrefix) + '-[0-9a-f]{32}$')) {
+        throw '该计划任务名不在本工具的命名空间内，已拒绝删除'
+      }
+      Remove-BoosterTask "$Id"
+      "已删除计划任务 $Id"
+    }
+    'reg-empty-key' {
+      # 路径必须**等于**白名单里算出来的某一条，不做前缀匹配、不做规范化后比较
+      $allowed = @(@(Get-BoosterIfeoResiduePaths) + @(Get-BoosterIfeoResiduePaths | ForEach-Object { "$_\PerfOptions" }))
+      if ($allowed -notcontains "$Id") { throw '该注册表路径不在可清理白名单内，已拒绝删除' }
+      Remove-EmptyRegKey "$Id"
+      "已删除空键 $Id"
+    }
+    'programdata' { throw '受保护数据目录不会由本工具删除：里面有你的备份和完整性密钥，请在确认不再需要还原后手动删除' }
+    default { throw "未知的残留类型：$Kind" }
+  }
+}
+
+# 删任务的公共实现：删除后必须回读到明确的 'absent' 才算成功，'unknown' 一律按失败。
+function Remove-BoosterTask([string]$TaskName) {
+  $probe = Get-TaskQueryState $TaskName
+  if ($probe -eq 'absent') { return }
+  if ($probe -ne 'present') { throw "无法确认计划任务 $TaskName 是否存在（任务计划服务查询失败），已拒绝删除" }
+  $ErrorActionPreference = 'SilentlyContinue'
+  $out = & $script:SchTasksExe /Delete /TN $TaskName /F 2>&1
+  $code = $LASTEXITCODE
+  $ErrorActionPreference = 'Stop'
+  $after = Get-TaskQueryState $TaskName
+  if ($after -ne 'absent') { throw "计划任务删除失败（退出码 $code，删除后状态 $after）：$(("$out").Trim())" }
 }
 
 # ---------- 输出 ----------
@@ -5114,11 +5368,14 @@ if ($RequestFile) {
   $Risky = [bool]$engineRequest.AllowRisky
   $BackupFile = $engineRequest.BackupFile
   $RestoreItems = [string[]]@($engineRequest.RestoreItemIds)
+  $ListResidue = $engineRequest.Action -eq 'Residue' -and -not $engineRequest.ResidueKind
+  $RemoveResidueKind = $(if ($engineRequest.Action -eq 'Residue') { $engineRequest.ResidueKind } else { $null })
+  $RemoveResidueId = $(if ($engineRequest.Action -eq 'Residue') { $engineRequest.ResidueId } else { $null })
 }
 
-$didDispatch = [bool]($ListItems -or $Detect -or $Preview -or $ListPresets -or $SavePreset -or $DeletePreset -or $Apply -or $Restore -or $ListRestoreItems)
+$didDispatch = [bool]($ListItems -or $Detect -or $Preview -or $ListPresets -or $SavePreset -or $DeletePreset -or $Apply -or $Restore -or $ListRestoreItems -or $ListResidue -or $RemoveResidueKind)
 if ($didDispatch) {
-$dispatchAction = $(if ($Apply) { 'Apply' } elseif ($Restore -or $ListRestoreItems) { 'Restore' } elseif ($Detect -or $Preview) { 'Detect' } else { 'Other' })
+$dispatchAction = $(if ($Apply) { 'Apply' } elseif ($Restore -or $ListRestoreItems) { 'Restore' } elseif ($ListResidue -or $RemoveResidueKind) { 'Residue' } elseif ($Detect -or $Preview) { 'Detect' } else { 'Other' })
 $dispatchData = $null; $dispatchError = $null; $cliExitCode = 0
 try {
   Set-TargetUserContext $UserSid $UserLocalAppData
@@ -5155,6 +5412,24 @@ elseif ($Detect -or $Preview) {
     Write-Output "== 预览：-Apply 将执行（仅 safe 档默认项） =="
     foreach ($s in ($r.Items | Where-Object { $_.Default -and $_.Tier -eq 'safe' -and $_.Optimized -ne $true })) { Write-Output "  将优化：$($s.Name)" }
     Write-Output "（仅预览，未做任何修改）"
+  }
+}
+elseif ($ListResidue -or $RemoveResidueKind) {
+  if ($RemoveResidueKind) {
+    if (-not $RemoveResidueId) { throw '-RemoveResidueKind 必须与 -RemoveResidueId 同时使用' }
+    $removed = Remove-ToolResidue $RemoveResidueKind $RemoveResidueId
+    $r = [pscustomobject]@{ Removed = "$removed"; Items = @(Get-ToolResidue) }
+  } else {
+    $r = [pscustomobject]@{ Removed = $null; Items = @(Get-ToolResidue) }
+  }
+  if ($Json) { $r | ConvertTo-Json -Depth 5 }
+  else {
+    if ($r.Removed) { Write-Output $r.Removed }
+    foreach ($item in @($r.Items)) {
+      Write-Output "  $(if ($item.Removable) { '[可清理]' } else { '[仅提示]' }) $($item.Name)"
+      Write-Output "        $($item.Reason)"
+    }
+    if (@($r.Items).Count -eq 0) { Write-Output '没有发现本工具留下的残留。' }
   }
 }
 elseif ($ListPresets) {

@@ -984,6 +984,138 @@ try {
     $namedFail.Failed[0] -like '*HwSchMode*') `
     '失败行只给注册表值名，用户根本不知道是哪一项出了问题'
 
+  # ---------- 11. 工具残留反查 ----------
+  # 还原「成功」之后系统里仍然留着以本产品命名、用户自己查不到也删不掉的东西。
+  # 还原成功会消费掉备份，此后连 GUID / 任务名都不可达——不给反查入口，
+  # 「还原干净了」就是一句查不了证的话。
+  $originalResidueSchemes = ${function:Get-PowerSchemes}
+  $originalResidueActive = ${function:Get-ActiveScheme}
+  $originalResidueProbe = ${function:Get-TaskQueryState}
+  $originalResidueCandidates = ${function:Get-BoosterLockTaskCandidates}
+  $originalResidueCleanupCandidates = ${function:Get-BoosterCleanupTaskCandidates}
+  $originalResidueIdentity = ${function:Test-BoosterLockTask}
+  $originalResidueKeyExists = ${function:Test-RegKeyExists}
+  $originalResidueKeyEmpty = ${function:Test-RegKeyEmpty}
+  $originalResidueKeyRemove = ${function:Remove-RegSubKey}
+  try {
+    $script:ResidueToolGuid = '22222222-3333-4444-8555-666666666666'
+    $script:ResidueActiveGuid = $script:BalancedGuid
+    $script:ResidueOrphanTask = "$($script:LockTaskPrefix)-998877665544"
+    $script:ResidueOneShot = "$($script:PowerCleanupTaskPrefix)-$('a' * 32)"
+    $script:ResidueEmptyKeys = @{}
+    $script:ResidueRemovedKeys = @()
+    $script:ResidueForeignGuid = '44444444-5555-4666-8777-888888888888'
+    function Get-PowerSchemes {
+      @([pscustomobject]@{Guid=$script:ResidueToolGuid;Name=$script:ToolSchemeName;Active=$false},
+        # 用户/OEM 自己的同档方案：名字像，但不是本工具建的，绝不能碰
+        [pscustomobject]@{Guid=$script:ResidueForeignGuid;Name='Ultimate Performance';Active=$false},
+        [pscustomobject]@{Guid=$script:BalancedGuid;Name='平衡';Active=$true})
+    }
+    function Get-ActiveScheme { [pscustomobject]@{Guid=$script:ResidueActiveGuid;Name='平衡';Active=$true} }
+    function Get-BoosterLockTaskCandidates { @($script:ResidueOrphanTask) }
+    function Get-BoosterCleanupTaskCandidates { @($script:ResidueOneShot) }
+    function Get-TaskQueryState([string]$TaskName) {
+      if ($TaskName -in @($script:ResidueOrphanTask, $script:ResidueOneShot)) { return 'present' }
+      'absent'
+    }
+    function Test-BoosterLockTask([string]$TaskName) { $TaskName -eq $script:ResidueOrphanTask }
+    function Test-RegKeyExists([string]$Path) { $script:ResidueEmptyKeys.ContainsKey($Path) }
+    function Test-RegKeyEmpty([string]$Path) { [bool]$script:ResidueEmptyKeys[$Path] }
+    # 只打桩「真正下手删的那一行」，判据留给产品代码真的执行到——
+    # 连判据一起打桩就测不到「非空不删」这条守卫了。
+    function Remove-RegSubKey([string]$Path) {
+      $script:ResidueRemovedKeys += $Path
+      [void]$script:ResidueEmptyKeys.Remove($Path)
+    }
+    $ifeoPerf = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DeltaForceClient-Win64-Shipping.exe\PerfOptions"
+    $script:ResidueEmptyKeys[$ifeoPerf] = $true
+
+    $residue = @(Get-ToolResidue)
+    $kinds = @($residue | ForEach-Object Kind)
+    foreach ($expected in 'power-scheme','sched-task','sched-task-oneshot','reg-empty-key','programdata') {
+      Assert-True ($kinds -contains $expected) "残留反查漏掉了 $expected"
+    }
+    Assert-True (@($residue | Where-Object { $_.Kind -eq 'sched-task' -and $_.Id -eq $script:ResidueOrphanTask }).Count -eq 1) `
+      '换过安装目录留下的孤儿锁定任务没被反查出来'
+    Assert-True (@($residue | Where-Object { $_.Kind -eq 'programdata' })[0].Removable -eq $false) `
+      '受保护数据目录不该被标成可清理——里面有备份和完整性密钥'
+    Assert-True (@($residue | Where-Object { $_.Kind -eq 'power-scheme' })[0].Removable -eq $true) `
+      '非活动的工具电源方案应该可以清理'
+
+    # 正在用的电源方案不许删
+    $script:ResidueActiveGuid = $script:ResidueToolGuid
+    $activeResidue = @(Get-ToolResidue | Where-Object { $_.Kind -eq 'power-scheme' })
+    Assert-True ($activeResidue[0].Removable -eq $false -and $activeResidue[0].Reason -like '*当前正在使用*') `
+      '当前活动的电源方案必须标成不可删并说清原因'
+    $activeRejected = ''
+    try { [void](Remove-ToolResidue 'power-scheme' $script:ResidueToolGuid) } catch { $activeRejected = $_.Exception.Message }
+    Assert-True ($activeRejected -like '*当前正在使用*') '删当前活动电源方案必须被拒绝'
+    $script:ResidueActiveGuid = $script:BalancedGuid
+
+    # 身份复验：Kind/Id 是**不可信输入**，列表和删除之间隔着一次 IPC 往返
+    $missingRejected = ''
+    try { [void](Remove-ToolResidue 'power-scheme' '99999999-8888-4777-8666-555555555555') }
+    catch { $missingRejected = $_.Exception.Message }
+    Assert-True ($missingRejected -like '*已不存在*') '删一个不存在的电源方案必须被拒绝'
+    # 存在、但不是本工具建的：身份复验必须拦住它。用户/OEM 的 Ultimate 方案长得很像
+    $foreignRejected = ''
+    try { [void](Remove-ToolResidue 'power-scheme' $script:ResidueForeignGuid) }
+    catch { $foreignRejected = $_.Exception.Message }
+    Assert-True ($foreignRejected -like '*不是本工具创建*') `
+      '用户/OEM 自己的电源方案必须被身份复验拦住'
+    Assert-True (@(Get-ToolResidue | Where-Object { $_.Kind -eq 'power-scheme' }).Count -eq 1) `
+      '残留清单把用户自己的电源方案也算了进来'
+    $foreignTaskRejected = ''
+    try { [void](Remove-ToolResidue 'sched-task' 'SomeOtherVendor-Task') } catch { $foreignTaskRejected = $_.Exception.Message }
+    Assert-True ($foreignTaskRejected -like '*不是本工具创建*') '删别家厂商的计划任务必须被拒绝'
+    $foreignOneShotRejected = ''
+    try { [void](Remove-ToolResidue 'sched-task-oneshot' 'DeltaForceBooster-Something-Else') }
+    catch { $foreignOneShotRejected = $_.Exception.Message }
+    Assert-True ($foreignOneShotRejected -like '*命名空间*') '一次性任务名不符合命名空间时必须被拒绝'
+    $programDataRejected = ''
+    try { [void](Remove-ToolResidue 'programdata' $script:ProgramDataRoot) } catch { $programDataRejected = $_.Exception.Message }
+    Assert-True ($programDataRejected -like '*不会由本工具删除*') '受保护数据目录绝不能被这个入口删掉'
+
+    # 注册表空键：路径必须**等于**白名单里的某一条，不做前缀匹配
+    foreach ($badPath in @(
+      'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options',
+      "$ifeoPerf\Sub",
+      'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\notepad.exe\PerfOptions',
+      'HKLM:\SYSTEM\CurrentControlSet\Services\WinDefend'
+    )) {
+      $pathRejected = ''
+      try { [void](Remove-ToolResidue 'reg-empty-key' $badPath) } catch { $pathRejected = $_.Exception.Message }
+      Assert-True ($pathRejected -like '*白名单*') "注册表空键清理越出了白名单：$badPath"
+    }
+    Assert-True (@($script:ResidueRemovedKeys).Count -eq 0) '被拒绝的路径不该有任何删除动作发生'
+
+    # 非空键一律不删
+    $script:ResidueEmptyKeys[$ifeoPerf] = $false
+    $nonEmptyRejected = ''
+    try { [void](Remove-ToolResidue 'reg-empty-key' $ifeoPerf) } catch { $nonEmptyRejected = $_.Exception.Message }
+    Assert-True ($nonEmptyRejected -like '*非空*' -and @($script:ResidueRemovedKeys).Count -eq 0) `
+      '非空的注册表键绝不能被删'
+
+    # 白名单内的空键才删得掉
+    $script:ResidueEmptyKeys[$ifeoPerf] = $true
+    [void](Remove-ToolResidue 'reg-empty-key' $ifeoPerf)
+    Assert-True (@($script:ResidueRemovedKeys) -contains $ifeoPerf) '白名单内的空键没有被删掉'
+
+    $unknownKindRejected = ''
+    try { [void](Remove-ToolResidue 'whatever' 'x') } catch { $unknownKindRejected = $_.Exception.Message }
+    Assert-True ($unknownKindRejected -like '*未知的残留类型*') '未知残留类型必须被拒绝'
+  } finally {
+    Set-Item -LiteralPath Function:\Get-PowerSchemes -Value $originalResidueSchemes
+    Set-Item -LiteralPath Function:\Get-ActiveScheme -Value $originalResidueActive
+    Set-Item -LiteralPath Function:\Get-TaskQueryState -Value $originalResidueProbe
+    Set-Item -LiteralPath Function:\Get-BoosterLockTaskCandidates -Value $originalResidueCandidates
+    Set-Item -LiteralPath Function:\Get-BoosterCleanupTaskCandidates -Value $originalResidueCleanupCandidates
+    Set-Item -LiteralPath Function:\Test-BoosterLockTask -Value $originalResidueIdentity
+    Set-Item -LiteralPath Function:\Test-RegKeyExists -Value $originalResidueKeyExists
+    Set-Item -LiteralPath Function:\Test-RegKeyEmpty -Value $originalResidueKeyEmpty
+    Set-Item -LiteralPath Function:\Remove-RegSubKey -Value $originalResidueKeyRemove
+  }
+
 } finally {
   if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -1155,5 +1287,21 @@ Assert-True ($rollbackFn.Count -eq 1) '找不到 Invoke-TuningRollbackBackup'
   try { [void](Invoke-TuningRollbackBackup 'C:\fixture\backup-x.json' '未知') } catch { $opaqueThrew = $true }
   Assert-True $opaqueThrew '退出码非 0 却没有任何失败项时不得当成回滚成功'
 } $rollbackFn[0].Extent.Text
+
+# 界面必须给得到这个入口，否则引擎算出来的残留清单等于不存在
+foreach ($needle in @('function Show-ToolResidueDialog', '$ui.ResidueBtn.Add_Click', "x:Name=`"ResidueBtn`"",
+                      "-Action Residue", '[工具残留]')) {
+  Assert-True ($guiRaw.Contains($needle)) "界面缺少工具残留入口的组成部分：$needle"
+}
+
+# 卸载器：按前缀枚举任务（换过安装目录的孤儿任务）、ProgramData 提示无条件输出
+$installerRaw = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'build\make-installer.ps1'), [Text.Encoding]::UTF8)
+Assert-True ($installerRaw.Contains("'^DeltaForceBooster-PowerPlanLock(-[0-9A-Fa-f]{12})?$'")) `
+  '卸载器只查两个精确任务名——换过安装目录的孤儿任务它删不掉，还会报告「未发现」'
+Assert-True ($installerRaw.Contains('未发现本工具的电源方案锁定计划任务')) `
+  '卸载器没找到任务时静默了，摘要里必须说出来'
+Assert-True ($installerRaw.Contains('受保护数据目录保留在：') -and
+  $installerRaw.Contains('普通账户删不掉')) `
+  '卸载器的 ProgramData 提示仍然只在「有备份」时才出现，且没说清用户自己删不掉'
 
 Write-Output "restore-accounting-tests: PASS ($script:Assertions assertions)"

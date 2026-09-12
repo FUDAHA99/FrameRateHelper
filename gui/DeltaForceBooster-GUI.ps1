@@ -1536,6 +1536,7 @@ $xaml = @'
           </StackPanel>
         </Button>
         <Button x:Name="RestoreBtn" Content="还原设置" Style="{StaticResource Ghost}" Width="118" Margin="9,0,0,0"/>
+        <Button x:Name="ResidueBtn" Content="检查工具残留" Style="{StaticResource Ghost}" Width="132" Margin="9,0,0,0"/>
         <Button x:Name="RefreshBtn" Content="重新检测" Style="{StaticResource Ghost}" Width="104" Margin="9,0,0,0"/>
         <Button x:Name="GuideBtn" Content="显卡指引" Style="{StaticResource Ghost}" Width="104" Margin="9,0,0,0"/>
       </StackPanel>
@@ -7292,13 +7293,15 @@ function ConvertTo-EngineDiagnosticSummary([string]$StandardError, [string]$Stan
 
 function Invoke-ElevatedEngineAction {
   param(
-    [Parameter(Mandatory)][ValidateSet('Apply','Restore')][string]$Action,
+    [Parameter(Mandatory)][ValidateSet('Apply','Restore','Residue')][string]$Action,
     [string[]]$ItemIds,
     [string]$GamePath,
     [bool]$AllowRisky = $false,
     [string]$BackupFile,
     [switch]$ListRestoreItems,
     [string[]]$RestoreItemIds,
+    [string]$ResidueKind,
+    [string]$ResidueId,
     [string]$ResultId
   )
   if (-not $script:EngineHostSessionValidated -or -not $isAdminGui) {
@@ -7326,7 +7329,14 @@ function Invoke-ElevatedEngineAction {
   $restoreIdsForRequest = [string[]]@($RestoreItemIds | Where-Object { $null -ne $_ } | ForEach-Object { "$_" })
   $normalizedGamePath = $(if ($GamePath) { [IO.Path]::GetFullPath($GamePath) } else { $null })
   $normalizedBackupFile = $null
-  if ($Action -eq 'Apply') {
+  if ($Action -ne 'Residue' -and ($ResidueKind -or $ResidueId)) { throw '非残留请求携带了残留参数' }
+  if ($Action -eq 'Residue') {
+    if ($itemIdsForRequest.Count -gt 0 -or $GamePath -or $AllowRisky -or $ListRestoreItems -or
+        $restoreIdsForRequest.Count -gt 0 -or $BackupFile) { throw '残留请求包含其他动作的参数' }
+    # 成对出现，只给一个是请求写坏了，宁可拒绝也不猜
+    if ([bool]$ResidueKind -ne [bool]$ResidueId) { throw '残留清理请求缺少目标' }
+  }
+  elseif ($Action -eq 'Apply') {
     if ($itemIdsForRequest.Count -eq 0) { throw '管理员执行请求没有优化项目' }
     if ($ListRestoreItems -or $restoreIdsForRequest.Count -gt 0 -or $BackupFile) { throw '优化请求包含还原参数' }
   } else {
@@ -7350,6 +7360,8 @@ function Invoke-ElevatedEngineAction {
     BackupFile = $normalizedBackupFile; ListRestoreItems = [bool]$ListRestoreItems
     RestoreItemIds = $restoreIdsForRequest; UserSid = $userSid
     UserLocalAppData = $userLocalAppData; UserStateRoot = [IO.Path]::GetFullPath($script:ProtectedUserStateRoot)
+    ResidueKind = $(if ($ResidueKind) { "$ResidueKind" } else { $null })
+    ResidueId = $(if ($ResidueId) { "$ResidueId" } else { $null })
   }
   Write-ProtectedEngineRequest $requestFile $request
 
@@ -7399,6 +7411,8 @@ function Invoke-ElevatedEngineAction {
       $detail = ConvertTo-EngineDiagnosticSummary $standardError $standardOutput
       $recoveryHint = $(if ($Action -eq 'Apply') {
           '本次系统设置可能已部分执行，请不要重复点击「执行优化」；请先「重新检测」，必要时使用「还原设置」。'
+        } elseif ($Action -eq 'Residue') {
+          '工具残留检查未完成，请稍后重试。'
         } elseif ($ListRestoreItems) {
           '还原项目读取未完成，请稍后重新检测。'
         } else {
@@ -9177,6 +9191,61 @@ $ui.RestoreBtn.Add_Click({
     Update-InlineRestoreSelection
   }
 })
+
+# 还原「成功」之后，系统里仍然留着工具自建的电源方案、锁定任务、一次性清理任务的
+# 残骸，以及一个以**游戏主程序**命名的 IFEO 空键。用户在控制面板和任务计划程序库里
+# 看得到这些名字，却不知道能不能删、怎么删；而还原成功会消费掉备份，此后连 GUID /
+# 任务名都不可达。没有这个入口，「还原干净了」就是一句查不了证的话。
+function Show-ToolResidueDialog {
+  if ($script:Busy) { return }
+  $busySet = $false
+  try {
+    Set-BusyState $true; $busySet = $true
+    $residue = Invoke-ElevatedEngineAction -Action Residue
+    Set-BusyState $false; $busySet = $false
+    $items = @($residue.Items)
+    foreach ($item in $items) { Write-Log "[工具残留] $($item.Name) — $($item.Reason)" }
+    if ($items.Count -eq 0) {
+      Show-ConfirmDialog '没有残留' 'NO RESIDUE' '没有发现本工具留下的电源方案、计划任务或注册表空键。' '知道了' -InfoOnly | Out-Null
+      return
+    }
+    $removable = @($items | Where-Object { $_.Removable })
+    $lines = @($items | ForEach-Object { "· $($_.Name)`n    $($_.Reason)" })
+    $body = "以下是本工具在系统里留下的东西：`n`n$($lines -join "`n`n")"
+    if ($removable.Count -eq 0) {
+      Show-ConfirmDialog '工具残留' 'TOOL RESIDUE' $body '知道了' -InfoOnly | Out-Null
+      return
+    }
+    $body += "`n`n要现在清理其中可清理的 $($removable.Count) 项吗？（受保护数据目录不会被删除）"
+    if (-not (Show-ConfirmDialog '工具残留' 'TOOL RESIDUE' $body '全部清理')) { return }
+    Set-BusyState $true; $busySet = $true
+    $done = 0; $failedResidue = @()
+    foreach ($item in $removable) {
+      try {
+        # 逐条发请求：引擎会对每一条重新做身份复验，绝不因为「它是刚才列出来的」就放行
+        [void](Invoke-ElevatedEngineAction -Action Residue -ResidueKind "$($item.Kind)" -ResidueId "$($item.Id)")
+        $done++
+        Write-Log "[工具残留] 已清理：$($item.Name)"
+      } catch {
+        $failedResidue += "$($item.Name)：$($_.Exception.Message)"
+        Write-Log "[工具残留] 清理失败：$($item.Name) — $($_.Exception.Message)"
+      }
+    }
+    Set-BusyState $false; $busySet = $false
+    $summary = "已清理 $done 项。"
+    if ($failedResidue.Count -gt 0) { $summary += "`n`n以下 $($failedResidue.Count) 项没能清理：`n$(@($failedResidue | Select-Object -First 5 | ForEach-Object { "· $_" }) -join "`n")" }
+    Show-ConfirmDialog $(if ($failedResidue.Count -gt 0) { '清理未完成' } else { '清理完成' }) `
+      $(if ($failedResidue.Count -gt 0) { 'CLEANUP INCOMPLETE' } else { 'CLEANUP DONE' }) $summary '知道了' -InfoOnly | Out-Null
+  } catch {
+    $err = $_.Exception.Message
+    Write-Log "工具残留检查失败：$err"
+    Show-ConfirmDialog '残留检查失败' 'RESIDUE CHECK FAILED' $err '知道了' -InfoOnly | Out-Null
+  } finally {
+    if ($busySet -or $script:Busy) { Set-BusyState $false }
+  }
+}
+
+$ui.ResidueBtn.Add_Click({ Show-ToolResidueDialog })
 
 $ui.InlineRestoreCloseBtn.Add_Click({ Hide-InlineRestorePanel })
 $ui.InlineRestoreSelectAllBtn.Add_Click({

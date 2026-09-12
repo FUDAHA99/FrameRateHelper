@@ -408,7 +408,18 @@ $rootBytes = [Text.Encoding]::UTF8.GetBytes(([IO.Path]::GetFullPath($dest)).ToUp
 $sha = [Security.Cryptography.SHA256]::Create()
 try { $rootHash = $sha.ComputeHash($rootBytes) } finally { $sha.Dispose() }
 $taskSuffix = (([BitConverter]::ToString($rootHash) -replace '-', '').Substring(0, 12))
+# 只查「裸前缀」和「当前安装根算出来的那一个」，会漏掉换过安装目录的用户留下的孤儿
+# 任务——它还在每分钟切电源方案，而卸载器报告「未发现」。按前缀枚举，身份复验照旧。
 $taskNames = @('DeltaForceBooster-PowerPlanLock', "DeltaForceBooster-PowerPlanLock-$taskSuffix")
+try {
+  $taskSvc = New-Object -ComObject 'Schedule.Service'
+  $taskSvc.Connect()
+  $lockRx = '^DeltaForceBooster-PowerPlanLock(-[0-9A-Fa-f]{12})?$'
+  foreach ($enumerated in @($taskSvc.GetFolder('\').GetTasks(0) | ForEach-Object { "$($_.Name)" })) {
+    if ($enumerated -match $lockRx -and $taskNames -notcontains $enumerated) { $taskNames += $enumerated }
+  }
+  [void][Runtime.InteropServices.Marshal]::ReleaseComObject($taskSvc)
+} catch {}
 $taskFound = $false; $taskDeleted = $false; $taskFailed = $false; $taskRejected = $false
 $trustedPowerCfg = [IO.Path]::GetFullPath($powercfgExe)
 $guidRx = '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
@@ -485,10 +496,21 @@ $sum += $(if ($restoreDone -eq $true) { '· 系统改动已按备份还原。' }
           else { '· 未发现备份记录，未执行还原。' })
 if ($taskRemoved -eq $true) { $sum += '· 电源方案锁定计划任务已删除。' }
 elseif ($taskRemoved -eq $false) { $sum += '· 电源方案锁定计划任务删除失败，请在「任务计划程序」中手动删除 DeltaForceBooster-PowerPlanLock。' }
+elseif (-not $taskFound) { $sum += '· 未发现本工具的电源方案锁定计划任务。' }
 if ($taskRejected) { $sum += '· 检测到同名计划任务，但执行内容不属于本工具，已原样保留。' }
-if ($hasBackup) {
-  $sum += "· 已保留受保护备份：$protectedBackup"
-  $sum += '  重新安装本工具后仍可点击「还原设置」读取这些备份。'
+# 原来只在「有备份」时才提。于是「只打开过一次软件就卸载」的用户看到「未发现备份记录」，
+# 而盘上留着一棵他自己删不动的目录树（ACL 只授权 Administrators 和 SYSTEM）。
+# 存在即报告，并写受保护**根目录**而不是只写 backup 子目录——里面还有完整性密钥和
+# 按用户区分的配置。
+$protectedRoot = Join-Path $programData 'DeltaForceBooster'
+if (Test-Path -LiteralPath $protectedRoot) {
+  if ($hasBackup) {
+    $sum += "· 已保留受保护备份：$protectedBackup"
+    $sum += '  重新安装本工具后仍可点击「还原设置」读取这些备份。'
+  }
+  $sum += "· 受保护数据目录保留在：$protectedRoot"
+  $sum += '  里面是备份、完整性密钥和按用户区分的配置。它的权限只授予管理员和 SYSTEM，'
+  $sum += '  普通账户删不掉；确认不再需要还原后，可用管理员身份手动删除整个目录。'
 }
 if ($customAnchor) {
   $sum += "· 已保留其他盘永久安装锚点：$customAnchor"
