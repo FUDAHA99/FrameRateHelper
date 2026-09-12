@@ -189,7 +189,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booste
 - `RebootItems` / `RebootItemIds`——只要有改动真的写回去了就会出现，哪怕同项目里另有一条失败。
 - `Notes`——可能包含必须转述的事实（如某份备份没被还原、工具自建电源方案保留的说明）。
 
-`-Restore` 的退出码：`0` 全部还原成功；`4` 有 `Failed`；`6` 有 `BookkeepingFailed`。
+按项目复原的 `ItemResults` 每行带 `Outcome`，比 `Ok` 布尔多说很多：
+
+`restored`（写回了原值）、`already_restored`（本来就已经是原值，只归档记录）、
+`conflict`（优化后又被改过，保留当前值）、`unsupported`（有设置已停止支持自动还原）、
+`no_record`（没有仍生效的记录）、`failed`（真的执行失败）。
+`Ok` 仍然等价于 `Outcome ∈ {restored, already_restored}`。
+**只有 `failed` 进 `Failed`**，其余进 `Skipped`——把冲突说成失败会让退出码和界面结论都变错。
+
+`-Restore` 的退出码，四档对应四种完全不同的下一步：
+
+| 码 | 含义 | 用户该做什么 |
+|---|---|---|
+| `0` | 全部还原成功 | 无 |
+| `4` | 有 `Failed` | 对应改动仍留在系统里，排查后可重试还原 |
+| `6` | 有 `BookkeepingFailed` | **别立刻重试**，先修好备份目录，否则下次还原会重复写回旧值 |
+| `5` | 有 `Skipped`／读不了的备份／还不回去的改动 | 系统能用，但没有完全回到优化前，按提示逐条处理 |
+
+优先级即上表顺序：4 最严重，其次 6（有数据在危险里），再次 5。
 
 ## 优化项一览（Id 供 -Items 使用）
 

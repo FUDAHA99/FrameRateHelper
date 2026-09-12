@@ -288,11 +288,18 @@ try {
     '记账失败后重试还原必须能把账补上'
 
   # ---------- 3. 退出码分档 ----------
+  # 四档对应四种完全不同的下一步：
+  #   4 排查后重试还原 / 6 先修备份目录**别**立刻重试 / 5 系统能用但没完全回到优化前 / 0 完成
   Assert-True ((Get-RestoreExitCode ([pscustomobject]@{Failed=@('x');BookkeepingFailed=@()})) -eq 4 -and
     (Get-RestoreExitCode ([pscustomobject]@{Failed=@();BookkeepingFailed=@('y')})) -eq 6 -and
     (Get-RestoreExitCode ([pscustomobject]@{Failed=@('x');BookkeepingFailed=@('y')})) -eq 4 -and
     (Get-RestoreExitCode ([pscustomobject]@{Failed=@();BookkeepingFailed=@()})) -eq 0) `
     '还原退出码必须把「记账失败」和「还原失败」分成两档'
+  Assert-True ((Get-RestoreExitCode ([pscustomobject]@{Failed=@();BookkeepingFailed=@();Skipped=@('s')})) -eq 5 -and
+    (Get-RestoreExitCode ([pscustomobject]@{Failed=@();BookkeepingFailed=@();Skipped=@();UnreadableBackupCount=1})) -eq 5 -and
+    (Get-RestoreExitCode ([pscustomobject]@{Failed=@();BookkeepingFailed=@();Skipped=@();UnrestorableOpCount=2})) -eq 5 -and
+    (Get-RestoreExitCode ([pscustomobject]@{Failed=@();BookkeepingFailed=@('y');Skipped=@('s')})) -eq 6) `
+    '「部分回退」必须有自己的退出码，且优先级低于失败和记账失败'
   # PowerShell 5.1 的 @($null).Count 是 1：缺字段的旧结果对象绝不能被判成记账失败
   Assert-True ((Get-RestoreExitCode ([pscustomobject]@{Failed=@()})) -eq 0) `
     '结果对象缺 BookkeepingFailed 字段时必须返回 0，不能被 @($null) 误判'
@@ -807,10 +814,14 @@ try {
   Write-BackupDocumentAtomic $selectedFaultPath $selectedFaultDoc
   $script:RegWrites.Clear()
   $selectedFaultResult = Invoke-RestoreSelected @('wer-off')
-  Assert-True ($selectedFaultResult.RestoredItems -eq 0 -and $selectedFaultResult.Failed.Count -eq 1 -and
+  Assert-True ($selectedFaultResult.RestoredItems -eq 0 -and
+    @($selectedFaultResult.ItemResults | Where-Object Id -eq 'wer-off')[0].Outcome -eq 'unsupported' -and
     @($selectedFaultResult.RestoredItemIds) -notcontains 'wer-off' -and
     $null -eq $selectedFaultResult.Receipt -and @($script:RegWrites.ToArray()).Count -eq 0) `
     '半好半坏的项目按项目复原时必须拒绝，不能报「复原成功」并写凭证'
+  Assert-True ($selectedFaultResult.Failed.Count -eq 0 -and $selectedFaultResult.Skipped.Count -eq 1 -and
+    (Get-RestoreExitCode $selectedFaultResult) -eq 5) `
+    '「不支持自动还原」不是执行失败，该落在「部分回退」这一档'
 
   # ---------- 5. v2 整份归档的闸门跟着 op 走 ----------
   # v2 没有 op 级凭证，只能整份 .restored 归档。所以它的判据必须是「这份自己的 op
@@ -937,6 +948,42 @@ try {
   Assert-True ($fullConflictRetry.RestoredOps -eq 1 -and (Get-RegValue $wsearchPath 'Start') -eq 2) `
     '用户把值改回去之后必须还能还原——冲突不是终局'
 
+  # ---------- 9. 两条还原路径的结果形状必须一致 ----------
+  # 界面和 agent 用同一套渲染。少一个字段，某条路径上的那类信息就对用户彻底不可见。
+  $shapeFields = @('Mode','File','Files','MergedCount','RestoredOps','Failed','Skipped','Notes',
+    'BookkeepingFailed','RestoredItemIds','SkippedItemIds','SkippedItems','RebootItems','RebootItemIds',
+    'ApplyIds','Receipt','UnreadableBackupCount','UnrestorableOpCount','UnreadableReceiptCount')
+  [void](New-AccountingRegBackup @(
+    [pscustomobject]@{ItemId='sys-responsiveness';DisplayName='系统响应度';Hash=('5'*63+'6');RebootRequired=$false
+      Path=$mmPath;Name='SystemResponsiveness';OldValue=20;AppliedValue=10}
+  ))
+  $shapeSelected = Invoke-RestoreSelected @('sys-responsiveness')
+  [void](New-AccountingRegBackup @(
+    [pscustomobject]@{ItemId='sysmain-off';DisplayName='预读服务';Hash=('7'*63+'8');RebootRequired=$false
+      Path=$sysmainPath;Name='Start';OldValue=2;AppliedValue=4}
+  ))
+  $shapeAll = Invoke-Restore $null
+  foreach ($field in $shapeFields) {
+    Assert-True ($null -ne $shapeSelected.PSObject.Properties[$field]) "按项目复原的结果缺字段 $field"
+    Assert-True ($null -ne $shapeAll.PSObject.Properties[$field]) "全部复原的结果缺字段 $field"
+  }
+  Assert-True (@($shapeSelected.ItemResults)[0].PSObject.Properties['Outcome'] -and
+    @($shapeSelected.ItemResults)[0].Outcome -eq 'restored') `
+    'ItemResults 必须带 Outcome，而不是只给一个 Ok 布尔'
+
+  # ---------- 10. 失败行必须带用户认得的项目名 ----------
+  # 用户在优化清单里勾的是「硬件加速 GPU 计划」，不是「HwSchMode」。
+  $namedFailPath = New-AccountingRegBackup @(
+    [pscustomobject]@{ItemId='hags';DisplayName='硬件加速 GPU 计划';Hash=('9'*63+'a');RebootRequired=$true
+      Path=$hagsPath;Name='HwSchMode';OldValue=1;AppliedValue=2}
+  )
+  $script:FailRegKey = Get-TestRegKey $hagsPath 'HwSchMode'
+  $namedFail = Invoke-Restore $namedFailPath
+  $script:FailRegKey = ''
+  Assert-True (@($namedFail.Failed).Count -eq 1 -and $namedFail.Failed[0] -like '*硬件加速 GPU 计划*' -and
+    $namedFail.Failed[0] -like '*HwSchMode*') `
+    '失败行只给注册表值名，用户根本不知道是哪一项出了问题'
+
 } finally {
   if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -953,6 +1000,15 @@ Assert-True ($guiRaw.Contains("if (`$failN -eq 0 -and `$bookN -gt 0) { `$restore
 $engineRaw = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts\delta-booster.ps1'), [Text.Encoding]::UTF8)
 Assert-True ($engineRaw.Contains('foreach ($b in $r.BookkeepingFailed) { Write-Output "  [记账失败] $b" }')) `
   'CLI 文本输出丢掉了记账失败'
+
+# README 把 -ListRestoreItems 写成用户的自助手段。它在空态必须说清结论和搜索范围——
+# 原来一行字都不输出，用户分不清「确实没改过」和「改过但工具没找到」。
+$listBranchStart = $engineRaw.IndexOf('elseif ($ListRestoreItems) {')
+Assert-True ($listBranchStart -ge 0) '找不到 -ListRestoreItems 的 CLI 分支'
+$listBranch = $engineRaw.Substring($listBranchStart, [Math]::Min(2000, $engineRaw.Length - $listBranchStart))
+foreach ($needle in @("当前没有支持按项目精确复原的记录。", "已搜索：", '$r.UnreadableBackupCount', '$r.UnrestorableOpCount', 'foreach ($n in @($r.Notes))')) {
+  Assert-True ($listBranch.Contains($needle)) "-ListRestoreItems 的文本输出缺少「$needle」——空态下用户什么都看不到"
+}
 
 # ---------- 6b. 锁定任务探测必须三态，而且要认带安装根哈希的任务名 ----------
 # 备份侧 Assert-BackupOperation 本来就兼容「裸前缀」和「前缀-12位哈希」两种任务名，

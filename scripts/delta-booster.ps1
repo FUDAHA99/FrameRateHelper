@@ -3910,6 +3910,18 @@ function Get-RestoreOpLabel($op) {
   }
 }
 
+# 失败行 / 跳过行必须带用户认得出的项目名。「注册表 HwSchMode」对用户毫无意义，
+# 「硬件加速 GPU 计划（注册表 HwSchMode）」才是他在优化清单里勾过的那一行。
+# v3 备份里 Item.DisplayName 是必填的（Assert-BackupItem 强制非空），是代码自己在
+# 中途只留下裸 op 才把它丢掉的。
+function Get-RestoreOpDisplayName($Op, $ItemNames) {
+  $label = Get-RestoreOpLabel $Op
+  if (-not $ItemNames) { return $label }
+  $itemName = "$($ItemNames["$($Op.Id)"])"
+  if ($itemName) { return "$itemName（$label）" }
+  $label
+}
+
 # 备份操作的去重键：同一目标在多份备份里都出现时，只有最早那份的 OldValue 是真正的
 # 优化前原值（后来那些可能记到的是已被本工具改过的值），合并还原据此只保留最早一条
 function Get-RestoreOpKey($op) {
@@ -4093,6 +4105,7 @@ function Get-ConsumedRestoreBlockReason($Consumed) {
 function Get-ValidatedRestoreRecords([string]$File, [bool]$AllowEmpty) {
   Initialize-ProtectedStore
   $notes = @(); $legacyDirs = @(); $sourceFiles = @(); $alreadyConsumed = $false
+  $enumerationFailures = @()
   if ($File) {
     $candidate = [IO.Path]::GetFullPath($File)
     $restoredCandidate = $candidate + '.restored'
@@ -4105,7 +4118,8 @@ function Get-ValidatedRestoreRecords([string]$File, [bool]$AllowEmpty) {
         throw '指定备份属于另一个 Windows 用户，已拒绝跨用户还原'
       }
       return [pscustomobject]@{ Records = @(); Notes = @('指定备份此前已完成还原，本次无需重复执行'); AlreadyConsumed = $true
-        SearchedRoots = @($script:BackupDir); UnreadableCount = 0; OpFaultCount = 0 }
+        SearchedRoots = @($script:BackupDir); UnreadableCount = 0; OpFaultCount = 0
+        EnumerationFailureCount = 0 }
     }
     if (-not (Test-PathUnder $candidate $script:BackupDir)) {
       $legacyDirs = @(Get-LegacyBackupDirs); $notes += @($script:LegacyBackupWarnings)
@@ -4113,19 +4127,26 @@ function Get-ValidatedRestoreRecords([string]$File, [bool]$AllowEmpty) {
     $sourceFiles = @($candidate)
   } else {
     $legacyDirs = @(Get-LegacyBackupDirs); $notes += @($script:LegacyBackupWarnings)
+    # 目录枚举失败（权限被改、目录被换成文件、驱动器掉线）原本 SilentlyContinue 成空集合，
+    # 和「目录里确实没有备份」完全同形。对用户是两件事：前者说明改过但工具找不到了，
+    # 后者说明本来就没改过。单列计数，别让空列表替读取失败背锅。
     $sourceFiles = @(
       foreach ($d in (@($script:BackupDir) + @($legacyDirs) | Select-Object -Unique)) {
-        if (Test-Path -LiteralPath $d) {
-          Get-ChildItem -LiteralPath $d -Filter 'backup-*.json' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+        if (-not (Test-Path -LiteralPath $d)) { continue }
+        try {
+          Get-ChildItem -LiteralPath $d -Filter 'backup-*.json' -File -ErrorAction Stop | Select-Object -ExpandProperty FullName
+        } catch {
+          $enumerationFailures += "备份目录枚举失败，已跳过：$d（$($_.Exception.Message)）"
         }
       }
     ) | Select-Object -Unique
+    $notes += $enumerationFailures
   }
   if ($sourceFiles.Count -eq 0) {
     if ($AllowEmpty) {
       return [pscustomobject]@{ Records = @(); Notes = $notes; AlreadyConsumed = $false
         SearchedRoots = @(@($script:BackupDir) + @($legacyDirs) | Select-Object -Unique)
-        UnreadableCount = 0; OpFaultCount = 0 }
+        UnreadableCount = 0; OpFaultCount = 0; EnumerationFailureCount = $enumerationFailures.Count }
     }
     $detail = $(if ($notes.Count -gt 0) { "（$($notes -join '；')）" } else { '' })
     throw "未找到任何备份文件，无法还原$detail"
@@ -4193,6 +4214,7 @@ function Get-ValidatedRestoreRecords([string]$File, [bool]$AllowEmpty) {
     SearchedRoots = @(@($script:BackupDir) + @($legacyDirs) | Select-Object -Unique)
     UnreadableCount = $unreadable.Count
     OpFaultCount = $opFaultRecords.Count
+    EnumerationFailureCount = $enumerationFailures.Count
   }
 }
 
@@ -4484,6 +4506,7 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
     $itemResults = New-Object System.Collections.Generic.List[object]
     $successes = New-Object System.Collections.Generic.List[object]
     $failed = New-Object System.Collections.Generic.List[string]
+    $skippedItems = New-Object System.Collections.Generic.List[string]
     $index = 0
     foreach ($itemId in $ItemIds) {
       $index++
@@ -4491,12 +4514,15 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
       $meta = @($wrappers | ForEach-Object Item | Where-Object { $_ } | Select-Object -First 1)
       $name = $(if ($meta.Count) { "$($meta[0].DisplayName)" } else { $itemId })
       if ($Progress) { & $Progress ([pscustomobject]@{ Stage='start';Index=$index;Total=$ItemIds.Count;Name=$name;Ok=$null }) }
-      $ok = $false; $message = ''
+      # Outcome 是一等公民：调用方（GUI / CLI / agent）要能分清「没还原」的六种原因，
+      # 而不是只拿到一个 $ok 布尔。$ok 保留给旧契约。
+      $ok = $false; $message = ''; $outcome = 'failed'
       if ($selectedFaults.ContainsKey($itemId)) {
+        $outcome = 'unsupported'
         $message = "该项目有设置已停止支持自动还原，只能手动改回：$(@($selectedFaults[$itemId]) -join '；')"
       }
-      elseif ($wrappers.Count -eq 0) { $message = '没有仍生效且可精确复原的记录' }
-      elseif (@($wrappers | Where-Object { $_.Op.Kind -ne 'reg' }).Count -gt 0) { $message = '该项目包含当前版本尚未开放的底层设置，请使用全部复原' }
+      elseif ($wrappers.Count -eq 0) { $outcome = 'no_record'; $message = '没有仍生效且可精确复原的记录' }
+      elseif (@($wrappers | Where-Object { $_.Op.Kind -ne 'reg' }).Count -gt 0) { $outcome = 'unsupported'; $message = '该项目包含当前版本尚未开放的底层设置，请使用全部复原' }
       else {
         $units = @(Get-SelectiveRestoreUnits $wrappers)
         $unitStates = @($units | ForEach-Object { [pscustomobject]@{ Unit = $_; State = (Get-RegUnitRestoreState $_) } })
@@ -4509,6 +4535,7 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
           "；以下设置在优化后又被改过，已保留当前值：$(@($conflictUnits | ForEach-Object { Get-RestoreOpLabel $_.Latest }) -join '、')"
         } else { '' })
         if ($writeUnits.Count -eq 0 -and $settledUnits.Count -eq 0) {
+          $outcome = 'conflict'
           $message = "检测到优化后又被用户或其他程序修改，已保留当前状态：$(@($conflictUnits | ForEach-Object { Get-RestoreOpLabel $_.Latest }) -join '、')"
         }
         else {
@@ -4521,6 +4548,7 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
               Invoke-RestoreRegOperation $unit.Restore
             }
             $ok = $true
+            $outcome = $(if ($writeUnits.Count -eq 0) { 'already_restored' } elseif ($conflictUnits.Count -gt 0) { 'conflict' } else { 'restored' })
             $message = "已复原 $($writeUnits.Count) 个底层设置" +
                        $(if ($settledUnits.Count -gt 0) { "（另有 $($settledUnits.Count) 项本来就已经是原值，仅归档记录）" }) +
                        $conflictNote
@@ -4534,12 +4562,16 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
             foreach ($key in $rollbackKeys) {
               try { Set-RegRestoreSnapshot $snapshots[$key] } catch { $rollbackErrors += $_.Exception.Message }
             }
+            $outcome = 'failed'
             $message = "$restoreError；本项目已自动撤销本次复原$(if ($rollbackErrors.Count) { "（回滚异常：$($rollbackErrors -join '；')）" })"
           }
         }
       }
-      if (-not $ok) { [void]$failed.Add("$name：$message") }
-      [void]$itemResults.Add([pscustomobject]@{ Id=$itemId;Name=$name;Ok=$ok;Message=$message })
+      # 「冲突 / 不支持 / 没有记录」不是失败：它们不该让退出码变成 4，也不该让界面说
+      # 「还原未完成」。只有真的执行失败才进 Failed。
+      if ($outcome -eq 'failed') { [void]$failed.Add("$name：$message") }
+      elseif (-not $ok) { [void]$skippedItems.Add("$name：$message") }
+      [void]$itemResults.Add([pscustomobject]@{ Id=$itemId;Name=$name;Ok=$ok;Outcome=$outcome;Message=$message })
       if ($Progress) { & $Progress ([pscustomobject]@{ Stage='done';Index=$index;Total=$ItemIds.Count;Name=$name;Ok=$ok }) }
     }
     $receiptPath = $null
@@ -4557,7 +4589,7 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
           }
           $msg = "消费凭证写入失败，已撤销本次复原：$receiptError$(if ($rollbackErrors.Count) { "；回滚异常：$($rollbackErrors -join '；')" })"
           $row = @($itemResults.ToArray() | Where-Object Id -eq $success.Id | Select-Object -First 1)
-          if ($row.Count) { $row[0].Ok = $false; $row[0].Message = $msg }
+          if ($row.Count) { $row[0].Ok = $false; $row[0].Outcome = 'failed'; $row[0].Message = $msg }
           [void]$failed.Add("$($success.Name)：$msg")
         }
         $successes.Clear()
@@ -4569,10 +4601,18 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
       Mode='selected_items'; File=$(if($files.Count){$files[0]}else{$null}); Files=$files; MergedCount=$files.Count
       # 只数真正写回去的：already_restored 的 unit 进了凭证但一个字节都没写
       RestoredOps=@($successArray | ForEach-Object { @($_.Snapshots.Keys).Count } | Measure-Object -Sum).Sum
-      RestoredItems=$successArray.Count; Failed=@($failed.ToArray()); Skipped=@(); Notes=@($state.Notes)
+      RestoredItems=$successArray.Count; Failed=@($failed.ToArray())
+      # 冲突 / 不支持 / 没有记录都进 Skipped：它们没有还原，但也不是执行失败。
+      # 把这三类混进 Failed 会让退出码变成 4、界面说「还原未完成」，两个结论都不对。
+      Skipped=@($skippedItems.ToArray()); Notes=@($state.Notes)
       # 按项目复原的凭证写入失败会整体回滚（事务语义，见上面的 catch），所以这里永远
       # 不会有「已还原但没记上账」的中间态；字段仍然要在，两条还原路径的结果形状必须一致
-      BookkeepingFailed=@(); SkippedItemIds=@(); SkippedItems=@()
+      BookkeepingFailed=@()
+      SkippedItemIds=@($itemResults.ToArray() | Where-Object { -not $_.Ok } | ForEach-Object Id)
+      SkippedItems=@($itemResults.ToArray() | Where-Object { -not $_.Ok } | ForEach-Object Name)
+      # 可发现性字段：两条还原路径的形状必须一致，界面才能用同一套渲染
+      UnreadableBackupCount=[int]$state.UnreadableCount; UnrestorableOpCount=@(Get-FaultedRestoreOps $state.Records).Count
+      UnreadableReceiptCount=@($consumed.Unreadable).Count
       ItemResults=@($itemResults.ToArray()); RebootItems=@($successArray | Where-Object RebootRequired | ForEach-Object Name)
       RestoredItemIds=@($successArray | ForEach-Object Id)
       RebootItemIds=@($successArray | Where-Object RebootRequired | ForEach-Object Id)
@@ -4594,7 +4634,8 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
   if ($state.AlreadyConsumed) {
     return [pscustomobject]@{ Mode='all'; File=$File; Files=@($File); MergedCount=1; RestoredOps=0
       Failed=@(); Skipped=@(); Notes=@($state.Notes); BookkeepingFailed=@(); RestoredItemIds=@();
-      SkippedItemIds=@(); SkippedItems=@(); RebootItems=@();
+      SkippedItemIds=@(); SkippedItems=@(); RebootItems=@()
+      UnreadableBackupCount=[int]$state.UnreadableCount; UnrestorableOpCount=0; UnreadableReceiptCount=0
       RebootItemIds=@(); ApplyIds=@(); Receipt=$null }
   }
   $restoreNotes = @($state.Notes)
@@ -4620,7 +4661,10 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
         Failed=@($faultedFailures)
         Skipped=@(); BookkeepingFailed=@()
         Notes=@($(if ($faultedFailures.Count -gt 0) { '指定备份里的改动都没有通过校验，无法自动还原' } else { '指定备份此前已完成还原，本次无需重复执行' }))
-        RestoredItemIds=@(); SkippedItemIds=@(); SkippedItems=@(); RebootItems=@(); RebootItemIds=@(); ApplyIds=@(); Receipt=$null }
+        RestoredItemIds=@(); SkippedItemIds=@(); SkippedItems=@(); RebootItems=@(); RebootItemIds=@()
+        UnreadableBackupCount=[int]$state.UnreadableCount; UnrestorableOpCount=$faultedOps.Count
+        UnreadableReceiptCount=@($consumed.Unreadable).Count
+        ApplyIds=@(); Receipt=$null }
     }
     if ($faultedFailures.Count -gt 0) {
       throw "找到 $($faultedOps.Count) 条备份记录，但都没有通过校验，无法自动还原：$($faultedOps[0].Reason)"
@@ -4675,6 +4719,13 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
   $ops = @(Get-RestoreExecutionOps $ops)
   # 校验没过的 op 不会进执行表，但必须逐条出现在失败清单里——带人话项名和原因。
   # 「被拒绝」和「没人告诉你」是两件事，后者才是缺陷。
+  # opId -> 项目显示名。失败行和跳过行都靠它把「注册表 HwSchMode」变成
+  # 「硬件加速 GPU 计划（注册表 HwSchMode）」——用户在优化清单里勾的是后者。
+  $opItemNames = @{}
+  foreach ($wrapper in (@($activeV3) + @($faultedOps))) {
+    if (-not $wrapper -or -not $wrapper.Item) { continue }
+    $opItemNames["$($wrapper.Op.Id)"] = "$($wrapper.Item.DisplayName)"
+  }
   $restored = 0; $failed = @($faultedFailures); $skippedOps = @(); $seq = 0; $total = $ops.Count
   # 记账跟着事实走，一条 op 一笔账（两个集合的作用域差别见 Test-RestoreOpAccounted）：
   #   $succeededKeys — 确认把原值写回去了（按目标键）
@@ -4701,7 +4752,7 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
   }
   foreach ($op in $ops) {
     $seq++
-    if ($Progress) { & $Progress ([pscustomobject]@{ Stage = 'start'; Index = $seq; Total = $total; Name = (Get-RestoreOpLabel $op); Ok = $null }) }
+    if ($Progress) { & $Progress ([pscustomobject]@{ Stage = 'start'; Index = $seq; Total = $total; Name = (Get-RestoreOpDisplayName $op $opItemNames); Ok = $null }) }
     $opOk = $true
     $opKey = Get-RestoreOpAccountingKey $op
     $opId = "$($op.Id)"
@@ -4715,12 +4766,12 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
           # 旧实现只把这条依赖编码成执行顺序（先 sched 后 power），没编码成前置条件。
           if ($blockedLockTasks.Count -gt 0) {
             $blockedDetail = @($blockedLockTasks.Keys | ForEach-Object { "$_（$($blockedLockTasks[$_])）" }) -join '；'
-            $failed += "$(Get-RestoreOpLabel $op)：锁定任务未能删除 —— $blockedDetail；刚写回的电源方案会在 1 分钟内被它改回优化方案，本项不计为已还原"
+            $failed += "$(Get-RestoreOpDisplayName $op $opItemNames)：锁定任务未能删除 —— $blockedDetail；刚写回的电源方案会在 1 分钟内被它改回优化方案，本项不计为已还原"
           } elseif ($op.Old) {
             $powerRestore = Invoke-RestorePowerScheme "$($op.Old)"
             if ($powerRestore.Exact) { $restored++; $succeededKeys[$opKey] = $true }
             else {
-              $skippedOps += "电源计划：$($powerRestore.Message)"
+              $skippedOps += "$(Get-RestoreOpDisplayName $op $opItemNames)：$($powerRestore.Message)"
               if (-not $powerRestore.Retryable) { $finalOpIds[$opId] = $true }
             }
           } else {
@@ -4729,7 +4780,7 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
             # 旧实现在这里一声不吭地什么都不做，还把这条记录当成功勾销掉，用户看到
             # 「全部还原成功」，系统却还停在优化时的电源方案上。
             # 归入不可重试：没有原值就永远还原不了，留着只会每次还原都重复报同一句。
-            $skippedOps += '电源计划：备份里没有记录优化前的电源方案，无法自动切回；请在控制面板→电源选项里手动选回你原来用的方案'
+            $skippedOps += "$(Get-RestoreOpDisplayName $op $opItemNames)：备份里没有记录优化前的电源方案，无法自动切回；请在控制面板→电源选项里手动选回你原来用的方案"
             $finalOpIds[$opId] = $true
           }
           # 工具自建的方案保留不删：用户可能已经在用它，静默删除是破坏性动作
@@ -4762,17 +4813,17 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
                 $def = Get-RegValue "$script:PsRoot\$($op.Sub)\$($op.Setting)\DefaultPowerSchemeValues\$guid" 'ACSettingIndex'
                 if ($null -ne $def) {
                   Set-PowerSettingAc $op.Sub $op.Setting ([int]$def) $guid
-                  $skippedOps += "$(Get-RestoreOpLabel $op)：SYSTEM 精确清理未执行，已写回该方案默认值（效果等同原状态）"
+                  $skippedOps += "$(Get-RestoreOpDisplayName $op $opItemNames)：SYSTEM 精确清理未执行，已写回该方案默认值（效果等同原状态）"
                   $finalOpIds[$opId] = $true
                 } else {
                   $activeAfterPowerRestore = Get-ActiveScheme
                   $activeGuid = $(if ($activeAfterPowerRestore) { "$($activeAfterPowerRestore.Guid)" } else { '' })
                   if ($activeGuid -and ($guid -ine $activeGuid)) {
-                    $skippedOps += "$(Get-RestoreOpLabel $op)：SYSTEM 精确清理未执行，残留位于非活动方案，对当前无影响；若以后手动切回该方案会重新用上这些值"
+                    $skippedOps += "$(Get-RestoreOpDisplayName $op $opItemNames)：SYSTEM 精确清理未执行，残留位于非活动方案，对当前无影响；若以后手动切回该方案会重新用上这些值"
                     $finalOpIds[$opId] = $true
                   } elseif ($activeGuid) {
                     $fallback = Invoke-BalancedPowerFallback "目标方案 $guid 的继承值清理受系统策略拦截"
-                    $skippedOps += "$(Get-RestoreOpLabel $op)：$($fallback.Message)；残留已留在非活动方案"
+                    $skippedOps += "$(Get-RestoreOpDisplayName $op $opItemNames)：$($fallback.Message)；残留已留在非活动方案"
                     if (-not $fallback.Retryable) { $finalOpIds[$opId] = $true }
                   } else {
                     throw "电源隐藏项精确清理失败且当前活动方案读取失败（管理员清理：$directFailure；SYSTEM 清理：$systemFailure）"
@@ -4837,7 +4888,7 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
             # SKILL.md 的契约表也是这么写的。进 $finalOpIds 等于把这份备份记录永久烧掉：
             # 去重保留的恰好是唯一带着优化前真原值的那条，烧掉之后下一次还原只会拿
             # 更晚备份里的中间值当原值写回系统，并宣布已回到优化前。
-            $skippedOps += "$(Get-RestoreOpLabel $op)：优化后这个设置又被改过，已保留当前值，没有写回原值；把它改回去之后可以再次还原"
+            $skippedOps += "$(Get-RestoreOpDisplayName $op $opItemNames)：优化后这个设置又被改过，已保留当前值，没有写回原值；把它改回去之后可以再次还原"
           } elseif ($regState -eq 'already_restored') {
             # 系统里已经是原值了（多半是上次还原中断在记账前）：不用再写，把账平掉就行
             $restored++; $succeededKeys[$opKey] = $true
@@ -4860,13 +4911,13 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
       }
     } catch {
       # 失败行必须带人话项名：pcfg 备份没有 Name 字段，旧写法拼出来只剩「pcfg ：」，
-      # 用户完全不知道哪项失败了——统一走 Get-RestoreOpLabel
-      $opOk = $false; $failed += "$(Get-RestoreOpLabel $op)：$($_.Exception.Message)"
+      # 用户完全不知道哪项失败了——统一走 Get-RestoreOpDisplayName（带项目显示名）
+      $opOk = $false; $failed += "$(Get-RestoreOpDisplayName $op $opItemNames)：$($_.Exception.Message)"
       if ("$($op.Kind)" -eq 'sched') {
         $blockedLockTasks["$($op.TaskName)"] = "$($_.Exception.Message)"
       }
     }
-    if ($Progress) { & $Progress ([pscustomobject]@{ Stage = 'done'; Index = $seq; Total = $total; Name = (Get-RestoreOpLabel $op); Ok = $opOk }) }
+    if ($Progress) { & $Progress ([pscustomobject]@{ Stage = 'done'; Index = $seq; Total = $total; Name = (Get-RestoreOpDisplayName $op $opItemNames); Ok = $opOk }) }
   }
   # v3 原始备份保持不可变，通过签名消费凭证记录已还原操作；v2 缺少项目归属，继续用
   # .restored 整份归档兼容旧版。
@@ -4948,6 +4999,11 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
                      RebootItems = @($rebootRows | ForEach-Object { "$($_.Item.DisplayName)" } | Where-Object { $_ } | Select-Object -Unique)
                      RebootItemIds = @($rebootRows | ForEach-Object Id)
                      ApplyIds = @($activeV3 | ForEach-Object { "$($_.Op.ApplyId)" } | Select-Object -Unique)
+                     # 可发现性字段：$state 早就算出来了，只是从没透传。界面要能分清
+                     # 「没有可还原的」「有但读不了」「读到了但那条改动还不回去」。
+                     UnreadableBackupCount = [int]$state.UnreadableCount
+                     UnrestorableOpCount = $faultedOps.Count
+                     UnreadableReceiptCount = @($consumed.Unreadable).Count
                      Receipt=$receiptPath }
   } finally { Exit-EngineMutex $engineMutex }
 }
@@ -4960,11 +5016,20 @@ function Get-ApplyExitCode($Result) {
   0
 }
 
+# 退出码分档，给脚本化调用方（含 SKILL.md 指引 agent 跑 -Restore）用：
+#   4 = 有改动没能写回去，对应改动仍留在系统里，排查后可重试还原
+#   6 = 系统设置已经还原，但这次还原没记上账。**别立刻重试**，先把备份目录修好，
+#       否则下次还原会把同样的旧值再写一遍，覆盖用户此后的手动修改
+#   5 = 部分回退：有改动没回到原样（安全回退 / 冲突），或者有备份读不了、有改动
+#       还不回去。系统能用，但不是「完全回到优化前」
+#   0 = 全部还原成功
+# 顺序即优先级：4 最严重，其次 6（有数据在危险里），再次 5。
 function Get-RestoreExitCode($Result) {
   if (@($Result.Failed | Where-Object { $_ }).Count -gt 0) { return 4 }
-  # 6 = 系统设置已经还原，但这次还原没记上账。和 4 分开是因为下一步完全不同：
-  # 4 要用户排查后重试还原，6 要用户先把备份目录修好，否则下次还原会重复写回旧值。
   if (@($Result.BookkeepingFailed | Where-Object { $_ }).Count -gt 0) { return 6 }
+  if (@($Result.Skipped | Where-Object { $_ }).Count -gt 0 -or
+      [int]$Result.UnreadableBackupCount -gt 0 -or
+      [int]$Result.UnrestorableOpCount -gt 0) { return 5 }
   0
 }
 
@@ -5091,8 +5156,23 @@ elseif ($ListRestoreItems) {
   $r = Get-RestoreItemCatalog
   if ($Json) { $r | ConvertTo-Json -Depth 6 }
   else {
-    foreach ($item in @($r.Items)) { Write-Output "  $(if ($item.CanRestore) { '[可复原]' } else { '[不可选]' }) $($item.Id) — $($item.Name)（$($item.StatusText)）" }
+    # README 把这条命令写成用户的自助手段。原来它在空态一行字都不输出——用户分不清
+    # 「确实没改过」和「改过但工具没找到」，而这正是他跑这条命令想知道的事。
+    foreach ($item in @($r.Items)) {
+      Write-Output "  $(if ($item.CanRestore) { '[可复原]' } else { '[不可选]' }) $($item.Id) — $($item.Name)（$($item.StatusText)）"
+      if ("$($item.Reason)") { Write-Output "        $($item.Reason)" }
+    }
+    if (@($r.Items).Count -eq 0) { Write-Output '当前没有支持按项目精确复原的记录。' }
     if ($r.LegacyBackupCount -gt 0) { Write-Output "旧版本备份：$($r.LegacyBackupCount) 份，仅支持全部还原" }
+    if ([int]$r.UnsupportedV3ItemCount -gt 0) { Write-Output "另有 $($r.UnsupportedV3ItemCount) 个项目只支持全部复原" }
+    if ([int]$r.UnreadableBackupCount -gt 0) {
+      Write-Output "！！有 $($r.UnreadableBackupCount) 份备份无法读取，其中记录的改动本次没有还原，仍然留在系统里（请勿删除这些备份文件）"
+    }
+    if ([int]$r.UnrestorableOpCount -gt 0) { Write-Output "！！有 $($r.UnrestorableOpCount) 条改动的备份记录未通过校验，无法自动还原" }
+    if ($r.RestoreBlocked) { Write-Output "！！$($r.RestoreBlockReason)" }
+    # 无条件打印搜索范围：空列表时它是用户唯一能自己判断的依据
+    Write-Output "已搜索：$(@($r.SearchedRoots) -join '；')"
+    foreach ($n in @($r.Notes)) { Write-Output "  [提示] $n" }
   }
 }
 elseif ($Apply) {

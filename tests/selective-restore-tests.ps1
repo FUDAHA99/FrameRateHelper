@@ -577,8 +577,13 @@ try {
   Assert-True ($gpuPrefRow.Count -eq 1 -and -not $gpuPrefRow[0].CanRestore -and $gpuPrefRow[0].Status -eq 'conflict') `
     '优化后发生变化的项目必须在预检时标记冲突'
   $gpuPrefResult = Invoke-RestoreSelected @('gpu-pref')
-  Assert-True ($gpuPrefResult.RestoredItems -eq 0 -and $gpuPrefResult.Failed.Count -eq 1 -and
+  # 冲突不是执行失败：它进 Skipped，不进 Failed（否则退出码变 4、界面说「还原未完成」，
+  # 两个结论都不对）。守的不变式没变——保留现状、不写凭证。
+  Assert-True ($gpuPrefResult.RestoredItems -eq 0 -and $gpuPrefResult.Failed.Count -eq 0 -and
+    $gpuPrefResult.Skipped.Count -eq 1 -and $null -eq $gpuPrefResult.Receipt -and
+    @($gpuPrefResult.ItemResults | Where-Object Id -eq 'gpu-pref')[0].Outcome -eq 'conflict' -and
     (Get-RegValue $gpuPrefSpec.Path $gpuPrefSpec.Name) -eq 'GpuPreference=0;') '冲突项目必须保留后续修改且不写消费凭证'
+  Assert-True ((Get-RestoreExitCode $gpuPrefResult) -eq 5) '冲突必须落在「部分回退」这一档，不是「还原失败」'
 
   $mmcssSpec = [pscustomobject]@{Path='HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games';Name='GPU Priority';Existed=$true;OldValue=2;OldKind='DWord';AppliedValue=8;AppliedKind='DWord'}
   $script:RegState[(Get-TestRegKey $mmcssSpec.Path $mmcssSpec.Name)] = [pscustomobject]@{Value=8;Kind='DWord'}
