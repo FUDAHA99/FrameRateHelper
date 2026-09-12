@@ -313,7 +313,7 @@ Stop-Service Schedule -Force
 
 ---
 
-### 2.8 按症状入口（提交 <S>）
+### 2.8 按症状入口（提交 c9280d8）
 
 优化项名写的全是手段（`HwSchMode`、MMCSS、`DisablePagingExecutive`），用户找的是症状。
 「优化项」列表上方新增了一条**症状筛选带**，19 条症状与诊断报告的「当前问题」多选项
