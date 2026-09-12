@@ -366,7 +366,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\delta-booster.ps1 -L
 
 ---
 
-### 2.9 分支归属与双版权（提交 <A>）
+### 2.9 分支归属与双版权（提交 3079a50）
 
 本项目是 Leonard8818 那个仓库的分支。MIT 要求保留上游版权声明，本分支自己的修改也要
 署名，所以 `LICENSE` 里是两行版权，发布二进制的「版权」字段也写了两个人。
