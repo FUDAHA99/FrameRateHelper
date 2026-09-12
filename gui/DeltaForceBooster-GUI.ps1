@@ -1111,7 +1111,9 @@ $xaml = @'
       </Grid>
 
       <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" Padding="8,6">
-        <StackPanel>
+        <!-- IsSharedSizeScope：表头与每一行的「优化状态」列走同一个 SharedSizeGroup，
+             否则每行的 Auto 列各算各的宽度，表头标题和它标注的那一列根本对不上 -->
+        <StackPanel Grid.IsSharedSizeScope="True">
 
           <!-- 分区标题：中英上下叠排 + 绿色短下划线 -->
           <Grid Margin="0,2,0,8">
@@ -1195,22 +1197,69 @@ $xaml = @'
           <TextBlock x:Name="PresetNote" Text="" Style="{StaticResource Mono}"
                      TextTrimming="CharacterEllipsis" Margin="2,0,0,4"/>
 
+          <!-- 按症状筛选：用户找的是「我遇到的问题」，项名写的却全是手段，30 多项摊开
+               根本认不出来。选中症状后只显示相关项目。
+               不变式：**已勾选的行永远不会被筛选隐藏**——否则「执行优化」写进系统的
+               就是用户在屏幕上看不见的东西，这条比筛选本身重要得多。 -->
+          <Border Background="{DynamicResource Panel}" BorderBrush="{DynamicResource Line}"
+                  BorderThickness="1" Padding="9,7" Margin="0,0,0,4">
+            <StackPanel>
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Border Grid.Column="0" Style="{StaticResource Chip}">
+                  <TextBlock Text="我遇到的问题" Style="{StaticResource ChipText}"/>
+                </Border>
+                <TextBlock x:Name="SymptomSummary" Grid.Column="1" Text="未筛选 · 显示全部优化项"
+                           Style="{StaticResource Mono}" Margin="10,0,10,0" VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"/>
+                <Button x:Name="SymptomClearBtn" Grid.Column="2" Content="显示全部" Style="{StaticResource Ghost}"
+                        FontSize="11" Height="24" IsEnabled="False"/>
+              </Grid>
+              <WrapPanel x:Name="SymptomPanel" Margin="0,7,0,0"/>
+              <Border x:Name="SymptomAdviceBox" Visibility="Collapsed" Background="{DynamicResource GoldDark}"
+                      BorderBrush="{DynamicResource Gold}" BorderThickness="1" Padding="9,6" Margin="0,7,0,0">
+                <StackPanel>
+                  <TextBlock x:Name="SymptomAdviceText" Foreground="{DynamicResource Gold}" TextWrapping="Wrap"/>
+                  <WrapPanel x:Name="SymptomAdviceActions" Margin="0,6,0,0"/>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </Border>
+
           <Border BorderBrush="{DynamicResource Line}" BorderThickness="1" Background="{DynamicResource PanelDeep}">
             <StackPanel>
               <!-- 全选行（实机诉求）：三态仅作展示——部分选中显示第三态，点击只在
-                   全选/全不选之间切换；包含单独分组的高风险项，执行前仍保留二次确认 -->
+                   全选/全不选之间切换。
+                   同时是这张表的表头：列定义必须与 New-ItemRow 里那三列**逐字一致**，
+                   否则标题会标到别的列头上。原来这里挂的是「高风险项单独列出」提示，
+                   同一句话 RiskyGroup 的标题里已经有了，让位给列标题。 -->
               <Border Background="{DynamicResource TableHeader}" BorderBrush="{DynamicResource LineSoft}"
                       BorderThickness="0,0,0,1" Padding="10,3">
                 <Grid>
-                  <CheckBox x:Name="SelAllChk" Style="{StaticResource TacCheck}" VerticalAlignment="Center">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="5*"/>
+                    <ColumnDefinition Width="4*"/>
+                    <ColumnDefinition Width="Auto" SharedSizeGroup="ItemRebootCol"/>
+                    <ColumnDefinition Width="Auto" SharedSizeGroup="ItemStatusCol"/>
+                  </Grid.ColumnDefinitions>
+                  <CheckBox x:Name="SelAllChk" Grid.Column="0" Style="{StaticResource TacCheck}" VerticalAlignment="Center">
                     <TextBlock Text="全选" Foreground="{DynamicResource TextPri}" FontSize="12" FontWeight="Bold"/>
                   </CheckBox>
-                  <TextBlock Text="高风险项单独列出 · 执行前二次确认" FontFamily="Consolas" FontSize="10"
+                  <TextBlock Grid.Column="1" Text="当前状态" FontFamily="Consolas" FontSize="10"
+                             Foreground="{DynamicResource TextMut}" Margin="12,0,12,0" VerticalAlignment="Center"/>
+                  <TextBlock Grid.Column="2" Text="重启" FontFamily="Consolas" FontSize="10"
+                             Foreground="{DynamicResource TextMut}" Margin="0,0,10,0"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                  <TextBlock Grid.Column="3" Text="优化状态" FontFamily="Consolas" FontSize="10"
                              Foreground="{DynamicResource TextMut}" HorizontalAlignment="Right"
                              VerticalAlignment="Center"/>
                 </Grid>
               </Border>
               <StackPanel x:Name="ItemPanel"/>
+              <TextBlock x:Name="SymptomEmptyText" Visibility="Collapsed" TextWrapping="Wrap"
+                         Foreground="{DynamicResource TextMut}" Margin="11,9"/>
             </StackPanel>
           </Border>
 
@@ -1815,7 +1864,8 @@ $window.Resources.MergedDictionaries.Add($script:ThemeRes)
 
 $ui = @{}
 foreach ($n in 'TitleBar','MinBtn','CloseBtn','UpdateBtn','ThemeBtn','ScanState','MetricsGrid','HwGrid','GameText','BrowseBtn','CountText',
-               'SelAllChk',
+               'SelAllChk','SymptomPanel','SymptomSummary','SymptomClearBtn',
+               'SymptomAdviceBox','SymptomAdviceText','SymptomAdviceActions','SymptomEmptyText',
                'ItemPanel','RiskyGroup','RiskyPanel','ApplyBtn','RestoreBtn','RefreshBtn','GuideBtn','CheckUpdBtn',
                'InlineRestorePanel','InlineRestoreItemsPanel','InlineRestoreEmptyText',
                'InlineRestoreLegacyNotice','InlineRestoreLegacyText','InlineRestoreSelectedText','InlineRestoreAllSummary',
@@ -2851,24 +2901,244 @@ function Stop-LiveMetricsMonitor {
   $script:LiveMetricsPowerShell = $null; $script:LiveMetricsAsync = $null; $script:LiveMetricsState = $null
 }
 
+# ---------- 按症状筛选（纯呈现层，不写任何系统设置） ----------
+
+# 症状目录在引擎里（Get-SymptomCatalog），界面只负责把它画成可点的筛选带。
+#
+# 这一块唯一的安全不变式写在 Update-SymptomRowVisibility 上：**已勾选的行绝不被隐藏**。
+# 筛选如果能把一个勾上的项藏起来，「执行优化」写进系统的就是用户在屏幕上看不见的东西；
+# 这条比筛选筛得干不干净重要一个数量级，所以它由 Update-Count 统一执行 —— 而所有会
+# 改变勾选状态的路径（手动点、全选、套方案、建行）末尾都已经调用 Update-Count。
+$script:ActiveSymptomIds = @()
+$script:SymptomChips = @{}
+
+function Get-SymptomById([string]$Id) {
+  @(@(Get-SymptomCatalog) | Where-Object { "$($_.Id)" -eq "$Id" })[0]
+}
+
+function Set-SymptomChipVisual($Chip, [bool]$On) {
+  if (-not $Chip) { return }
+  $Chip.Border.Background = New-Brush $(if ($On) { $script:C.AccentPanel } else { $script:C.PanelDeep })
+  $Chip.Border.BorderBrush = New-Brush $(if ($On) { $script:C.Green } else { $script:C.Line })
+  $Chip.Text.Foreground = New-Brush $(if ($On) { $script:C.Green } else { $script:C.TextSec })
+  $Chip.Text.FontWeight = $(if ($On) { 'Bold' } else { 'Normal' })
+}
+
+function Initialize-SymptomFilterPanel {
+  if (-not $ui.SymptomPanel) { return }
+  $ui.SymptomPanel.Children.Clear()
+  $script:SymptomChips = @{}
+  $script:ActiveSymptomIds = @()
+  # 目录里写错一个优化项 Id，那条症状就会静默地筛不出任何东西，看起来像「本工具治不了」。
+  # 纯呈现层不该因为一个拼写错误就打不开页面，所以 fail-open —— 但必须留下痕迹，
+  # 否则导出的诊断报告里同样看不出问题在哪。
+  try {
+    foreach ($fault in @(Get-SymptomCatalogFaults $script:TargetExe)) { Write-Log "[症状目录] $fault" }
+  } catch { Write-Log "[症状目录] 自检失败：$($_.Exception.Message)" }
+  foreach ($symptom in @(Get-SymptomCatalog)) {
+    $chipBorder = New-Object Windows.Controls.Border
+    $chipBorder.BorderThickness = New-Object Windows.Thickness 1
+    $chipBorder.Padding = New-Object Windows.Thickness 8, 3, 8, 3
+    $chipBorder.Margin = New-Object Windows.Thickness 0, 0, 6, 6
+    $chipBorder.Cursor = 'Hand'
+    $chipBorder.Tag = "$($symptom.Id)"
+    $chipText = New-Text "$($symptom.Label)" $script:C.TextSec 11
+    $chipBorder.Child = $chipText
+    $chipBorder.ToolTip = "$($symptom.Note)"
+    # 循环里挂的处理器不能闭包引用循环变量，症状 Id 一律从 sender.Tag 取
+    $chipBorder.Add_MouseLeftButtonUp({
+      $_.Handled = $true
+      Switch-SymptomFilter "$($this.Tag)"
+    })
+    $chip = [pscustomobject]@{ Border = $chipBorder; Text = $chipText }
+    Set-SymptomChipVisual $chip $false
+    $script:SymptomChips["$($symptom.Id)"] = $chip
+    $ui.SymptomPanel.Children.Add($chipBorder) | Out-Null
+  }
+}
+
+function Switch-SymptomFilter([string]$Id) {
+  if (-not (Get-SymptomById $Id)) { Write-Log "未知的症状：$Id"; return }
+  $current = @($script:ActiveSymptomIds)
+  $script:ActiveSymptomIds = @(
+    $(if ($current -contains "$Id") { $current | Where-Object { "$_" -ne "$Id" } } else { $current + "$Id" })
+  )
+  Update-Count
+  $labels = @(@($script:ActiveSymptomIds) | ForEach-Object { "$((Get-SymptomById $_).Label)" })
+  Write-Log $(if ($labels.Count -gt 0) { "已按症状筛选：$($labels -join '、')" } else { '已取消症状筛选，显示全部优化项。' })
+}
+
+function Clear-SymptomFilter {
+  if (@($script:ActiveSymptomIds).Count -eq 0) { return }
+  $script:ActiveSymptomIds = @()
+  Update-Count
+  Write-Log '已取消症状筛选，显示全部优化项。'
+}
+
+function Update-SymptomRowVisibility($Rows) {
+  $active = @($script:ActiveSymptomIds)
+  foreach ($row in @($Rows)) {
+    $context = $row.DataContext
+    $mark = $(if ($context) { $context.OffFilterMark } else { $null })
+    if ($active.Count -eq 0) {
+      $row.Visibility = 'Visible'
+      if ($mark) { $mark.Visibility = 'Collapsed' }
+      continue
+    }
+    $match = $false
+    foreach ($symptomId in $active) {
+      if ($context -and (@($context.Symptoms) -contains "$symptomId")) { $match = $true; break }
+    }
+    # 不变式：勾上的行一定可见。哪怕它与当前筛选无关，也要留在屏幕上并打上标记，
+    # 否则「执行优化」会去写用户看不见的项目。
+    $checked = [bool]$row.Child.Children[0].IsChecked
+    $row.Visibility = $(if ($match -or $checked) { 'Visible' } else { 'Collapsed' })
+    if ($mark) { $mark.Visibility = $(if ($checked -and -not $match) { 'Visible' } else { 'Collapsed' }) }
+  }
+}
+
+function Invoke-SymptomPageAction([string]$Page) {
+  # RestoreBtn / ReportBtn 的处理器是很长的行内脚本块（含忙碌闸门、实验期拦截、
+  # 提权往返），复制一份必然漂移；这里走 RaiseEvent 调同一个出口。
+  $clickEvent = [Windows.Controls.Primitives.ButtonBase]::ClickEvent
+  switch ("$Page") {
+    'framefix' { Select-Tab 'framefix' }
+    'ref' { Select-Tab 'ref' }
+    'restore' {
+      # RestoreBtn 是开关：面板已经打开时再点一次会把它收起来
+      if ($ui.InlineRestorePanel -and $ui.InlineRestorePanel.Visibility -eq 'Visible') {
+        Write-Log '复原入口已经打开。'
+      } else {
+        $ui.RestoreBtn.RaiseEvent((New-Object Windows.RoutedEventArgs $clickEvent))
+      }
+    }
+    'report' { $ui.ReportBtn.RaiseEvent((New-Object Windows.RoutedEventArgs $clickEvent)) }
+    'residue' { Show-ToolResidueDialog }
+    default { Write-Log "未知的症状去处：$Page" }
+  }
+}
+
+function Update-SymptomFilterUi($Rows, [int]$ShownCount) {
+  if (-not $ui.SymptomSummary) { return }
+  $active = @($script:ActiveSymptomIds)
+  foreach ($entry in $script:SymptomChips.GetEnumerator()) {
+    Set-SymptomChipVisual $entry.Value ($active -contains "$($entry.Key)")
+  }
+  if ($ui.SymptomClearBtn) { $ui.SymptomClearBtn.IsEnabled = ($active.Count -gt 0) }
+
+  if ($active.Count -eq 0) {
+    $ui.SymptomSummary.Text = '未筛选 · 显示全部优化项'
+    if ($ui.SymptomAdviceBox) { $ui.SymptomAdviceBox.Visibility = 'Collapsed' }
+    if ($ui.SymptomEmptyText) { $ui.SymptomEmptyText.Visibility = 'Collapsed' }
+    if ($ui.RiskyGroup -and $ui.RiskyPanel) {
+      $ui.RiskyGroup.Visibility = $(if (@($ui.RiskyPanel.Children).Count -gt 0) { 'Visible' } else { 'Collapsed' })
+    }
+    return
+  }
+
+  $symptoms = @($active | ForEach-Object { Get-SymptomById $_ } | Where-Object { $_ })
+  $offFilter = @(@($Rows) | Where-Object {
+    $_.Visibility -ne 'Collapsed' -and $_.DataContext -and $_.DataContext.OffFilterMark -and
+    $_.DataContext.OffFilterMark.Visibility -eq 'Visible'
+  }).Count
+  $ui.SymptomSummary.Text = "已选 $($symptoms.Count) 类症状 · 显示 $ShownCount 项" +
+    $(if ($offFilter -gt 0) { " · 另有 $offFilter 项已勾选但与所选症状无关（未隐藏）" } else { '' })
+
+  if ($ui.SymptomAdviceBox -and $ui.SymptomAdviceText -and $ui.SymptomAdviceActions) {
+    # 说明最多展开三条：四类以上症状同时选时，正文会长到把优化项挤出屏幕
+    $shownAdvice = @($symptoms | Select-Object -First 3)
+    $lines = @($shownAdvice | ForEach-Object { "$($_.Label)：$($_.Note)" })
+    if ($symptoms.Count -gt $shownAdvice.Count) {
+      $lines += "另有 $($symptoms.Count - $shownAdvice.Count) 类症状的说明未展开，单独选中它即可看到。"
+    }
+    $ui.SymptomAdviceText.Text = ($lines -join "`n`n")
+    $ui.SymptomAdviceActions.Children.Clear()
+    $pages = New-Object Collections.Generic.List[string]
+    foreach ($symptom in $symptoms) {
+      foreach ($page in @($symptom.Pages)) {
+        if (-not $pages.Contains("$page")) { [void]$pages.Add("$page") }
+      }
+    }
+    foreach ($page in $pages) {
+      $label = $(if ($script:SymptomPageLabels.Contains("$page")) { "$($script:SymptomPageLabels["$page"])" } else { "$page" })
+      $button = New-Object Windows.Controls.Button
+      $button.Style = $window.FindResource('Ghost')
+      $button.Content = $label
+      $button.FontSize = 10
+      $button.Height = 23
+      $button.Margin = New-Object Windows.Thickness 0, 0, 7, 0
+      $button.Tag = "$page"
+      $button.Add_Click({ Invoke-SymptomPageAction "$($this.Tag)" })
+      $ui.SymptomAdviceActions.Children.Add($button) | Out-Null
+    }
+    $ui.SymptomAdviceBox.Visibility = 'Visible'
+  }
+
+  if ($ui.SymptomEmptyText) {
+    # 一条症状映射不到任何优化项时，列表会整个空掉。空列表看起来像坏了，所以必须
+    # 把「本工具治不了这条」明说出来 —— 硬凑几个不相关的项目更坏：用户照着做一遍
+    # 没好，剩下的结论他也不会再信。
+    if ($ShownCount -eq 0) {
+      $ui.SymptomEmptyText.Text = '所选症状在本工具里没有对应的优化项。上面方框里写了原因和该去的地方；' +
+        '点「显示全部」可以回到完整列表。'
+      $ui.SymptomEmptyText.Visibility = 'Visible'
+    } else {
+      $ui.SymptomEmptyText.Visibility = 'Collapsed'
+    }
+  }
+  if ($ui.RiskyGroup -and $ui.RiskyPanel) {
+    $riskyShown = @(@($ui.RiskyPanel.Children) | Where-Object { $_.Visibility -ne 'Collapsed' }).Count
+    $ui.RiskyGroup.Visibility = $(if ($riskyShown -gt 0) { 'Visible' } else { 'Collapsed' })
+  }
+}
+
 function Update-Count {
   $rows = @(@($ui.ItemPanel.Children) + @($ui.RiskyPanel.Children))
+  # 先执行可见性不变式，再统计：计数必须建立在「勾上的都看得见」已经成立之上
+  Update-SymptomRowVisibility $rows
+  $filtering = (@($script:ActiveSymptomIds).Count -gt 0)
+  $shown = @($rows | Where-Object { $_.Visibility -ne 'Collapsed' })
+  $scoped = @($(if ($filtering) { $shown } else { $rows }))
   $sel = @($rows | Where-Object { $_.Child.Children[0].IsChecked }).Count
   # 「可执行」= 未处于已就绪/正常态的项（行 Tag 存的是检测到的 Optimized 状态）
-  $oper = @($rows | Where-Object { $_.Tag -ne $true })
-  $ui.CountText.Text = "已选 $sel / $($rows.Count) · 可执行 $($oper.Count)"
+  $oper = @($scoped | Where-Object { $_.Tag -ne $true })
+  $ui.CountText.Text = $(if ($filtering) {
+      "已选 $sel · 筛选内 $($shown.Count) / $($rows.Count) · 可执行 $($oper.Count)"
+    } else {
+      "已选 $sel / $($rows.Count) · 可执行 $($oper.Count)"
+    })
   # 全选框只代表允许批量选择的项目；高磁盘/内存影响项仍可手动勾选，但不会被「全选」带上。
   # 程序赋值不触发 Click，不会与点击处理器互相递归。
+  # 筛选期间三态只按看得见的行算：否则屏幕上 5 项全勾了，方框仍停在第三态，因为
+  # 列表外还有 27 项没勾。
   if ($ui.SelAllChk) {
     $bulkOper = @($oper | Where-Object { $_.DataContext -and $_.DataContext.BulkSelect })
     $bulkLeft = @($bulkOper | Where-Object { -not $_.Child.Children[0].IsChecked }).Count
-    $manualSelected = @($rows | Where-Object {
+    $manualSelected = @($scoped | Where-Object {
       $_.DataContext -and -not $_.DataContext.BulkSelect -and $_.Child.Children[0].IsChecked
     }).Count
-    $ui.SelAllChk.IsChecked = $(if ($sel -eq 0) { $false }
+    $scopedSel = @($scoped | Where-Object { $_.Child.Children[0].IsChecked }).Count
+    $ui.SelAllChk.IsChecked = $(if ($scopedSel -eq 0) { $false }
                                 elseif ($bulkOper.Count -gt 0 -and $bulkLeft -eq 0 -and $manualSelected -eq 0) { $true }
                                 else { $null })
   }
+  Update-SymptomFilterUi $rows $shown.Count
+}
+function Get-ItemRowTooltip($Item, $State) {
+  # P0-3 要的三件事：现在是什么状态 → 执行后会变成什么 → 要不要重启。
+  # Effect 字段自带「执行后：」或「本项只读：」前缀，所以这里不再套一层标签——
+  # 体检项套上「执行后」是假话，它什么都不执行。
+  $lines = New-Object Collections.Generic.List[string]
+  [void]$lines.Add("$($Item.Name)")
+  [void]$lines.Add('')
+  [void]$lines.Add("现在：$(if ("$($State.Current)") { $State.Current } else { '未知' })")
+  if ("$($Item.Effect)") { [void]$lines.Add("$($Item.Effect)") }
+  if ($Item.Kind -ne 'check') {
+    [void]$lines.Add("重启：$(if ($Item.Reboot) { '写入成功后仍需重启才完全生效' } else { '不需要重启' })")
+  }
+  $caution = $(if ($Item.Warn) { $Item.Warn } else { $Item.Note })
+  if ("$caution") { [void]$lines.Add("注意：$caution") }
+  $lines -join "`n"
 }
 
 function New-ItemRow($Item, $State, [bool]$Last) {
@@ -2883,27 +3153,46 @@ function New-ItemRow($Item, $State, [bool]$Last) {
   # 不写任何东西，上次通过不代表这次仍然正常（运行库可能被别的软件装崩）。此前 VC++
   # 体检一旦通过，套方案时就再也不会被勾上，等于永远只检测一次
   $row.Tag = $(if ($Item.Kind -eq 'check') { $null } else { $State.Optimized })
+  # 勾上却与当前筛选无关的行不会被隐藏（见 Update-SymptomRowVisibility），但必须让
+  # 用户知道它为什么还在屏幕上
+  $offFilterMark = New-Pill '不在筛选内' $script:C.GoldDark $script:C.Gold $script:C.Gold
+  $offFilterMark.Margin = New-Object Windows.Thickness 0, 0, 6, 0
+  $offFilterMark.Visibility = 'Collapsed'
+  $offFilterMark.ToolTip = '这一项已经勾选，但与当前所选症状无关。筛选不会隐藏勾选中的项目——否则「执行优化」写进系统的就是你看不见的东西。'
   $row.DataContext = [pscustomobject]@{
     BulkSelect = [bool](-not $Item.ContainsKey('BulkSelect') -or $Item.BulkSelect)
+    # 症状筛选要用的三项：谁（ItemId）、能解决哪些症状（Symptoms）、以及那枚标记。
+    # 症状索引存在行上而不是每次筛选都回引擎查，避免在 UI 线程上反复重算整张目录。
+    ItemId = "$($Item.Id)"
+    Symptoms = @(Get-SymptomIdsForItem $Item.Id)
+    OffFilterMark = $offFilterMark
   }
 
   $g = New-Object Windows.Controls.Grid
-  foreach ($w in 'Auto', '*', 'Auto') {
+  # 四列：优化项 / 当前状态 / 重启 / 优化状态。前两列用星号比例而不是 Auto——
+  # Auto 会让每一行按自己的内容各算各的宽度，列与列之间参差不齐，表头就无从谈起
+  # （这正是社区那个外部 PR 想解决的问题）。后两列走 SharedSizeGroup，与表头同宽。
+  foreach ($spec in @(@('star', 5, ''), @('star', 4, ''), @('auto', 0, 'ItemRebootCol'), @('auto', 0, 'ItemStatusCol'))) {
     $c = New-Object Windows.Controls.ColumnDefinition
-    $c.Width = [Windows.GridLength]::Auto
-    if ($w -eq '*') { $c.Width = New-Object Windows.GridLength 1, 'Star' }
+    if ($spec[0] -eq 'star') { $c.Width = New-Object Windows.GridLength ([double]$spec[1]), 'Star' }
+    else { $c.Width = [Windows.GridLength]::Auto }
+    if ($spec[2]) { $c.SharedSizeGroup = $spec[2] }
     $g.ColumnDefinitions.Add($c) | Out-Null
   }
 
   $cb = New-Object Windows.Controls.CheckBox
   $cb.Style = $window.FindResource('TacCheck')
   $cb.Tag = $Item.Id
-  $cb.ToolTip = $(if ($Item.Warn) { $Item.Warn } else { $Item.Note })
+  $cb.ToolTip = Get-ItemRowTooltip $Item $State
   # 已优化的项不再默认勾选，避免重复写入撑大备份
   $cb.IsChecked = ($Item.Default -and $State.Optimized -ne $true)
   $nameColor = $(if ($State.Optimized -eq $true) { $script:C.TextSec } else { $script:C.TextPri })
   if ($Item.Id -ne 'xmp-check') {
-    $cb.Content = New-Text "$($Item.Name)$(if ($Item.Admin) { ' *' })" $nameColor 12
+    $nameText = New-Text "$($Item.Name)$(if ($Item.Admin) { ' *' })" $nameColor 12
+    # 名称列现在是定比宽度，长项名会被裁；裁掉的部分必须还能看到，否则用户只能看见
+    # 「电源计划隐藏项深度调优（USB/调…」这种半截话
+    $nameText.TextTrimming = 'CharacterEllipsis'
+    $cb.Content = $nameText
   }
   # 勾选变化时实时刷新计数；手动改动后清掉方案选中态（勾选已不再等于该方案）
   $cb.Add_Click({
@@ -2925,6 +3214,7 @@ function New-ItemRow($Item, $State, [bool]$Last) {
     $memoryLink.Margin = New-Object Windows.Thickness 21, 0, 0, 0
     $memoryLink.VerticalAlignment = 'Center'
     $memoryLink.Cursor = 'Hand'
+    $memoryLink.TextTrimming = 'CharacterEllipsis'
     $memoryLink.ToolTip = '点击查看内存频率检测结果与对应电脑的 BIOS 教程'
     $starRun = New-Object Windows.Documents.Run
     $starRun.Text = '★ '
@@ -2949,8 +3239,25 @@ function New-ItemRow($Item, $State, [bool]$Last) {
   $detail = New-Text $State.Current $script:C.TextMut 11 -Mono
   $detail.Margin = New-Object Windows.Thickness 12, 0, 12, 0
   $detail.TextTrimming = 'CharacterEllipsis'
+  # 「当前状态被截断」是社区那条真实 issue 的原话。多个 op 的状态用「；」拼成一行，
+  # 780px 宽的窗口里必然只剩头一截；悬浮给出**完整的多行**内容，一行一个 op。
+  if ("$($State.Current)") {
+    $detail.ToolTip = ("$($State.Current)" -split '；') -join "`n"
+  }
   [Windows.Controls.Grid]::SetColumn($detail, 1)
   $g.Children.Add($detail) | Out-Null
+
+  # 重启列：Reboot 是引擎里的结构化字段（Note 文案会改，字段不会漂）。单独成列而不是
+  # 塞进说明文字里——「这一项要不要重启」是用户在勾选前就要知道的决策信息
+  $rebootText = New-Text $(if ($Item.Kind -eq 'check') { '' } elseif ($Item.Reboot) { '需重启' } else { '—' }) `
+                         $(if ($Item.Reboot) { $script:C.Gold } else { $script:C.TextMut }) 10 -Mono
+  $rebootText.Margin = New-Object Windows.Thickness 0, 0, 10, 0
+  $rebootText.HorizontalAlignment = 'Center'
+  if ($Item.Kind -ne 'check') {
+    $rebootText.ToolTip = $(if ($Item.Reboot) { '写入成功后仍需重启才完全生效' } else { '写入后立即生效，不需要重启' })
+  }
+  [Windows.Controls.Grid]::SetColumn($rebootText, 2)
+  $g.Children.Add($rebootText) | Out-Null
 
   # 状态徽标（官网金色分类标签改造）：就绪=绿实底，待优化=金实底，待定=灰描边。
   # 检测类项目语义不同：发现问题不是「待优化」（工具改不了），用金色「需关注」示警
@@ -2964,6 +3271,7 @@ function New-ItemRow($Item, $State, [bool]$Last) {
           else { New-Pill '待定' $script:C.Gray '#00000000' $script:C.Line }
   $tail = New-Object Windows.Controls.StackPanel
   $tail.Orientation = 'Horizontal'
+  $tail.Children.Add($offFilterMark) | Out-Null
   # 体检项查出问题时给行内直达入口：不执行优化也能看到教程和下载按钮，
   # 不用等日志（纯文本链接没人会手抄——实机反馈）
   if ($Item.Kind -eq 'check' -and $State.Optimized -eq $false -and $script:CheckHelp.ContainsKey($Item.Id)) {
@@ -2978,14 +3286,21 @@ function New-ItemRow($Item, $State, [bool]$Last) {
     $fix.Add_Click({ Show-HealthDialog @($this.Tag) })
     $tail.Children.Add($fix) | Out-Null
   }
+  # 「纯检测，不改设置」原来是手写在四个项名里的字，项名一改就没了，而且只有认真读
+  # 项名的人才看得见。提升成统一徽标：体检项与写入项在视觉上一眼分得开
+  if ($Item.Kind -eq 'check') {
+    $readOnly = New-Pill '只读' $script:C.TextMut '#00000000' $script:C.Line
+    $readOnly.Margin = New-Object Windows.Thickness 0, 0, 6, 0
+    $readOnly.ToolTip = '体检项：只读取并报告状态，不写入任何系统设置，也不产生备份'
+    $tail.Children.Add($readOnly) | Out-Null
+  }
   $tail.Children.Add($pill) | Out-Null
-  [Windows.Controls.Grid]::SetColumn($tail, 2)
+  [Windows.Controls.Grid]::SetColumn($tail, 3)
   $g.Children.Add($tail) | Out-Null
 
   $row.Child = $g
   $row
 }
-
 function Update-PresetList {
   # 下拉同时列内置与自存方案；显示名与方案对象按下标一一对应
   $script:PresetList = @(Get-Presets)
@@ -5982,27 +6297,12 @@ function Load-ActiveTuningExperiment {
 $script:ReportExportPrefix = '帧率优化助手-诊断报告'
 $script:ReportMaxBytes = 256KB
 
-$script:DiagnosticIssueChoices = @(
-  [pscustomobject]@{ Id = 'low_fps'; Label = '帧率偏低（平均 FPS 低）' }
-  [pscustomobject]@{ Id = 'frame_drops'; Label = '掉帧 / 帧率波动' }
-  [pscustomobject]@{ Id = 'stutter'; Label = '卡顿 / 微卡 / 突然停顿' }
-  [pscustomobject]@{ Id = 'low_one_percent'; Label = '1% Low 偏低（画面不流畅）' }
-  [pscustomobject]@{ Id = 'input_latency'; Label = '输入延迟高 / 操作粘滞' }
-  [pscustomobject]@{ Id = 'slow_loading'; Label = '游戏加载慢 / 切换场景卡' }
-  [pscustomobject]@{ Id = 'game_crash'; Label = '游戏闪退 / 无响应' }
-  [pscustomobject]@{ Id = 'black_screen_audio'; Label = '游戏全屏黑屏，但仍有声音' }
-  [pscustomobject]@{ Id = 'black_screen_no_audio'; Label = '游戏全屏黑屏，声音也中断' }
-  [pscustomobject]@{ Id = 'partial_black_screen'; Label = '游戏内部分区域黑屏 / 黑块' }
-  [pscustomobject]@{ Id = 'black_screen_alt_tab'; Label = 'Alt+Tab / 切换显示模式后黑屏' }
-  [pscustomobject]@{ Id = 'black_screen_frame_generation'; Label = '开启帧生成后出现黑屏' }
-  [pscustomobject]@{ Id = 'black_screen_external_display'; Label = '外接显示器 / 独显直连时黑屏' }
-  [pscustomobject]@{ Id = 'system_lag'; Label = '电脑整体卡顿 / 响应慢' }
-  [pscustomobject]@{ Id = 'cpu_heat'; Label = 'CPU 占用或温度过高' }
-  [pscustomobject]@{ Id = 'gpu_heat'; Label = 'GPU 占用或温度过高' }
-  [pscustomobject]@{ Id = 'noise_power'; Label = '风扇噪音大 / 功耗高' }
-  [pscustomobject]@{ Id = 'app_update_failure'; Label = '优化工具打不开 / 更新失败' }
-  [pscustomobject]@{ Id = 'apply_restore_failure'; Label = '优化或还原执行失败' }
-)
+# 诊断报告里的「当前问题」清单与优化页的症状筛选带是**同一份数据**。两处各写一份
+# 必然漂移：改了筛选带的措辞，报告里还是老话；加了一条症状，报告里根本选不到。
+# 唯一来源是引擎的 Get-SymptomCatalog——报告里存的那 19 个 Id 一个字都没变。
+$script:DiagnosticIssueChoices = @(@(Get-SymptomCatalog) | ForEach-Object {
+  [pscustomobject]@{ Id = "$($_.Id)"; Label = "$($_.Label)" }
+})
 $script:DiagnosticBenefitChoices = @(
   [pscustomobject]@{ Id = 'fps_gain'; Label = '平均帧率提升（涨帧）' }
   [pscustomobject]@{ Id = 'one_percent_gain'; Label = '1% Low 提升 / 掉帧减少' }
@@ -8685,6 +8985,7 @@ $window.Add_ContentRendered({
     Update-DropFrameRepairPage
     # 硬件和默认游戏路径准备好后再恢复实验；状态中的固定路径优先且会严格复验。
     Load-ActiveTuningExperiment
+    Initialize-SymptomFilterPanel
     Update-ItemList
     Update-PresetList
     try {
@@ -8804,6 +9105,7 @@ $ui.TuneStopBtn.Add_Click({
   finally{Set-BusyState $false;Update-TuningUi}
 })
 
+$ui.SymptomClearBtn.Add_Click({ Clear-SymptomFilter })
 $ui.RefreshBtn.Add_Click({ Update-ItemList; Write-Log '状态已刷新。' })
 
 $ui.CheckUpdBtn.Add_Click({
@@ -8815,7 +9117,14 @@ $ui.CheckUpdBtn.Add_Click({
 # 已就绪项不重复圈选。全不选仍一视同仁清空。
 $ui.SelAllChk.Add_Click({
   $on = ($ui.SelAllChk.IsChecked -eq $true)
-  foreach ($row in (@($ui.ItemPanel.Children) + @($ui.RiskyPanel.Children))) {
+  # 症状筛选期间只动看得见的行：屏幕上 5 项、点一下却勾上 32 项，用户无从知道自己
+  # 即将往系统里写什么。被隐藏的行必定是没勾的（Update-SymptomRowVisibility 的不变式），
+  # 所以「全不选」也只需要处理可见行，不会漏掉任何已勾项。
+  $allRows = @(@($ui.ItemPanel.Children) + @($ui.RiskyPanel.Children))
+  $targets = @($(if (@($script:ActiveSymptomIds).Count -gt 0) {
+    $allRows | Where-Object { $_.Visibility -ne 'Collapsed' }
+  } else { $allRows }))
+  foreach ($row in $targets) {
     $bulkSelect = [bool]($row.DataContext -and $row.DataContext.BulkSelect)
     $row.Child.Children[0].IsChecked = $(if ($on) { $bulkSelect -and $row.Tag -ne $true } else { $false })
   }

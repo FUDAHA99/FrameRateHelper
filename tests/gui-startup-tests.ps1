@@ -4,6 +4,7 @@ param()
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $guiPath = Join-Path $root 'gui\DeltaForceBooster-GUI.ps1'
+. (Join-Path $root 'scripts\delta-booster.ps1')
 
 function Assert-True([bool]$Condition, [string]$Message) {
   if (-not $Condition) { throw "ASSERT FAILED: $Message" }
@@ -53,19 +54,30 @@ Assert-True ($raw.Contains('Content="导出完整诊断"') -and
   $raw.Contains("`$lines.Add('== 运行环境与显示 / 音频 ==')") -and
   $raw.Contains("`$lines.Add('== 关键环境变量（脱敏） ==')")) `
   'expanded negative-effect diagnostic collection is missing from the report button'
+# 「当前问题」那 19 条清单已经搬进引擎的 Get-SymptomCatalog（优化页的症状筛选带与
+# 诊断报告共用同一份数据）。这里改成断言**真实数据 + 那条接线**：只查界面源码里
+# 的字面量，数据一搬家就会变成假绿——清单可能已经空了，字面量还在别处躺着。
 Assert-True ($raw.Contains('function Show-DiagnosticFeedbackDialog') -and
-  $raw.Contains("Id = 'frame_drops'; Label = '掉帧 / 帧率波动'") -and
-  $raw.Contains("Id = 'black_screen_audio'; Label = '游戏全屏黑屏，但仍有声音'") -and
-  $raw.Contains("Id = 'black_screen_no_audio'; Label = '游戏全屏黑屏，声音也中断'") -and
-  $raw.Contains("Id = 'partial_black_screen'; Label = '游戏内部分区域黑屏 / 黑块'") -and
-  $raw.Contains("Id = 'black_screen_alt_tab'; Label = 'Alt+Tab / 切换显示模式后黑屏'") -and
-  $raw.Contains("Id = 'black_screen_frame_generation'; Label = '开启帧生成后出现黑屏'") -and
-  $raw.Contains("Id = 'black_screen_external_display'; Label = '外接显示器 / 独显直连时黑屏'") -and
-  $raw.Contains("Id = 'system_lag'; Label = '电脑整体卡顿 / 响应慢'") -and
-  $raw.Contains("Id = 'gpu_heat'; Label = 'GPU 占用或温度过高'") -and
-  $raw.Contains("Id = 'fps_gain'; Label = '平均帧率提升（涨帧）'") -and
+  $raw -match '\$script:DiagnosticIssueChoices\s*=\s*@\(@\(Get-SymptomCatalog\)') `
+  'diagnostic feedback dialog no longer derives its problem list from the engine symptom catalog'
+$symptomLabels = @{}
+foreach ($symptom in @(Get-SymptomCatalog)) { $symptomLabels["$($symptom.Id)"] = "$($symptom.Label)" }
+foreach ($expected in @(
+  @('frame_drops', '掉帧 / 帧率波动'),
+  @('black_screen_audio', '游戏全屏黑屏，但仍有声音'),
+  @('black_screen_no_audio', '游戏全屏黑屏，声音也中断'),
+  @('partial_black_screen', '游戏内部分区域黑屏 / 黑块'),
+  @('black_screen_alt_tab', 'Alt+Tab / 切换显示模式后黑屏'),
+  @('black_screen_frame_generation', '开启帧生成后出现黑屏'),
+  @('black_screen_external_display', '外接显示器 / 独显直连时黑屏'),
+  @('system_lag', '电脑整体卡顿 / 响应慢'),
+  @('gpu_heat', 'GPU 占用或温度过高'))) {
+  Assert-True ($symptomLabels["$($expected[0])"] -eq "$($expected[1])") `
+    "symptom catalog lost the diagnostic feedback choice $($expected[0])"
+}
+Assert-True ($raw.Contains("Id = 'fps_gain'; Label = '平均帧率提升（涨帧）'") -and
   $raw.Contains("Id = 'one_percent_gain'; Label = '1% Low 提升 / 掉帧减少'")) `
-  'diagnostic feedback page is missing required multi-select problem/improvement choices'
+  'diagnostic feedback page is missing required multi-select improvement choices'
 # 显卡型号伪装已移除，这里改成反向断言：型号选择器不得回来
 Assert-True (-not $raw.Contains('Test-RecommendedGpuSpoofModel') -and
   -not $raw.Contains('$script:SelectedGpuSpoofModel') -and
@@ -102,9 +114,12 @@ Assert-True ($raw.Contains('x:Name="FrameFixCacheBtn" Content="清理着色器�
   $raw.Contains('x:Name="FrameFixProgressText"')) `
   'frame-drop page still exposes text-only advice without direct software actions'
 # 伪装项已移除，但 risky 分组的基础设施保留（$risky.Count 为 0 时 Expander 自动隐藏），
-# 将来新增 risky 项时「全选」必须仍然覆盖它们。
+# 将来新增 risky 项时「全选」必须仍然覆盖它们，且高风险勾选仍走独立的二次确认。
+# 主列表表头上那句「高风险项单独列出 · 执行前二次确认」已让位给列标题：同一句话
+# RiskyGroup 自己的标题里有，而且只在真有 risky 项时才出现 —— 断言改钉那一处。
 Assert-True ($raw.Contains('@($ui.ItemPanel.Children) + @($ui.RiskyPanel.Children)') -and
-  $raw.Contains('高风险项单独列出 · 执行前二次确认')) `
+  $raw.Contains('默认不勾选 · 执行前单独二次确认') -and
+  $raw.Contains('$riskyIds = @($ui.RiskyPanel.Children')) `
   'optimization select-all no longer covers the risky group'
 Assert-True ($raw.Contains("BulkSelect = [bool](-not `$Item.ContainsKey('BulkSelect') -or `$Item.BulkSelect)") -and
   $raw.Contains('$bulkSelect = [bool]($row.DataContext -and $row.DataContext.BulkSelect)') -and

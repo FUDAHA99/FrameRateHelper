@@ -57,6 +57,7 @@
     powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -ListRestoreItems [-Json]
     powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -Restore [-RestoreItems id1,id2] [-BackupFile 备份文件]
     powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -ListItems
+    powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -ListSymptoms [-Json]
     powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -ListPresets
     powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -Apply -Preset balanced
     powershell -NoProfile -ExecutionPolicy Bypass -File delta-booster.ps1 -Apply -Preset main -Risky
@@ -80,6 +81,7 @@ param(
   [string]$RemoveResidueKind,
   [string]$RemoveResidueId,
   [switch]$ListItems,
+  [switch]$ListSymptoms,
   [switch]$ListPresets,
   [string]$Preset,
   [string]$SavePreset,
@@ -2303,6 +2305,7 @@ function Get-OptItems([string]$GamePath) {
   # Reboot 标记：该项写入成功后仍需重启才完全生效。GUI 重启提醒和 CLI 汇总都读这个
   # 字段而不是解析 Note 文本——文案会改，结构化标记不会漂
   $items += @{ Id = 'power-ultimate'; Tier = 'safe'; Name = '电源计划切换到「卓越性能」'; Admin = $true; Default = $true; Kind = 'power'; Reboot = $true
+               Effect = '执行后：当前电源计划切换到工具专属的「卓越性能」方案，CPU 不再为省电降频。'
                Note = '解除系统对 CPU 频率的保守限制。台式机收益明显；笔记本电池续航会变差。重启后完全生效。' }
 
   # 电源计划隐藏项：控制面板里看不到，必须用 powercfg 直接写
@@ -2314,13 +2317,16 @@ function Get-OptItems([string]$GamePath) {
                  @{ Kind = 'pcfg'; Sub = $script:SubProc; Setting = 'bae08b81-2d5e-4688-ad6a-13243356654b'; Value = 1;    Label = '短任务大小核调度=高性能核心'; Optional = $true }
                  @{ Kind = 'reg';  Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling'; Name = 'PowerThrottlingOff'; Value = 1; Kind2 = 'DWord'; Label = '关闭电源节流' }
                )
+               Effect = '执行后：USB 链路省电关闭、处理器性能检查间隔放宽到 5000ms、电源节流关闭；混合架构机型另调大小核调度。'
                Note = 'USB 链路省电会让键鼠有粘滞感；时间片拉长可减少频率抖动；大小核调度项只在 12 代+ Intel 等混合架构上存在，不存在会自动跳过。' }
 
   $items += @{ Id = 'powerplan-lock'; Tier = 'safe'; Name = '锁定电源计划（防游戏偷改回去）'; Admin = $true; Default = $false; Kind = 'sched'
+               Effect = '执行后：系统里多出一个每分钟运行一次的计划任务，把电源计划重新设回当前方案。'
                Note = '建立每分钟运行一次的计划任务，把电源计划重新设回当前方案。三角洲已知会在启动时篡改电源计划。这是持久化配置，还原时会自动删除该任务。' }
 
   $items += @{ Id = 'hags'; Tier = 'safe'; Name = '开启硬件加速 GPU 计划（HAGS）'; Admin = $true; Default = $true; Kind = 'multi'; Reboot = $true
                Ops  = @(@{ Kind = 'reg'; Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'; Name = 'HwSchMode'; Value = 2; Kind2 = 'DWord' })
+               Effect = '执行后：HwSchMode=2，显存与命令提交交由显卡硬件自己调度。'
                Note = '降低显卡调度延迟。需要 Win10 2004+ 与较新驱动，重启后生效。' }
 
   $items += @{ Id = 'game-mode'; Tier = 'safe'; Name = '开启 Windows 游戏模式'; Admin = $false; Default = $true; Kind = 'multi'
@@ -2328,6 +2334,7 @@ function Get-OptItems([string]$GamePath) {
                  @{ Kind = 'reg'; Path = 'HKCU:\Software\Microsoft\GameBar'; Name = 'AutoGameModeEnabled'; Value = 1; Kind2 = 'DWord' }
                  @{ Kind = 'reg'; Path = 'HKCU:\Software\Microsoft\GameBar'; Name = 'AllowAutoGameMode';   Value = 1; Kind2 = 'DWord' }
                )
+               Effect = '执行后：游戏模式开启，系统检测到游戏时自动压低后台活动优先级。'
                Note = '游戏运行时系统自动降低后台活动优先级。' }
 
   $items += @{ Id = 'dvr-off'; Tier = 'safe'; Name = '关闭 Xbox 后台录制（Game DVR）'; Admin = $false; Default = $true; Kind = 'multi'
@@ -2335,18 +2342,22 @@ function Get-OptItems([string]$GamePath) {
                  @{ Kind = 'reg'; Path = 'HKCU:\System\GameConfigStore'; Name = 'GameDVR_Enabled'; Value = 0; Kind2 = 'DWord' }
                  @{ Kind = 'reg'; Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR'; Name = 'AppCaptureEnabled'; Value = 0; Kind2 = 'DWord' }
                )
+               Effect = '执行后：Xbox 后台录制关闭，显卡编码器不再被它常驻占用。'
                Note = '后台录制持续占用显卡编码器和内存带宽，是最常见的隐形掉帧源。' }
 
   $items += @{ Id = 'prio-separation'; Tier = 'safe'; Name = '前台程序调度权重（Win32PrioritySeparation=40）'; Admin = $true; Default = $true; Kind = 'multi'
                Ops  = @(@{ Kind = 'reg'; Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl'; Name = 'Win32PrioritySeparation'; Value = 40; Kind2 = 'DWord' })
+               Effect = '执行后：Win32PrioritySeparation=40，前台程序拿到短而固定长度的时间片。'
                Note = '短时间片 + 固定长度，牺牲一点后台响应换取前台游戏帧生成更稳定。' }
 
   $items += @{ Id = 'paging-exec'; Tier = 'safe'; Name = '内核代码常驻内存（DisablePagingExecutive）'; Admin = $true; Default = $true; Kind = 'multi'; Reboot = $true
                Ops  = @(@{ Kind = 'reg'; Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'; Name = 'DisablePagingExecutive'; Value = 1; Kind2 = 'DWord' })
+               Effect = '执行后：DisablePagingExecutive=1，内核代码常驻内存、不再被换出到硬盘。'
                Note = '禁止内核代码被换出到硬盘，减少卡顿尖峰。内存 8G 以下不建议。' }
 
   $items += @{ Id = 'wer-off'; Tier = 'safe'; Name = '关闭 Windows 错误报告'; Admin = $false; Default = $true; Kind = 'multi'
                Ops  = @(@{ Kind = 'reg'; Path = 'HKCU:\Software\Microsoft\Windows\Windows Error Reporting'; Name = 'Disabled'; Value = 1; Kind2 = 'DWord' })
+               Effect = '执行后：Windows 错误报告关闭，游戏崩溃瞬间不再收集转储文件。'
                Note = '游戏崩溃瞬间不再收集转储，避免二次卡死。' }
 
   # 关闭内存压缩会让内存压力更早落到页面文件。保留给明确需要对比测试的用户手动选择，
@@ -2356,14 +2367,17 @@ function Get-OptItems([string]$GamePath) {
                  @{ Kind = 'mmagent'; Feature = 'mc'; Label = '内存压缩' }
                  @{ Kind = 'mmagent'; Feature = 'pc'; Label = '页面合并' }
                )
+               Effect = '执行后：内存压缩与页面合并都关闭，内存压力直接落到页面文件。'
                Note = '省下压缩/解压的 CPU 开销，代价是内存吃紧时更早开始动用页面文件。仅供手动对比测试，不会被默认方案或「全选」带上。' }
 
   $items += @{ Id = 'transparency-off'; Tier = 'safe'; Name = '关闭窗口透明特效'; Admin = $false; Default = $true; Kind = 'multi'
                Ops  = @(@{ Kind = 'reg'; Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'; Name = 'EnableTransparency'; Value = 0; Kind2 = 'DWord' })
+               Effect = '执行后：窗口透明特效关闭，桌面合成开销下降。'
                Note = '减少桌面合成开销，对低配机有小幅收益。' }
 
   $items += @{ Id = 'visualfx-perf'; Tier = 'safe'; Name = '视觉效果调整为最佳性能（改变系统外观）'; Admin = $false; Default = $false; Kind = 'multi'
                Ops  = @(@{ Kind = 'reg'; Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects'; Name = 'VisualFXSetting'; Value = 2; Kind2 = 'DWord' })
+               Effect = '执行后：视觉效果设为「最佳性能」，窗口动画和阴影全部关闭，桌面外观会明显变朴素。'
                Note = '关闭全部窗口动画和阴影，桌面观感会明显变朴素，默认不勾选。' }
 
   $items += @{ Id = 'mouse-accel-off'; Tier = 'safe'; Name = '关闭鼠标「提高指针精确度」（电竞常规操作）'; Admin = $false; Default = $false; Kind = 'multi'
@@ -2372,40 +2386,48 @@ function Get-OptItems([string]$GamePath) {
                  @{ Kind = 'reg'; Path = 'HKCU:\Control Panel\Mouse'; Name = 'MouseThreshold1'; Value = '0'; Kind2 = 'String' }
                  @{ Kind = 'reg'; Path = 'HKCU:\Control Panel\Mouse'; Name = 'MouseThreshold2'; Value = '0'; Kind2 = 'String' }
                )
+               Effect = '执行后：鼠标加速关闭，指针位移与鼠标物理位移一比一对应，手感会变化。'
                Note = '与帧率无关但影响压枪手感，射击游戏玩家普遍关闭。会改变鼠标移动习惯，默认不勾选。' }
 
   # ===== v0.4 新增：全套调试路线补齐 =====
 
   $items += @{ Id = 'mpo-off'; Tier = 'safe'; Name = '禁用 MPO 多平面叠加（治闪烁/卡顿）'; Admin = $true; Default = $true; Kind = 'multi'; Reboot = $true
                Ops  = @(@{ Kind = 'reg'; Path = 'HKLM:\SOFTWARE\Microsoft\Windows\Dwm'; Name = 'OverlayTestMode'; Value = 5; Kind2 = 'DWord' })
+               Effect = '执行后：OverlayTestMode=5，DWM 不再使用多平面叠加。'
                Note = 'MPO 与部分驱动组合会造成画面闪烁和掉帧，NVIDIA 官方曾专门发布禁用工具。副作用：视频播放时 DWM 功耗略升。重启生效。' }
 
   $mmcss = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
   # DWord 0xffffffff 在 .NET 有符号 int 里就是 -1，写 4294967295 会转换溢出
   $items += @{ Id = 'net-throttling-off'; Tier = 'safe'; Name = '解除多媒体网络限流'; Admin = $true; Default = $true; Kind = 'multi'
                Ops  = @(@{ Kind = 'reg'; Path = $mmcss; Name = 'NetworkThrottlingIndex'; Value = -1; Kind2 = 'DWord'; Label = '网络限流指数（-1 即 0xffffffff 不限流）' })
+               Effect = '执行后：网络限流指数写成 0xffffffff，系统不再限制非多媒体流量的发包速率。'
                Note = '系统默认每毫秒只放行 10 个网络包给非多媒体流量，网游高发包率下引入延迟抖动；0xffffffff 表示彻底不限流。' }
 
   $items += @{ Id = 'sys-responsiveness'; Tier = 'safe'; Name = '提高系统响应度（MMCSS 后台保留=10%）'; Admin = $true; Default = $true; Kind = 'multi'
                Ops  = @(@{ Kind = 'reg'; Path = $mmcss; Name = 'SystemResponsiveness'; Value = 10; Kind2 = 'DWord'; Label = '后台 CPU 保留比例' })
+               Effect = '执行后：SystemResponsiveness=10，系统为后台多媒体任务保留的 CPU 从 20% 降到 10%。'
                Note = '把系统为后台多媒体任务保留的 CPU 比例设为 Windows 支持的最低有效值 10%。低于 10 的值会被系统钳制为 20，因此不再写无效的 0。' }
 
   $items += @{ Id = 'sysmain-off'; Tier = 'safe'; Name = '禁用 SysMain 预取服务'; Admin = $true; Default = $false; Kind = 'multi'; Reboot = $true
                Ops  = @(@{ Kind = 'reg'; Path = 'HKLM:\SYSTEM\CurrentControlSet\Services\SysMain'; Name = 'Start'; Value = 4; Kind2 = 'DWord'; Label = 'SysMain 启动类型（4=禁用）' })
+               Effect = '执行后：SysMain 服务启动类型改为「禁用」，重启后不再做后台预读。'
                Note = 'SysMain（旧名 Superfetch）后台预读抢内存和磁盘带宽，SSD 上收益存疑。副作用：常用程序冷启动可能略变慢，默认不勾选。重启后彻底停止。' }
 
   $items += @{ Id = 'wsearch-off'; Tier = 'safe'; Name = '禁用 Windows Search 索引服务'; Admin = $true; Default = $false; Kind = 'multi'; Reboot = $true
                Ops  = @(@{ Kind = 'reg'; Path = 'HKLM:\SYSTEM\CurrentControlSet\Services\WSearch'; Name = 'Start'; Value = 4; Kind2 = 'DWord'; Label = 'WSearch 启动类型（4=禁用）' })
+               Effect = '执行后：Windows Search 服务启动类型改为「禁用」，重启后不再建索引，系统搜索会变慢。'
                Note = '索引器后台扫盘占 IO。副作用明显：开始菜单和资源管理器搜索会变慢（现场逐盘找），只推荐给从不用系统搜索的人，默认不勾选。重启生效。' }
 
   $items += @{ Id = 'hibernate-off'; Tier = 'safe'; Name = '关闭休眠与快速启动'; Admin = $true
                Default = [bool]($hw -and -not $hw.IsLaptop); Kind = 'multi'
                Ops  = @(@{ Kind = 'hib'; Label = '休眠' })
+               Effect = '执行后：休眠关闭、hiberfil.sys 从 C 盘删除，快速启动随之失效。'
                Note = '释放 C 盘数 GB 的 hiberfil.sys，并消除快速启动"假关机"导致的状态残留。副作用：休眠与快速启动都不可用，笔记本合盖只剩睡眠，故只在台式机默认勾选。' }
 
   $gpuClass = Get-GpuClassKeyPath $hw
   $items += @{ Id = 'gpu-pstate-lock'; Tier = 'safe'; Name = '禁止显卡动态降频（锁 P-State）'; Admin = $true; Default = $false; Kind = 'multi'; Reboot = $true
                Ops  = $(if ($gpuClass) { @(@{ Kind = 'reg'; Path = $gpuClass; Name = 'DisableDynamicPstate'; Value = 1; Kind2 = 'DWord' }) })
+               Effect = '执行后：DisableDynamicPstate=1，显卡不再随负载来回降频，待机功耗和发热上升。'
                Note = '阻止驱动随负载波动来回降频，减少频率抖动带来的帧率毛刺。副作用：待机功耗和发热明显上升、笔记本续航变差，默认不勾选。重启生效。' }
 
   # NVIDIA App 的「自动优化」开关落在 NvBackend\config.xml 的 EnableAutomaticApplyOPS
@@ -2413,10 +2435,12 @@ function Get-OptItems([string]$GamePath) {
   # 时也直接写盘）。没装 NVIDIA App（A 卡/核显）时文件不存在，Ops 置空走「本机不适用」降级
   $items += @{ Id = 'nv-autoopt-off'; Tier = 'safe'; Name = 'NVIDIA App 自动优化体检（手动关闭）'; Admin = $false; Default = $false; Kind = 'check'
                Check = 'Get-NvAutoOptStatus'
+               Effect = '本项只读：报告 NVIDIA App 的「自动优化」当前是开还是关，不替你改任何设置。'
                Note = '只检测 NVIDIA App 是否仍在自动覆盖游戏设置，不再由工具写入用户配置文件；发现开启时请在 NVIDIA App 内手动关闭。' }
 
   $items += @{ Id = 'gpu-irq-affinity'; Tier = 'safe'; Name = '显卡中断绑核（固定到高性能核）'; Admin = $true; Default = $false; Kind = 'multi'; Reboot = $true
                Ops  = (Get-GpuIrqOps $hw)
+               Effect = '执行后：独显中断被固定到编号最大的物理核；读不到核拓扑时本项自动不可用。'
                Note = '把独显中断固定到编号最大的物理核（大小核机型按 EfficiencyClass 选最后一个 P 核），避开挤满系统中断的 CPU0，压低 DPC 延迟。读不到核拓扑时本项自动不可用（宁可不做不能做错）。重启生效，还原即删除策略。' }
 
   # 与 sys-responsiveness 同属 MMCSS，是同一父键下的兄弟项：那个调后台保留比例，这个调游戏任务本身的档位
@@ -2428,6 +2452,7 @@ function Get-OptItems([string]$GamePath) {
                  @{ Kind = 'reg'; Path = $mmTasks; Name = 'Scheduling Category'; Value = 'High'; Kind2 = 'String'; Label = '调度类别' }
                  @{ Kind = 'reg'; Path = $mmTasks; Name = 'SFIO Priority';       Value = 'High'; Kind2 = 'String'; Label = '文件IO优先级' }
                )
+               Effect = '执行后：MMCSS 的 Games 任务档位拉满（GPU 优先级 8、任务优先级 6、调度类别 High）。'
                Note = '把系统给"游戏"这类多媒体任务的 GPU/IO 调度档位调到最高。收益微弱（不是博主说的立竿见影），但零副作用且可完整还原，属于体系补齐。' }
 
   # DirectXUserGlobalSettings 是分号分隔的复合串（还含 AutoHDREnable 等），必须只改目标子键
@@ -2435,21 +2460,25 @@ function Get-OptItems([string]$GamePath) {
                Ops  = @(@{ Kind = 'kvstr'; Path = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
                            Name = 'DirectXUserGlobalSettings'; Key = 'SwapEffectUpgradeEnable'; Value = '0'
                            Label = '窗口化游戏优化' })
+               Effect = '执行后：SwapEffectUpgradeEnable=0，「窗口化游戏优化」关闭。'
                Note = '对应「设置→系统→显示→图形→默认图形设置」里的开关。微软说开启能降低窗口模式延迟，但社区普遍反馈它与叠加层/反作弊冲突时反而掉帧——两种说法都有人实测支持，所以默认不勾选，建议自己开关各测一次再定。' }
 
   # 检测类项目：Check 字段指明检测函数，只读不写。新增检测项只要加一行 + 写个返回 @{Ok;Text} 的函数
   $items += @{ Id = 'pcie-check'; Tier = 'safe'; Name = 'PCIe 通道体检（纯检测，不改设置）'; Admin = $false; Default = $false; Kind = 'check'
                Check = 'Get-PcieLinkStatus'
+               Effect = '本项只读：报告独显 PCIe 链路的最大能力，不改任何设置。'
                Note = '读取独显 PCIe 链路的最大能力。上限只有 x8/x4 多半是插错插槽或用了劣质延长线，这种硬件问题白丢帧、软件修不了。空闲时当前速率自动降档属正常省电。' }
 
   # 默认勾选：v14 运行库异常是社区排查掉帧时最常命中的一条（教程里常被叫作「V14」），
   # 纯检测不写任何东西，代价为零，没有理由让用户自己想起来勾
   $items += @{ Id = 'vcredist-check'; Tier = 'safe'; Name = 'VC++ 运行库体检（纯检测，不改设置）'; Admin = $false; Default = $true; Kind = 'check'
                Check = 'Get-VcRedistStatus'
+               Effect = '本项只读：报告 VC++ 2015-2022(v14) 运行库是否缺失，既不安装也不卸载。'
                Note = '检测 VC++ 2015-2022(v14) 运行库是否缺失——缺了游戏很可能无法启动。x64 与 x86 两套相互独立，版本不同步很常见且通常无害，只做中性提示不报问题。本项只检测不修——卸载重装运行库会波及其他软件，须你自己判断后手动处理。' }
 
   $items += @{ Id = 'xmp-check'; Tier = 'safe'; Name = '内存频率 / XMP·A-XMP·EXPO·DOCP 体检（纯检测）'; Admin = $false; Default = $false; Kind = 'check'
                Check = 'Get-MemoryXmpStatus'
+               Effect = '本项只读：比较内存当前频率与 SMBIOS 标称频率并给出可能的 BIOS 菜单名，不替你改 BIOS。'
                Note = '比较内存当前频率与 SMBIOS 标称频率，并按电脑品牌、平台与 DDR 代际给出可能的 BIOS 菜单名。不是每台电脑都有性能档位；达到标称频率时不会再误报“未开启”。' }
 
   # 实验项：默认不勾、不进任何内置方案。社区大面积反馈的「进游戏后每隔十几秒卡 2~3 秒」
@@ -2459,10 +2488,12 @@ function Get-OptItems([string]$GamePath) {
   # 项名以「解决掉帧」开头：用户搜的、问的都是这四个字，「清理着色器缓存」是手段不是诉求，
   # 只写手段的话真正需要它的人在列表里根本认不出来
   $items += @{ Id = 'shader-cache-clean'; Tier = 'safe'; Name = '★ 解决掉帧：清理着色器缓存（实验功能，不保证生效）'; Admin = $false; Default = $false; BulkSelect = $false; Kind = 'cache'
+               Effect = '执行后：系统与显卡驱动的着色器缓存目录被清空，由驱动在之后的游戏里自动重建；本项不产生备份，也无需还原。'
                Note = '针对「进游戏后每隔十几秒卡顿 2~3 秒」这类症状——社区普遍指向显卡/DirectX 着色器缓存异常，游戏大版本更新后尤其高发。只清理系统与显卡驱动的缓存目录，不碰游戏安装目录内任何文件。执行前请先知道三件事：①清理后首次进游戏要重新编译着色器，头一两局可能比现在更卡，之后才恢复；②如果你的掉帧不是从游戏更新之后才开始的，这项大概率无效；③缓存由驱动自动重建，因此本项不进备份、也无需还原——点「还原设置」不会把它恢复回来（也不需要）。游戏和显卡驱动面板开着时部分文件会被占用，关掉再执行效果最好。' }
 
   $items += @{ Id = 'dyntick-off'; Tier = 'safe'; Name = '禁用动态计时器（bcdedit）'; Admin = $true; Default = $false; Kind = 'multi'; Reboot = $true
                Ops  = @(@{ Kind = 'bcd'; Name = 'disabledynamictick'; Value = 'yes'; Label = '动态计时器' })
+               Effect = '执行后：disabledynamictick=yes，系统回到固定周期的时钟中断。'
                Note = '恢复固定时钟中断，部分机器帧生成间隔更稳。副作用：空闲功耗略升、笔记本续航变差，默认不勾选。重启生效。' }
 
   # pagefile-custom 已停止新应用：旧算法会在系统盘写入内存 1.5～2 倍的页面文件，
@@ -2481,12 +2512,15 @@ function Get-OptItems([string]$GamePath) {
   }
   $items += @{ Id = 'fso-off'; Tier = 'safe'; Name = '为游戏禁用全屏优化'; Admin = $false; Default = $true; Kind = 'multi'
                Ops = $fsoOps; RequiresGame = $true
+               Effect = '执行后：给游戏 exe 打上 DISABLEDXMAXIMIZEDWINDOWEDMODE 兼容性标志，全屏时走真独占。'
                Note = '让游戏拿到真独占全屏，帧率更稳、延迟更低。需要游戏 exe 路径。' }
   $items += @{ Id = 'gpu-pref'; Tier = 'safe'; Name = '强制游戏使用高性能 GPU'; Admin = $false; Default = $true; Kind = 'multi'
                Ops = $gpuOps; RequiresGame = $true
+               Effect = '执行后：Windows 图形首选项里把游戏 exe 固定为「高性能」GPU。'
                Note = '双显卡（核显+独显）笔记本必开，防止游戏跑在核显上。需要游戏 exe 路径。' }
   $items += @{ Id = 'game-priority'; Tier = 'safe'; Name = '游戏进程 CPU/IO 优先级提到「高」'; Admin = $true; Default = $true; Kind = 'multi'
                Ops = $prioOps; RequiresGame = $true
+               Effect = '执行后：IFEO 里给游戏 exe 写上 CpuPriorityClass/IoPriority=3，进程一启动就是高优先级。'
                Note = '通过 IFEO 让游戏进程一启动就是高优先级，抢占后台扫描/更新占用的资源。需要游戏 exe 路径。' }
 
   # ===== risky 档 =====
@@ -2506,6 +2540,161 @@ function Get-OptItems([string]$GamePath) {
   # nvidia-profile 已停止从软件内执行：Inspector 导入无法生成可验证的自动还原备份。
 
   $items
+}
+
+# ---------- 按症状检索（信息架构，不改任何系统设置） ----------
+
+# 用户找的是「我遇到的问题」，不是「用什么手段」。项名写的全是手段（HwSchMode、MMCSS、
+# DisablePagingExecutive），30 多项摊在一页里，真正需要某一项的人在列表里认不出它来。
+# 这张表把 19 条症状映射到优化项，是纯呈现层的数据：不写系统、不影响 Apply/Restore。
+#
+# 三条刻意的取舍：
+#   1. **症状 Id 与诊断报告共用同一套**。报告里那 19 个勾选项本来就是这批 Id，两处各写
+#      一份必然漂移，所以这里是唯一来源，界面的反馈弹窗从这里取标签。
+#   2. **映射不到优化项就如实说「没有」**，并指向真正能帮上忙的地方（掉帧修复页、
+#      游戏内设置参考、复原入口、诊断报告）。给一条本工具治不了的症状硬凑几个项目，
+#      比承认治不了更坏 —— 用户照着执行一遍没好，就再也不信剩下的结论了。
+#   3. **升温/耗电三条症状的 Items 故意为空**。本工具没有降温项，而且「卓越性能」
+#      「锁 P-State」这些项本身就会让温度和功耗上升。把它们列在「CPU 温度过高」下面
+#      等于推荐用户去做让症状更重的事，所以这三条一律指向复原入口。
+$script:SymptomCatalog = @(
+  [ordered]@{ Id = 'low_fps'; Label = '帧率偏低（平均 FPS 低）'
+    Items = @('power-ultimate','power-tuning','hags','game-mode','dvr-off','prio-separation',
+              'mmcss-games','fso-off','gpu-pref','game-priority','visualfx-perf','transparency-off',
+              'pcie-check','nv-autoopt-off')
+    Pages = @('ref')
+    Note  = '平均帧偏低多半是「算力没给够」：先把电源和调度让给游戏，再确认游戏跑在独显、PCIe 没插错槽。画质设置本身不在本工具内，见「游戏内设置参考」。' }
+  [ordered]@{ Id = 'frame_drops'; Label = '掉帧 / 帧率波动'
+    Items = @('shader-cache-clean','mpo-off','dvr-off','power-ultimate','power-tuning','powerplan-lock',
+              'paging-exec','sysmain-off','wsearch-off','gpu-pstate-lock','nv-autoopt-off')
+    Pages = @('framefix')
+    Note  = '波动型掉帧和平均帧低是两回事：优先排查会周期性抢资源的东西（后台录制、预读、索引、驱动降频），以及游戏大版本更新后高发的着色器缓存异常。' }
+  [ordered]@{ Id = 'stutter'; Label = '卡顿 / 微卡 / 突然停顿'
+    Items = @('shader-cache-clean','paging-exec','mpo-off','dvr-off','sysmain-off','wsearch-off',
+              'gpu-irq-affinity','dyntick-off','prio-separation','mem-compress-off')
+    Pages = @('framefix')
+    Note  = '「每隔十几秒卡 2~3 秒」是社区反馈最集中的一种形状，多方指向着色器缓存；如果是随机的短促微卡，更像是内核换页、中断延迟或后台扫盘。' }
+  [ordered]@{ Id = 'low_one_percent'; Label = '1% Low 偏低（画面不流畅）'
+    Items = @('gpu-pstate-lock','dyntick-off','gpu-irq-affinity','prio-separation','paging-exec',
+              'power-tuning','mpo-off','mmcss-games')
+    Pages = @()
+    Note  = '1% Low 偏低说明帧生成间隔不稳，而不是算力不够 —— 继续降画质通常无效。这一组针对的是频率抖动、时钟中断和调度延迟。' }
+  [ordered]@{ Id = 'input_latency'; Label = '输入延迟高 / 操作粘滞'
+    Items = @('power-tuning','mouse-accel-off','net-throttling-off','fso-off','windowed-opt-off',
+              'sys-responsiveness','hags')
+    Pages = @()
+    Note  = '手感问题分两路：本机链路（USB 省电、鼠标加速、独占全屏）和网络链路（多媒体限流）。两路的体感很像，但改的地方完全不同。' }
+  [ordered]@{ Id = 'slow_loading'; Label = '游戏加载慢 / 切换场景卡'
+    Items = @('game-priority','paging-exec','wsearch-off','pcie-check')
+    Pages = @()
+    Note  = '加载慢主要吃磁盘和 IO 优先级。注意「禁用 SysMain」不在这一组：它会让程序冷启动更慢，对加载是反向的。' }
+  [ordered]@{ Id = 'game_crash'; Label = '游戏闪退 / 无响应'
+    Items = @('vcredist-check','xmp-check','wer-off','mpo-off')
+    Pages = @('report')
+    Note  = '闪退先查环境再谈优化：VC++ 运行库缺失会直接起不来，内存超频不稳会随机崩。如果闪退是执行优化之后才出现的，请先复原相关项目再回来看这里。' }
+  [ordered]@{ Id = 'black_screen_audio'; Label = '游戏全屏黑屏，但仍有声音'
+    Items = @('mpo-off','fso-off','windowed-opt-off','gpu-pref')
+    Pages = @('restore')
+    Note  = '有声音说明游戏还在跑，问题在显示链路（叠加层、全屏模式、双显卡输出）。如果黑屏是执行优化之后开始的，先用复原入口撤回电源相关项。' }
+  [ordered]@{ Id = 'black_screen_no_audio'; Label = '游戏全屏黑屏，声音也中断'
+    Items = @('mpo-off','gpu-pref')
+    Pages = @('restore','report')
+    Note  = '声音也断通常意味着驱动或整机层面的问题，本工具能改的部分很有限。如果它是执行优化之后出现的，最可能的来源是电源计划相关项 —— 请先复原。' }
+  [ordered]@{ Id = 'partial_black_screen'; Label = '游戏内部分区域黑屏 / 黑块'
+    Items = @('dvr-off','mpo-off','transparency-off')
+    Pages = @('report')
+    Note  = '局部黑块常来自叠加层与录屏（Xbox Game Bar、直播软件、硬件监控叠加）抢同一块画面。先把后台录制关掉，再逐个退出叠加层软件确认。' }
+  [ordered]@{ Id = 'black_screen_alt_tab'; Label = 'Alt+Tab / 切换显示模式后黑屏'
+    Items = @('fso-off','windowed-opt-off','mpo-off')
+    Pages = @()
+    Note  = '切换时黑屏是全屏模式与窗口化优化之间的交互问题。这两项建议分别开、关各测一次，不要同时改。' }
+  [ordered]@{ Id = 'black_screen_frame_generation'; Label = '开启帧生成后出现黑屏'
+    Items = @('mpo-off')
+    Pages = @('ref')
+    Note  = '帧生成（DLSS FG / FSR FG / AFMF）是驱动和游戏内的功能，本工具没有对应开关 —— 先在显卡面板或游戏里把它关掉确认，再看「游戏内设置参考」。' }
+  [ordered]@{ Id = 'black_screen_external_display'; Label = '外接显示器 / 独显直连时黑屏'
+    Items = @('gpu-pref','mpo-off')
+    Pages = @('ref')
+    Note  = '独显直连开关在 BIOS 或厂商控制中心里，本工具不碰。能做的是确保游戏本身跑在独显上。' }
+  [ordered]@{ Id = 'system_lag'; Label = '电脑整体卡顿 / 响应慢'
+    Items = @('sysmain-off','wsearch-off','visualfx-perf','transparency-off','sys-responsiveness',
+              'paging-exec','hibernate-off','mem-compress-off')
+    Pages = @()
+    Note  = '不只在游戏里卡，说明是系统级的后台占用。这一组的副作用也最明显（搜索变慢、桌面变朴素），逐项看清说明再勾。' }
+  [ordered]@{ Id = 'cpu_heat'; Label = 'CPU 占用或温度过高'
+    Items = @()
+    Pages = @('restore','report')
+    Note  = '本工具没有降温项。反过来说：「电源计划切换到卓越性能」和「电源计划隐藏项深度调优」本来就是用更高功耗换性能，温度升高是它们的预期代价。如果高温是执行优化之后出现的，请用下面的复原入口撤回电源相关项。' }
+  [ordered]@{ Id = 'gpu_heat'; Label = 'GPU 占用或温度过高'
+    Items = @()
+    Pages = @('restore','report')
+    Note  = '本工具没有降温项。「禁止显卡动态降频（锁 P-State）」会明显抬高待机功耗和发热 —— 如果做过这一项，请先用复原入口撤回它。' }
+  [ordered]@{ Id = 'noise_power'; Label = '风扇噪音大 / 功耗高'
+    Items = @()
+    Pages = @('restore','report')
+    Note  = '噪音和功耗与温度同源。本工具里所有电源类优化项都是往「更高功耗」方向走的，不存在一个反向的降噪项 —— 要退，请走复原入口。' }
+  [ordered]@{ Id = 'app_update_failure'; Label = '优化工具打不开 / 更新失败'
+    Items = @()
+    Pages = @('report','residue')
+    Note  = '这不是优化项能解决的问题。请导出诊断报告（含启动与更新日志）；如果是卸载重装后仍打不开，先用「检查工具残留」看看上一版留下了什么。' }
+  [ordered]@{ Id = 'apply_restore_failure'; Label = '优化或还原执行失败'
+    Items = @()
+    Pages = @('restore','report','residue')
+    Note  = '先看运行日志里那一条失败的原因（权限被拒、系统版本不支持、文件被占用，处置完全不同），再决定重试还是复原。残留反查可以确认还原到底干净没有。' }
+)
+
+# 症状目录是数据，不是行为：只读，供界面筛选带与诊断报告共用。
+function Get-SymptomCatalog {
+  @($script:SymptomCatalog | ForEach-Object {
+    [pscustomobject]@{
+      Id = "$($_.Id)"; Label = "$($_.Label)"
+      Items = @($_.Items | ForEach-Object { "$_" })
+      Pages = @($_.Pages | ForEach-Object { "$_" })
+      Note = "$($_.Note)"
+    }
+  })
+}
+
+$script:SymptomPageLabels = [ordered]@{
+  framefix = '去「掉帧修复」页'
+  ref      = '去「游戏内设置参考」页'
+  restore  = '打开复原入口'
+  report   = '导出诊断报告'
+  residue  = '检查工具残留'
+}
+
+# 目录里写错一个 Id，那条症状就会静默地筛不出任何项目 —— 看起来像「本工具治不了」，
+# 实际是拼写错误。这个函数把不一致如实报出来：界面照常显示（纯呈现层，fail-open），
+# 但会写进运行日志，测试则直接断言它必须为空。
+function Get-SymptomCatalogFaults([string]$GamePath) {
+  $known = @{}
+  foreach ($optItem in @(Get-OptItems $GamePath)) { $known["$($optItem.Id)"] = $true }
+  $faults = New-Object System.Collections.Generic.List[string]
+  $seen = @{}
+  foreach ($symptom in @(Get-SymptomCatalog)) {
+    if ($seen.ContainsKey("$($symptom.Id)")) { [void]$faults.Add("症状 Id 重复：$($symptom.Id)") }
+    $seen["$($symptom.Id)"] = $true
+    if (-not "$($symptom.Label)") { [void]$faults.Add("症状缺少标签：$($symptom.Id)") }
+    if (-not "$($symptom.Note)") { [void]$faults.Add("症状缺少说明：$($symptom.Id)") }
+    $dup = @{}
+    foreach ($itemId in @($symptom.Items)) {
+      if (-not $known.ContainsKey("$itemId")) { [void]$faults.Add("症状 $($symptom.Id) 指向不存在的优化项：$itemId") }
+      if ($dup.ContainsKey("$itemId")) { [void]$faults.Add("症状 $($symptom.Id) 重复列出优化项：$itemId") }
+      $dup["$itemId"] = $true
+    }
+    foreach ($page in @($symptom.Pages)) {
+      if (-not $script:SymptomPageLabels.Contains("$page")) { [void]$faults.Add("症状 $($symptom.Id) 指向未知页面：$page") }
+    }
+    if (@($symptom.Items).Count -eq 0 -and @($symptom.Pages).Count -eq 0) {
+      [void]$faults.Add("症状 $($symptom.Id) 既没有优化项也没有去处，等于一条死路")
+    }
+  }
+  @($faults)
+}
+
+# 反向索引：某个优化项能解决哪些症状。行内提示与「这一项为什么会出现在筛选结果里」都用它。
+function Get-SymptomIdsForItem([string]$ItemId) {
+  @(@(Get-SymptomCatalog) | Where-Object { @($_.Items) -contains "$ItemId" } | ForEach-Object { "$($_.Id)" })
 }
 
 # ---------- 优化方案（内置推荐 + 用户自存） ----------
@@ -5373,7 +5562,7 @@ if ($RequestFile) {
   $RemoveResidueId = $(if ($engineRequest.Action -eq 'Residue') { $engineRequest.ResidueId } else { $null })
 }
 
-$didDispatch = [bool]($ListItems -or $Detect -or $Preview -or $ListPresets -or $SavePreset -or $DeletePreset -or $Apply -or $Restore -or $ListRestoreItems -or $ListResidue -or $RemoveResidueKind)
+$didDispatch = [bool]($ListItems -or $ListSymptoms -or $Detect -or $Preview -or $ListPresets -or $SavePreset -or $DeletePreset -or $Apply -or $Restore -or $ListRestoreItems -or $ListResidue -or $RemoveResidueKind)
 if ($didDispatch) {
 $dispatchAction = $(if ($Apply) { 'Apply' } elseif ($Restore -or $ListRestoreItems) { 'Restore' } elseif ($ListResidue -or $RemoveResidueKind) { 'Residue' } elseif ($Detect -or $Preview) { 'Detect' } else { 'Other' })
 $dispatchData = $null; $dispatchError = $null; $cliExitCode = 0
@@ -5402,6 +5591,29 @@ if ($ListItems) {
       Write-Output ("{0,-20} {1}{2}{3}" -f $it.Id, $tag, $it.Name, $(if ($it.Admin) { '（需管理员）' } else { '' }))
       Write-Output ("                     {0}" -f $(if ($it.Warn) { $it.Warn } else { $it.Note }))
     }
+  }
+}
+elseif ($ListSymptoms) {
+  # 纯呈现层数据，不读也不写系统：谁都能跑，不需要管理员。
+  $faults = @(Get-SymptomCatalogFaults $GamePath)
+  $r = [pscustomobject]@{ Symptoms = @(Get-SymptomCatalog); Faults = $faults }
+  if ($Json) { $r | ConvertTo-Json -Depth 5 }
+  else {
+    $catalogItems = @{}
+    foreach ($optItem in @(Get-OptItems $GamePath)) { $catalogItems["$($optItem.Id)"] = "$($optItem.Name)" }
+    foreach ($symptom in @($r.Symptoms)) {
+      Write-Output ("{0,-32} {1}" -f $symptom.Id, $symptom.Label)
+      Write-Output ("    {0}" -f $symptom.Note)
+      if (@($symptom.Items).Count -eq 0) { Write-Output '    对应优化项：无（本工具没有能直接解决这条症状的优化项）' }
+      foreach ($itemId in @($symptom.Items)) {
+        Write-Output ("    · {0,-20} {1}" -f $itemId, $catalogItems["$itemId"])
+      }
+      foreach ($page in @($symptom.Pages)) {
+        Write-Output ("    → {0}" -f $script:SymptomPageLabels["$page"])
+      }
+      Write-Output ''
+    }
+    foreach ($fault in $faults) { Write-Output "症状目录异常：$fault" }
   }
 }
 elseif ($Detect -or $Preview) {
