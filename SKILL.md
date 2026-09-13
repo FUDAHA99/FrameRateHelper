@@ -332,8 +332,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booste
 | dyntick-off | 禁用动态计时器（bcdedit disabledynamictick yes） | 否 | 需要 |
 | mmcss-games | MMCSS 游戏任务档位拉满（GPU/IO 调度，收益微弱但零副作用） | 是 | 需要 |
 | windowed-opt-off | 关闭「窗口化游戏优化」（复合串只改目标子键） | 否 | 否 |
-| vcredist-check | VC++ v14 运行库体检（纯检测，缺失才报问题） | 否 | 否 |
+| vcredist-check | VC++ v14 运行库体检（纯检测，缺失才报问题） | 是 | 否 |
 | xmp-check | 内存频率 / XMP·A-XMP·EXPO·DOCP 体检（纯检测） | 否 | 否 |
+| shader-cache-clean | ★ 解决掉帧：清理着色器缓存（实验功能，不保证生效）。**不产生备份、也无需还原**——缓存由驱动自动重建 | 否 | 否 |
 
 risky 档（默认不勾；`main` 会选中但仍要求独立确认 / `-Risky`）：
 

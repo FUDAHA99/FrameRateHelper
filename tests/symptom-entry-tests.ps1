@@ -476,4 +476,39 @@ Assert-True (@($symptomCli | Where-Object { $_ -like '*本工具没有能直接�
   '-ListSymptoms 对治不了的症状没有如实说'
 Assert-True (@($symptomCli | Where-Object { $_ -like '*症状目录异常*' }).Count -eq 0) '-ListSymptoms 报出了目录异常'
 
+# ---------- 8. SKILL.md 的「优化项一览」必须和引擎对得上 ----------
+#
+# 这张表是给 **AI Agent** 读的操作手册。表里漏一项，agent 就永远不会向用户提到它；
+# 「默认」列写反了，agent 会照着说「这一项默认不执行」而实际上它默认执行。
+# 实测漂过两处：整张表漏了 shader-cache-clean（用户搜得最多的「解决掉帧」那一项），
+# 而 vcredist-check 的默认列与代码相反。逐项对，不靠人眼。
+$skillPath = Join-Path $root 'SKILL.md'
+$skillRaw = [IO.File]::ReadAllText($skillPath, [Text.Encoding]::UTF8)
+$skillStart = $skillRaw.IndexOf('## 优化项一览')
+Assert-True ($skillStart -ge 0) 'SKILL.md 里找不到「优化项一览」'
+$skillStop = $skillRaw.IndexOf('risky 档（默认不勾', $skillStart)
+Assert-True ($skillStop -gt $skillStart) 'SKILL.md 的优化项表格找不到结尾'
+$skillRows = @{}
+foreach ($skillLine in (($skillRaw.Substring($skillStart, $skillStop - $skillStart)) -split "`r?`n")) {
+  if ($skillLine -notmatch '^\|\s') { continue }
+  $cells = @($skillLine -split '\|' | ForEach-Object { $_.Trim() })
+  if ($cells.Count -lt 5) { continue }
+  if ($cells[1] -eq 'Id' -or $cells[1] -match '^-+$') { continue }
+  $skillRows[$cells[1]] = [pscustomobject]@{ Default = $cells[3]; Admin = $cells[4] }
+}
+Assert-True ($skillRows.Count -eq $optList.Count) `
+  "SKILL.md 的优化项表有 $($skillRows.Count) 行，引擎有 $($optList.Count) 项 —— 表里漏掉的项目，agent 永远不会提到"
+foreach ($optItem in $optList) {
+  Assert-True ($skillRows.ContainsKey("$($optItem.Id)")) "SKILL.md 的优化项表缺行：$($optItem.Id)"
+  if (-not $skillRows.ContainsKey("$($optItem.Id)")) { continue }
+  # hibernate-off 的默认值是运行时按机型算的（台式机才默认勾），表里如实写「台式机默认」
+  $expectedDefault = $(if ($optItem.Id -eq 'hibernate-off') { '台式机默认' }
+                       elseif ($optItem.Default) { '是' } else { '否' })
+  Assert-True ($skillRows["$($optItem.Id)"].Default -eq $expectedDefault) `
+    "SKILL.md 里 $($optItem.Id) 的「默认」列是 $($skillRows["$($optItem.Id)"].Default)，代码里是 $expectedDefault"
+  $expectedAdmin = $(if ($optItem.Admin) { '需要' } else { '否' })
+  Assert-True ($skillRows["$($optItem.Id)"].Admin -eq $expectedAdmin) `
+    "SKILL.md 里 $($optItem.Id) 的「管理员」列是 $($skillRows["$($optItem.Id)"].Admin)，代码里是 $expectedAdmin"
+}
+
 Write-Output "symptom-entry-tests: PASS ($script:Assertions assertions)"
