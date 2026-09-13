@@ -824,4 +824,46 @@ $validatedCandidateFunctionText = $validatedCandidateFunction.Extent.Text
   }
 } $validatedCandidateFunctionText
 
+# ---------------------------------------------------------------------------
+#  $ui 绑定完整性：代码引用的每一个控件都必须真的被取出来
+# ---------------------------------------------------------------------------
+#
+# 这条是用一次「软件整个打不开」换来的。
+#
+# 提交 4af7401 往 XAML 里加了 <Button x:Name="ResidueBtn">，也写了
+# `$ui.ResidueBtn.Add_Click({ Show-ToolResidueDialog })`，**但忘了把 'ResidueBtn'
+# 加进 $ui 的注册清单**。于是 $ui.ResidueBtn 恒为 $null，那一行在脚本顶层抛
+# 「不能对 Null 值表达式调用方法」，而文件头有 $ErrorActionPreference='Stop' ——
+# 脚本死在 $window.ShowDialog() 之前，界面一次都没出现过。
+#
+# 当时的测试是绿的，因为它断言的是 `$guiRaw.Contains('$ui.ResidueBtn.Add_Click')`：
+# 只证明了那行**字**存在，没证明那行**能跑**。静态文本断言在这里正好是最坏的一种，
+# 它给的是虚假的安心。
+#
+# 所以这里改成查关系，而不是查字符串：
+#   ① 代码里出现的每个 $ui.X，X 必须在注册清单里（否则 $null，调方法即炸）
+#   ② 注册清单里的每个名字，XAML 里必须真有这个 x:Name（否则 FindName 返回 $null，同上）
+$uiListMatch = [regex]::Match($raw, "(?s)foreach \(\`$n in ('.*?')\) \{\r?\n\s*\`$ui\[\`$n\] = \`$window\.FindName\(\`$n\)")
+Assert-True ($uiListMatch.Success) '找不到 $ui 的注册清单（foreach ($n in …) { $ui[$n] = $window.FindName($n) }）'
+$uiRegistered = @([regex]::Matches($uiListMatch.Groups[1].Value, "'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
+Assert-True ($uiRegistered.Count -gt 50) "注册清单只解析出 $($uiRegistered.Count) 个名字，正则多半失配了"
+
+
+$uiReferenced = @([regex]::Matches($raw, '\$ui\.([A-Za-z_][A-Za-z0-9_]*)') |
+                  ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+Assert-True ($uiReferenced.Count -gt 50) "只解析出 $($uiReferenced.Count) 个 `$ui 引用，正则多半失配了"
+
+$uiUnregistered = @($uiReferenced | Where-Object { $uiRegistered -notcontains $_ })
+Assert-True ($uiUnregistered.Count -eq 0) `
+  ("这些控件被代码用了却没进 `$ui 注册清单，`$ui.X 恒为 `$null —— 只要有一行调它的方法，" +
+   "界面就会在 ShowDialog 之前整个死掉：$($uiUnregistered -join '、')")
+
+# 这一半刻意走**真的 FindName**，而不是在 XAML 文本里搜 x:Name：定义在 ControlTemplate
+# 内部的名字属于模板的名称作用域，window.FindName 根本找不到它 —— 文本比对会放过这种，
+# 真调一次 FindName 不会。
+$uiGhost = @($uiRegistered | Where-Object { $null -eq $mainXamlWindow.FindName($_) })
+Assert-True ($uiGhost.Count -eq 0) `
+  ("注册清单里这些名字 `$window.FindName 取不到（XAML 里没有，或者被定义在 ControlTemplate 的名称作用域里），" +
+   "`$ui.X 同样恒为 `$null：$($uiGhost -join '、')")
+
 Write-Host 'PASS: GUI UAC recovery and WinPS5.1 Generic.List result paths are regression covered'

@@ -1870,7 +1870,7 @@ foreach ($n in 'TitleBar','MinBtn','CloseBtn','UpdateBtn','ThemeBtn','ScanState'
                'InlineRestorePanel','InlineRestoreItemsPanel','InlineRestoreEmptyText',
                'InlineRestoreLegacyNotice','InlineRestoreLegacyText','InlineRestoreSelectedText','InlineRestoreAllSummary',
                'InlineRestoreSelectAllBtn','InlineRestoreClearBtn','InlineRestoreSelectedBtn','InlineRestoreAllBtn','InlineRestoreCloseBtn',
-               'ReportBtn','DisclaimerBtn','LogBox',
+               'ReportBtn','ResidueBtn','DisclaimerBtn','LogBox',
                'PresetBox','SavePresetBtn','DelPresetBtn','PresetNote',
                'TabOptBtn','TabTuneBtn','TabFrameFixBtn','TabRefBtn','TabLogBtn','LogBadge','LogBadgeTxt',
                'OptPage','TunePage','FrameFixPage','RefPage','LogPage','RefPanel','ActionRow',
