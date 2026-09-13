@@ -371,13 +371,72 @@ $visibilityCalls = @($updateCountAst[0].FindAll({
 Assert-True ($visibilityCalls.Count -eq 1) `
   'Update-Count 不再执行可见性不变式 —— 套方案/全选之后可能留下「勾上了却看不见」的项'
 
-# 所有会改勾选状态的路径末尾都要回到 Update-Count
-Assert-True ($guiRaw.Contains('$cb.IsChecked = ($Item.Default -and $State.Optimized -ne $true)')) '建行时的默认勾选逻辑变了'
-foreach ($needle in @(
-  "`$row.Child.Children[0].IsChecked = `$(if (`$on) { `$bulkSelect -and `$row.Tag -ne `$true } else { `$false })",
-  "`$cb.IsChecked = ((`$ids -contains `$cb.Tag) -and (`$row.Tag -ne `$true))")) {
-  Assert-True ($guiRaw.Contains($needle)) "改勾选的路径变了，可见性不变式的覆盖需要重新确认：$needle"
+# 所有会改勾选状态的路径末尾都要回到 Update-Count。
+#
+# 这里原来查的是「那几行赋值语句的**字面量**还在不在」—— 而不变式根本不靠那几行存在，
+# 靠的是它们之后有没有回到 Update-Count。实测：把套方案处理器末尾的 Update-Count 删掉
+# （可见性不变式在那条路径上当场失守，正是 TESTING.md 2.8 第 5 步描述的场景），
+# 两个测试文件仍然全绿。那就是一条假绿，和它要防的 ResidueBtn 是同一种病。
+#
+# 改成查关系：每一处给「优化项行的勾选框」赋值的语句，它所在的那个作用域
+# （具名函数或事件处理器 scriptblock）必须也调用 Update-Count。
+$checkedAssignments = @($guiAst.FindAll({
+  param($node)
+  if ($node -isnot [Management.Automation.Language.AssignmentStatementAst]) { return $false }
+  $left = "$($node.Left)"
+  # 只认优化项行的勾选框：还原面板那套复选框走的是 Update-InlineRestoreSelection，不在此列。
+  # 这里必须用 EndsWith 而不是 -like：-like 会把 [0] 当成字符集通配符，
+  # 'Children[0].IsChecked' 匹配的其实是 'Children0.IsChecked'，一条都对不上。
+  $left.EndsWith('Children[0].IsChecked') -or ($left -eq '$cb.IsChecked')
+}, $true))
+Assert-True ($checkedAssignments.Count -ge 3) `
+  "只找到 $($checkedAssignments.Count) 处优化项勾选赋值，AST 匹配多半失配了（建行 / 全选 / 套方案至少三处）"
+
+function Get-EnclosingScopeAst($Node) {
+  $cursor = $Node.Parent
+  while ($cursor) {
+    if ($cursor -is [Management.Automation.Language.FunctionDefinitionAst] -or
+        $cursor -is [Management.Automation.Language.ScriptBlockExpressionAst]) { return $cursor }
+    $cursor = $cursor.Parent
+  }
+  $null
 }
+
+$missingUpdateCount = New-Object Collections.Generic.List[string]
+foreach ($assignment in $checkedAssignments) {
+  $scope = Get-EnclosingScopeAst $assignment
+  if (-not $scope) {
+    [void]$missingUpdateCount.Add("第 $($assignment.Extent.StartLineNumber) 行的赋值找不到所属作用域")
+    continue
+  }
+  # New-ItemRow 是唯一的例外，而且是正当的：它在**建行**时赋默认勾选，
+  # 由调用方 Update-ItemList 在所有行都加完之后统一调一次 Update-Count。
+  # 所以这个例外必须由下面那条断言兜住，不能白给。
+  if ($scope -is [Management.Automation.Language.FunctionDefinitionAst] -and $scope.Name -eq 'New-ItemRow') { continue }
+  $calls = @($scope.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and "$($node.GetCommandName())" -eq 'Update-Count'
+  }, $true))
+  if ($calls.Count -eq 0) {
+    [void]$missingUpdateCount.Add("第 $($assignment.Extent.StartLineNumber) 行：$($assignment.Extent.Text.Trim())")
+  }
+}
+Assert-True ($missingUpdateCount.Count -eq 0) `
+  ("这些地方改了勾选状态却没有回到 Update-Count —— 可见性不变式在那条路径上不成立，" +
+   "会留下「勾上了却看不见」的项目：$($missingUpdateCount -join '；')")
+
+# New-ItemRow 的例外由这条兜住：建完行必须统一刷一次
+$updateItemListAst = @($guiAst.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Update-ItemList'
+}, $true) | Select-Object -First 1)
+Assert-True ($updateItemListAst.Count -eq 1) '找不到 Update-ItemList'
+Assert-True (@($updateItemListAst[0].FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and "$($node.GetCommandName())" -eq 'Update-Count'
+  }, $true)).Count -ge 1) `
+  'Update-ItemList 重建完所有行之后没有调用 Update-Count —— New-ItemRow 里那处默认勾选就失去了兜底'
+
 # 全选只动看得见的行
 Assert-True ($guiRaw.Contains("`$allRows | Where-Object { `$_.Visibility -ne 'Collapsed' }")) `
   '「全选」不再限定在可见行 —— 屏幕上 5 项，点一下却勾上 32 项'
