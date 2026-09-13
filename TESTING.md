@@ -21,6 +21,26 @@ git diff 9fab79d..HEAD --stat
 
 pwsh 7 跑构建脚本会炸：它解析出的压缩程序集是 .NET Core 版路径，喂给 Framework csc 不兼容。
 
+**跑自动化测试之前先把软件关掉。** 这一条被我自己绊了两次，所以单独写出来：
+
+| 测试 | 软件开着时 | 为什么 |
+|---|---|---|
+| `engine-host-session-tests` | `test could not acquire the current-session launcher marker` | 它要新建 `Local\DeltaForceBooster.LaunchInstance`，而运行中的软件正占着这个全局单实例标记 |
+| `installer-security-tests` | `fresh install exit=3` | 安装器检测到旧版仍在运行，**主动取消了安装**（`setup-wizard.cs:197/205`）—— 这是保护机制在正常工作，不是缺陷 |
+
+确认办法（两个都应该是 `True`）：
+
+```powershell
+foreach ($n in 'Local\DeltaForceBooster.LaunchInstance', 'Global\DeltaForceBooster.Engine') {
+  $created = $false
+  $m = New-Object Threading.Mutex($false, $n, [ref]$created)
+  '{0,-42} 可新建={1}' -f $n, $created
+  $m.Dispose()
+}
+```
+
+`False` 就说明软件还开着（或上一次没退干净），先关掉再跑，否则这两条必红而且和你的改动无关。
+
 ---
 
 ## 1. 自动化测试

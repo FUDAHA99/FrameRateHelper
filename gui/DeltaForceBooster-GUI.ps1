@@ -641,6 +641,7 @@ Add-Type -AssemblyName PresentationFramework
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:sys="clr-namespace:System;assembly=mscorlib"
         Title="帧率优化助手" Width="780" Height="1200" MinHeight="640"
         WindowStartupLocation="CenterScreen" WindowStyle="None" ResizeMode="CanResize"
         BorderBrush="{DynamicResource Line}" BorderThickness="1"
@@ -680,6 +681,8 @@ $xaml = @'
     <SolidColorBrush x:Key="DangerPanel"   Color="#FF1A0E10"/>
     <SolidColorBrush x:Key="InputSurface"  Color="#FF0C1814"/>
 
+    <sys:Double x:Key="DisabledOpacity">0.42</sys:Double>
+
     <Style x:Key="TacCheck" TargetType="CheckBox">
       <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
       <Setter Property="Template">
@@ -711,6 +714,12 @@ $xaml = @'
               </DockPanel>
             </Border>
             <ControlTemplate.Triggers>
+              <!-- 行里的项名 TextBlock 在代码里设了显式 Foreground，样式级的 Foreground
+                   setter 盖不住它；所以这里改整块 Opacity —— Opacity 往下继承，
+                   不受子元素的局部值影响。执行期间整张勾选表会被禁用。 -->
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="{StaticResource DisabledOpacity}"/>
+              </Trigger>
               <Trigger Property="IsChecked" Value="True">
                 <Setter TargetName="Box" Property="Background" Value="{DynamicResource Green}"/>
                 <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource Green}"/>
@@ -745,6 +754,17 @@ $xaml = @'
                 <Setter TargetName="B" Property="BorderBrush" Value="{DynamicResource Green}"/>
                 <Setter TargetName="B" Property="Background" Value="{DynamicResource AccentPanel}"/>
               </Trigger>
+              <!-- 禁用态必须看得出来。执行优化/还原期间会有近二十个控件被禁用，
+                   而它们原来和能点的长得一模一样 —— 用户点下去毫无反应，读起来就是
+                   「软件卡死了」，而「没反应」正是这个项目最高频的故障描述。
+                   注意：IsMouseOver 对禁用控件同样会变 true，所以这条必须放在 hover
+                   之后，并把 hover 改过的属性一并改回去，否则禁用按钮划过还会亮。 -->
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="B" Property="Opacity" Value="{StaticResource DisabledOpacity}"/>
+                <Setter TargetName="B" Property="BorderBrush" Value="{DynamicResource Line}"/>
+                <Setter TargetName="B" Property="Background" Value="Transparent"/>
+                <Setter Property="Foreground" Value="{DynamicResource DisabledText}"/>
+              </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
@@ -772,6 +792,13 @@ $xaml = @'
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
                 <Setter TargetName="Hover" Property="Opacity" Value="0.16"/>
+              </Trigger>
+              <!-- 「执行优化」是整个界面最大的那个绿色按钮。它在执行期间被禁用，
+                   原来外观一点不变 —— 用户会以为点漏了，于是反复点。 -->
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="Bg" Property="Opacity" Value="{StaticResource DisabledOpacity}"/>
+                <Setter TargetName="Hover" Property="Opacity" Value="0"/>
+                <Setter Property="Foreground" Value="{DynamicResource DisabledText}"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>

@@ -983,4 +983,52 @@ Assert-True ($raw.Contains('if ($_.ClickCount -eq 2)')) '双击标题栏不能�
 Assert-True ($raw.Contains('$window.Add_StateChanged')) `
   '最大化后按钮图标不跟着变 —— 用户不知道怎么退出最大化'
 
+# ---------------------------------------------------------------------------
+#  禁用态必须看得出来
+# ---------------------------------------------------------------------------
+#
+# 执行优化/还原期间有近二十个控件被 Set-BusyState 禁用，而 Ghost / Primary / TacCheck
+# 三个样式原来**一个都没有** IsEnabled=False 的视觉状态 —— 禁用按钮和能点的长得一模一样，
+# 用户点下去毫无反应，读起来就是「软件卡死了」。而「没反应 / 打不开」正是这个项目
+# 最高频的故障描述。（TabBtn / TacCombo / MetricHistoryButton 本来就有，
+# 调色板里也早就备好了 DisabledText —— 只是没铺到主按钮上。）
+#
+# 这条不查 XAML 里有没有那段触发器，而是**真的切一次 IsEnabled 再读渲染出来的值**：
+# 触发器写了但被 hover 触发器盖掉、或者 TargetName 打错，查源码都看不出来。
+$disabledProbeWindow = [Windows.Markup.XamlReader]::Parse($mainXamlMatch.Groups[1].Value)
+$disabledProbeContent = $disabledProbeWindow.Content
+$disabledProbeWindow.Content = $null
+$disabledProbeContent.Measure((New-Object Windows.Size 1200, 1400))
+$disabledProbeContent.Arrange((New-Object Windows.Rect 0, 0, 1200, 1400))
+$disabledProbeContent.UpdateLayout()
+
+function Get-DisabledProbeOpacity($Control, [string]$PartName) {
+  [void]$Control.ApplyTemplate()
+  if ($PartName) {
+    $part = $Control.Template.FindName($PartName, $Control)
+    if ($null -eq $part) { return $null }
+    return [double]$part.Opacity
+  }
+  [double]$Control.Opacity
+}
+
+foreach ($disabledProbe in @(
+  @{ Name='RefreshBtn'; Style='Ghost'; Part='B' },
+  @{ Name='ApplyBtn'; Style='Primary'; Part='Bg' },
+  @{ Name='SelAllChk'; Style='TacCheck'; Part='' })) {
+  $probeControl = $disabledProbeWindow.FindName($disabledProbe.Name)
+  Assert-True ($null -ne $probeControl) "找不到控件 $($disabledProbe.Name)"
+  $probeControl.IsEnabled = $true
+  $disabledProbeContent.UpdateLayout()
+  $enabledOpacity = Get-DisabledProbeOpacity $probeControl $disabledProbe.Part
+  Assert-True ($null -ne $enabledOpacity) "$($disabledProbe.Style) 模板里找不到部件 $($disabledProbe.Part)"
+  $probeControl.IsEnabled = $false
+  $disabledProbeContent.UpdateLayout()
+  $disabledOpacity = Get-DisabledProbeOpacity $probeControl $disabledProbe.Part
+  Assert-True ($disabledOpacity -lt $enabledOpacity) `
+    ("$($disabledProbe.Style) 样式的禁用态和启用态长得一模一样（$disabledOpacity vs $enabledOpacity）—— " +
+     '执行期间用户会以为软件卡死了')
+  $probeControl.IsEnabled = $true
+}
+
 Write-Host 'PASS: GUI UAC recovery and WinPS5.1 Generic.List result paths are regression covered'
