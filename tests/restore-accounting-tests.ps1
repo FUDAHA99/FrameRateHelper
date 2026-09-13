@@ -121,6 +121,26 @@ try {
     $path
   }
 
+  # 一份挂在指定电源方案 GUID 上的 pcfg 备份（power-tuning 的形状）。
+  # 关键字段是 SchemeGuid：原值记在哪个方案上，删掉那个方案这条就再也写不回去。
+  function New-AccountingPcfgBackup([string]$SchemeGuid) {
+    $doc = New-BackupDocument ([DateTime]::UtcNow)
+    $doc.State = 'complete'
+    $opId = [guid]::NewGuid().ToString('D')
+    $doc.Items = @([pscustomobject][ordered]@{
+      ItemId='power-tuning';RestoreGroupId='power-tuning';DisplayName='电源计划隐藏项深度调优'
+      DefinitionHash=('e' * 64);RebootRequired=$true;OpIds=@($opId)
+    })
+    $doc.Ops = @([pscustomobject][ordered]@{
+      Id=$opId;Status='applied';ApplyId=$doc.ApplyId;ItemId='power-tuning';RestoreGroupId='power-tuning'
+      OpIndex=0;Kind='pcfg';Sub=$script:SubProc;Setting='4d2b0152-7d5c-498b-88e2-34345392a2c5'
+      Label='处理器性能时间检查间隔';Existed=$true;OldValue=30000;SchemeGuid=$SchemeGuid
+    })
+    $path = Join-Path $script:BackupDir ("backup-$($doc.BackupId).json")
+    Write-BackupDocumentAtomic $path $doc
+    $path
+  }
+
   function New-AccountingPowerBackup([string]$OldGuid, [DateTime]$When = ([DateTime]::UtcNow)) {
     $doc = New-BackupDocument $When
     $doc.State = 'complete'
@@ -1176,6 +1196,43 @@ try {
     Assert-True ($activeRejected -like '*当前正在使用*') '删当前活动电源方案必须被拒绝'
     $script:ResidueActiveGuid = $script:BalancedGuid
 
+    # 「还没还原的活动状态」和「还原后的残留」在系统里长得一模一样，后果却完全相反：
+    # power-tuning 的 pcfg 原值记在**具体方案 GUID** 上（备份 op 带 SchemeGuid）。
+    # 用户执行过优化、手动把方案切回平衡、再点「检查工具残留」—— 此时工具方案不是活动
+    # 方案，按纯系统探测看就是一条可清理的残留。删掉它，那几条原值永远写不回去。
+    $script:ResidueSchemeGuardBackup = New-AccountingPcfgBackup $script:ResidueToolGuid
+    $schemeStillNeeded = ''
+    try { [void](Remove-ToolResidue 'power-scheme' $script:ResidueToolGuid) }
+    catch { $schemeStillNeeded = $_.Exception.Message }
+    Assert-True ($schemeStillNeeded -like '*还没还原完*') `
+      '这个方案上还挂着没还原的 pcfg 原值，删掉它那些值就永远写不回去了——必须拒绝'
+    # 扫描侧也要如实说，别让用户在界面上看到一个「可清理」的勾
+    $guardedScan = @(Get-ToolResidue | Where-Object { $_.Kind -eq 'power-scheme' })
+    Assert-True ($guardedScan.Count -eq 1 -and -not $guardedScan[0].Removable) `
+      '残留清单仍把「还没还原完」的工具电源方案标成可清理'
+    Assert-True ("$($guardedScan[0].Reason)" -like '*还没还原完*') '不可清理的原因没有说清是「还没还原完」'
+    Remove-Item -LiteralPath $script:ResidueSchemeGuardBackup -Force
+
+    # 判断不了的时候必须 fail-closed。读不出备份（凭证目录被锁、ACL 被改）时，工具
+    # **不知道**这个方案上还挂没挂着原值 —— 此时放行等于拿「可能永久还不回去」去换
+    # 「少清一条残留」，两边完全不对等。
+    $originalConsumedProbe = ${function:Get-ConsumedRestoreOpSet}
+    try {
+      function Get-ConsumedRestoreOpSet { [pscustomobject]@{ Blocked = $true; Set = @{}; Unreadable = @(); OpFaults = @() } }
+      $script:ResidueBlockedProbe = Get-SchemeBoundPendingOpCount $script:ResidueToolGuid
+      Assert-True ($script:ResidueBlockedProbe -lt 0) '读不出消费凭证时必须返回 -1（读不出来 ≠ 没挂着）'
+      $blockedRejected = ''
+      try { [void](Remove-ToolResidue 'power-scheme' $script:ResidueToolGuid) }
+      catch { $blockedRejected = $_.Exception.Message }
+      Assert-True ($blockedRejected -like '*无法确认*') `
+        '判断不了「这个方案上还有没有未还原的记录」时放行了 —— 必须 fail-closed'
+      $blockedScan = @(Get-ToolResidue | Where-Object { $_.Kind -eq 'power-scheme' })
+      Assert-True ($blockedScan.Count -eq 1 -and -not $blockedScan[0].Removable) `
+        '判断不了的时候扫描侧仍把方案标成可清理'
+    } finally {
+      Set-Item -LiteralPath Function:\Get-ConsumedRestoreOpSet -Value $originalConsumedProbe
+    }
+
     # 身份复验：Kind/Id 是**不可信输入**，列表和删除之间隔着一次 IPC 往返
     $missingRejected = ''
     try { [void](Remove-ToolResidue 'power-scheme' '99999999-8888-4777-8666-555555555555') }
@@ -1450,5 +1507,35 @@ Assert-True ($installerRaw.Contains('未发现本工具的电源方案锁定计�
 Assert-True ($installerRaw.Contains('受保护数据目录保留在：') -and
   $installerRaw.Contains('普通账户删不掉')) `
   '卸载器的 ProgramData 提示仍然只在「有备份」时才出现，且没说清用户自己删不掉'
+
+# 残留清理删的是电源方案和计划任务 —— 正是 Invoke-Apply / Invoke-Restore 正在读写的东西。
+# 那三个入口都进了全机唯一的引擎互斥锁；这条新增的删除路径必须一起进，否则另一个进程
+# （或 CLI 的 -RemoveResidueKind）可以在 Apply 建好锁定任务的下一刻把它删掉。
+# 扫描（Get-ToolResidue）是只读的，刻意不进锁：那只会让一次扫描拿到稍旧的快照。
+$engineSrcPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts\delta-booster.ps1'
+$engineAstForMutex = [Management.Automation.Language.Parser]::ParseFile($engineSrcPath, [ref]$null, [ref]$null)
+foreach ($guarded in 'Invoke-Apply', 'Invoke-Restore', 'Invoke-RestoreSelected', 'Remove-ToolResidue') {
+  $wantedFn = $guarded
+  $fnAst = @($engineAstForMutex.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $wantedFn
+  }, $true) | Select-Object -First 1)
+  Assert-True ($fnAst.Count -eq 1) "引擎里找不到函数 $guarded"
+  $residueMutexCalls = @($fnAst[0].FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and "$($node.GetCommandName())" -eq 'Enter-EngineMutex'
+  }, $true))
+  Assert-True ($residueMutexCalls.Count -ge 1) `
+    "$guarded 没有进引擎互斥锁 —— 它和别的写系统入口可以并发跑，改同一批对象"
+}
+$scanFnAst = @($engineAstForMutex.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-ToolResidue'
+}, $true) | Select-Object -First 1)
+Assert-True (@($scanFnAst[0].FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and "$($node.GetCommandName())" -eq 'Enter-EngineMutex'
+  }, $true)).Count -eq 0) `
+  'Get-ToolResidue 是只读扫描，进锁只会在长时间 Apply 期间把界面的「检查工具残留」堵死'
 
 Write-Output "restore-accounting-tests: PASS ($script:Assertions assertions)"

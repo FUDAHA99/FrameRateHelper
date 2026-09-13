@@ -5344,11 +5344,18 @@ function Get-ToolResidue {
     foreach ($scheme in @(Get-PowerSchemes)) {
       if (-not (Test-ToolPowerScheme $scheme)) { continue }
       $isActive = ("$($scheme.Guid)" -ieq $activeGuid)
+      $schemePending = Get-SchemeBoundPendingOpCount "$($scheme.Guid)"
       [void]$items.Add([pscustomobject][ordered]@{
         Kind = 'power-scheme'; Id = "$($scheme.Guid)"; Name = "电源方案「$($scheme.Name)」"
         Detail = "GUID $($scheme.Guid)"
-        Removable = (-not $isActive)
+        # 「还没还原完」和「还原后的残留」在系统里长得一模一样：不是活动方案、名字是工具的，
+        # 纯系统探测看就是一条可清理的残留。但只要还有 pcfg 原值记在这个方案 GUID 上，
+        # 它就是**活动状态**而不是残留 —— 删了那些值永远写不回去。扫描侧必须如实标，
+        # 否则用户在界面上看到的是一个可以勾的「清理」。
+        Removable = (-not $isActive -and $schemePending -eq 0)
         Reason = $(if ($isActive) { '这是当前正在使用的电源方案，删除前请先在控制面板里切换到别的方案' }
+                   elseif ($schemePending -lt 0) { '无法确认这个方案上还有没有未还原的记录（备份读取失败），暂不提供清理。请先修好备份目录' }
+                   elseif ($schemePending -gt 0) { "这不是残留，是**还没还原完**的状态：还有 $schemePending 条电源设置的原值记在这个方案上。请先点「全部复原」，复原完成后它才会变成可清理的残留" }
                    else { '还原后保留下来的工具专属方案，可以删除' })
       })
     }
@@ -5435,6 +5442,13 @@ function Get-BoosterCleanupTaskCandidates {
 # 绝不因为「它是我刚才列出来的」就放行——列表和删除之间隔着一次 IPC 往返。
 function Remove-ToolResidue([string]$Kind, [string]$Id) {
   if (-not (Test-Admin)) { throw '清理工具残留需要管理员权限' }
+  # 这里删的是电源方案和计划任务 —— 正是 Invoke-Apply / Invoke-Restore 正在读写的东西。
+  # 那三个入口都进了全机唯一的引擎互斥锁，只有这条新增的删除路径没进：另一个进程
+  # （或 CLI 的 -RemoveResidueKind）可以在 Apply 建好锁定任务的下一刻把它删掉，
+  # 或者在 Restore 走到电源那一步之前把方案删掉。扫描（Get-ToolResidue）是只读的，
+  # 不进锁——那只会让一次扫描拿到稍旧的快照，代价和收益不成比例。
+  $residueMutex = Enter-EngineMutex
+  try {
   switch ($Kind) {
     'power-scheme' {
       $parsed = [guid]::Empty
@@ -5445,6 +5459,15 @@ function Remove-ToolResidue([string]$Kind, [string]$Id) {
       if (-not (Test-ToolPowerScheme $scheme[0])) { throw '该电源方案不是本工具创建，已拒绝删除' }
       $act = Get-ActiveScheme
       if ($act -and "$($act.Guid)" -ieq "$Id") { throw '这是当前正在使用的电源方案，请先在控制面板里切换到别的方案再删除' }
+      # 还挂着没还原的 pcfg 原值时绝不删：那些值记在这个方案 GUID 上，方案没了就永远写不回去。
+      # 读不出来（-1）同样拒绝 —— 判断不了就别删，代价只是少清一条残留。
+      $pendingBound = Get-SchemeBoundPendingOpCount "$Id"
+      if ($pendingBound -lt 0) {
+        throw '无法确认这个电源方案上还有没有未还原的记录（备份读取失败），已拒绝删除。请先修好备份目录，或先完成「全部复原」'
+      }
+      if ($pendingBound -gt 0) {
+        throw "这不是残留，是**还没还原完**的状态：还有 $pendingBound 条电源设置的原值记在这个方案上，删掉方案它们就永远写不回去了。请先点「全部复原」，复原完成后这一项才会变成可清理的残留"
+      }
       $ErrorActionPreference = 'SilentlyContinue'
       $out = & $script:PowerCfgExe -delete $Id 2>&1
       $code = $LASTEXITCODE
@@ -5496,6 +5519,36 @@ function Remove-ToolResidue([string]$Kind, [string]$Id) {
     }
     'programdata' { throw '受保护数据目录不会由本工具删除：里面有你的备份和完整性密钥，请在确认不再需要还原后手动删除' }
     default { throw "未知的残留类型：$Kind" }
+  }
+  } finally { Exit-EngineMutex $residueMutex }
+}
+
+# 「还没还原的活动状态」和「还原后的残留」在系统里长得一模一样，后果却完全相反。
+#
+# power-tuning 的 pcfg 原值是**记在具体方案 GUID 上**的（备份 op 带 SchemeGuid）。
+# 用户执行过优化、手动把电源方案切回平衡、再点「检查工具残留」——此时工具自建的方案
+# 不是活动方案，按纯系统探测看就是一条「可清理的残留」。删掉它，那几条 pcfg 原值
+# 就**永远**写不回去了：方案没了，powercfg 无处可写。
+#
+# 所以删之前必须回头问一句：还有没有没还原完的记录挂在这个方案上。
+# 读不出来时**按有算**（fail-closed）：判断不了就别删，代价只是少清一条残留。
+function Get-SchemeBoundPendingOpCount([string]$SchemeGuid) {
+  try {
+    $state = Get-ValidatedRestoreRecords $null $false
+    $consumed = Get-ConsumedRestoreOpSet
+    if ($consumed.Blocked) { return -1 }
+    $pending = @(Get-ActiveV3RestoreOps $state.Records $consumed.Set)
+    $bound = @($pending | Where-Object {
+      "$($_.Op.Kind)" -eq 'pcfg' -and "$($_.Op.SchemeGuid)" -ieq "$SchemeGuid"
+    })
+    # v2 旧备份没有项目归属，整份都还没消费过，同样按「挂着」算
+    $legacyBound = @($state.Records |
+      Where-Object { [int]$_.Document.SchemaVersion -eq 2 -and -not $_.Consumed } |
+      ForEach-Object { @($_.Document.Ops) } |
+      Where-Object { "$($_.Kind)" -eq 'pcfg' -and "$($_.SchemeGuid)" -ieq "$SchemeGuid" })
+    $bound.Count + $legacyBound.Count
+  } catch {
+    -1
   }
 }
 
