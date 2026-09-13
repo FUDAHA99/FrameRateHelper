@@ -1821,6 +1821,22 @@ function Get-DisplayTopologyInfo {
   }
 }
 
+# 机型的用户可见文案。三态必须一路走到屏幕上：把 unknown 塌成「台式机」，
+# 用户没有理由怀疑，而下游（休眠项的默认勾选、显卡指引的笔记本补充）全都建立在
+# 这个他无从质疑的错误前提上。confidence='medium' 和 IsUpsAmbiguous 也按未确认算 ——
+# medium 是「没有机箱类型、靠电池+内屏推出来的」，IsUpsAmbiguous 是「有电池但证据互相打架」。
+function Get-FormFactorLabel($Hw) {
+  if (-not $Hw) { return '机型未确认' }
+  $ff = "$($Hw.FormFactor)"
+  if ($ff -eq 'laptop' -and "$($Hw.FormFactorConfidence)" -eq 'high') { return '笔记本' }
+  # IsUpsAmbiguous 不参与这里的判定：它的含义是「有电池，但别据此推断成笔记本」，
+  # 而机箱类型已经把机型定死了（台式机接 UPS 正是它要描述的情形）。拿它降级会让
+  # 卡片说「未确认」而休眠项照样默认勾上 —— 两个结论自相矛盾。
+  if ($ff -eq 'desktop' -and "$($Hw.FormFactorConfidence)" -eq 'high') { return '台式机' }
+  if ($ff -eq 'laptop') { return '笔记本（推定）' }
+  '机型未确认'
+}
+
 function Resolve-FormFactor([object[]]$ChassisTypes, $HasBattery, $HasInternalDisplay) {
   $types = @($ChassisTypes | ForEach-Object { try { [int]$_ } catch {} } |
     Where-Object { $_ -ge 1 -and $_ -le 36 } | Sort-Object -Unique)
@@ -2216,15 +2232,26 @@ function Get-SafeFilesUnderRoot([string]$Root) {
 }
 
 # 当前占用总量，供界面显示「值不值得清」。目录不存在或读不到都按 0 计
-function Get-ShaderCacheSize {
+# 「读不出来」≠「没有」。这一条是全项目的总纲，而这里原来把两件事压成了同一个 0：
+# 缓存目录是目录联接、被权限挡住、或扫描抛异常时，Get-SafeFilesUnderRoot 会把它计进
+# .Rejected 并返回空文件表 —— 上层只看 Files 求和，于是界面显示「当前无缓存可清理」。
+# 而「清理着色器缓存」恰恰是「进游戏后每隔十几秒卡 2~3 秒」唯一对症的那一项：
+# 这句话会把最需要它的人从它面前赶走。
+function Get-ShaderCacheScan {
   $sum = 0
+  $rejected = New-Object System.Collections.Generic.List[string]
   foreach ($d in Get-ShaderCacheDirs) {
     if (-not (Test-Path -LiteralPath $d.Path)) { continue }
-    $f = @((Get-SafeFilesUnderRoot $d.Path).Files)
+    $scan = Get-SafeFilesUnderRoot $d.Path
+    foreach ($bad in @($scan.Rejected)) { if ("$bad") { [void]$rejected.Add("$bad") } }
+    $f = @($scan.Files)
     if ($f.Count -gt 0) { $sum += ($f | Measure-Object Length -Sum).Sum }
   }
-  $sum
+  [pscustomobject]@{ Bytes = $sum; Rejected = @($rejected.ToArray()) }
 }
+
+# 老名字保留：Clear-ShaderCache 之外还有别处按字节数用它
+function Get-ShaderCacheSize { [long](Get-ShaderCacheScan).Bytes }
 
 # 逐文件删而不是删整个目录：目录本身被驱动持有，删掉可能要重启才重建。
 # 游戏或驱动面板开着时部分文件必然被占用——那是常态，如实报数，不算失败
@@ -2419,7 +2446,12 @@ function Get-OptItems([string]$GamePath) {
                Note = '索引器后台扫盘占 IO。副作用明显：开始菜单和资源管理器搜索会变慢（现场逐盘找），只推荐给从不用系统搜索的人，默认不勾选。重启生效。' }
 
   $items += @{ Id = 'hibernate-off'; Tier = 'safe'; Name = '关闭休眠与快速启动'; Admin = $true
-               Default = [bool]($hw -and -not $hw.IsLaptop); Kind = 'multi'
+               # 判据是「**确认**是台式机」，不是「不是笔记本」。Resolve-FormFactor 是刻意做的
+               # 三态（laptop/desktop/unknown），而 -not $hw.IsLaptop 会把 unknown 也算成台式机 ——
+               # 于是一台 SMBIOS 机箱类型缺失、或合盖接扩展坞（内屏 inactive）的笔记本，
+               # 会被**默认勾上**这一项：hiberfil.sys 被删、快速启动失效、合盖不再休眠。
+               # 引擎明确拒绝猜机型，这里就不能替它猜。
+               Default = [bool]($hw -and "$($hw.FormFactor)" -eq 'desktop'); Kind = 'multi'
                Ops  = @(@{ Kind = 'hib'; Label = '休眠' })
                Effect = '执行后：休眠关闭、hiberfil.sys 从 C 盘删除，快速启动随之失效。'
                Note = '释放 C 盘数 GB 的 hiberfil.sys，并消除快速启动"假关机"导致的状态残留。副作用：休眠与快速启动都不可用，笔记本合盖只剩睡眠，故只在台式机默认勾选。' }
@@ -2908,9 +2940,19 @@ function Get-ItemState($Item) {
   # 清理类项目没有「已优化/待优化」之分：缓存清完就会重新长回来，Optimized 恒为未知。
   # 给出当前占用量，让用户自己判断这一项现在值不值得跑
   if ($Item.Kind -eq 'cache') {
-    $mb = [math]::Round((Get-ShaderCacheSize) / 1MB, 1)
-    return @{ Optimized = $null
-              Current = $(if ($mb -le 0) { '当前无缓存可清理' } else { "当前着色器缓存约 ${mb}MB，每次执行都会重新清理" }) }
+    $scan = Get-ShaderCacheScan
+    $mb = [math]::Round([double]$scan.Bytes / 1MB, 1)
+    $blocked = @($scan.Rejected).Count
+    # 三分：有量 / 确实是 0 且全部读得到 / 有目录读不出来。
+    # 最后一种绝不能说成「无缓存可清理」—— 那是把「我不知道」说成了「没有」。
+    $cacheText = $(if ($mb -gt 0 -and $blocked -gt 0) {
+        "当前着色器缓存约 ${mb}MB（另有 $blocked 个目录读不出来，实际可能更多），每次执行都会重新清理"
+      } elseif ($mb -gt 0) {
+        "当前着色器缓存约 ${mb}MB，每次执行都会重新清理"
+      } elseif ($blocked -gt 0) {
+        "有 $blocked 个缓存目录读不出来（目录联接或权限），无法判断占用量 —— 这不等于没有缓存"
+      } else { '当前无缓存可清理' })
+    return @{ Optimized = $null; Current = $cacheText }
   }
   if (-not $Item.Ops) {
     return @{ Optimized = $null
@@ -2945,7 +2987,9 @@ function Get-AmdConfiguredGuideText($Hw, [string]$GpuName, [bool]$IsLaptop) {
   $displayText = $(if ($width -gt 0 -and $height -gt 0) {
       "$width×$height$(if ($refresh -gt 0) { " @ ${refresh}Hz" } else { '' })"
     } else { '分辨率未检测到' })
-  $deviceText = $(if ($IsLaptop) { '笔记本' } else { '台式机' })
+  # 不能写成「不是笔记本就是台式机」：机型未确认时这一行会给出一个用户无从质疑的错误前提，
+  # 而下面「笔记本补充」那几条会被整段跳过。
+  $deviceText = Get-FormFactorLabel $Hw
   $ramText = $(if ($ram -gt 0) { "，内存 $ram GB" } else { '' })
   $lines = New-Object Collections.Generic.List[string]
   $lines.Add("检测依据：$GpuName · $deviceText · $displayText$ramText")
@@ -2979,6 +3023,9 @@ function Get-AmdConfiguredGuideText($Hw, [string]$GpuName, [bool]$IsLaptop) {
 
   if ($IsLaptop) {
     $lines.Add('笔记本补充：插电并使用厂商性能模式；温度或功耗受限时先关闭 VSR/AFMF，不建议靠提高功耗上限硬撑。')
+  } elseif ((Get-FormFactorLabel $Hw) -eq '机型未确认') {
+    # 判不出机型时不能默认按台式机给建议：宁可多说一句，也别让笔记本用户漏掉这条。
+    $lines.Add('机型未能确认（SMBIOS 机箱类型缺失或证据互相矛盾）。如果这是笔记本：插电并使用厂商性能模式；温度或功耗受限时先关闭 VSR/AFMF，不建议靠提高功耗上限硬撑。')
   }
   if ($refresh -ge 120) {
     $lines.Add("显示器补充：若屏幕支持 FreeSync 则开启，并把游戏帧率上限设为约 $([math]::Max(30, $refresh - 3)) FPS，避免长期顶到刷新率上限。")

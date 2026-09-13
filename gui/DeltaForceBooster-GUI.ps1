@@ -4720,22 +4720,17 @@ function Refresh-PerformanceComparison([switch]$Force) {
   if (-not $Force -and $cacheKey -eq $script:PerformanceComparisonCacheKey) { return }
   $script:PerformanceComparisonCacheKey = $cacheKey
 
-  $sessions = @()
-  try {
-    if ($stamp) {
-      $file = Get-Item -LiteralPath $path -Force
-      if ($file.Length -gt 0 -and $file.Length -le 4MB) {
-        $sessions = @(Expand-PerformanceSessions (Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json))
-      }
-    }
-  } catch { $sessions = @() }
+  $comparisonState = Read-PerformanceSessionsState $(if ($stamp) { $path } else { "$path.__missing__" })
+  $sessions = @($comparisonState.Sessions)
   $pair = Select-PerformanceComparisonPair $sessions $context
   if ($pair.Status -ne 'paired') {
     $emptyText = switch ($pair.Status) {
       'waiting_current' { '等待当前状态记录' }
       'waiting_next' { '等待下一次记录' }
       'environment_mismatch' { '暂无同环境记录' }
-      default { '暂无历史记录' }
+      # 读不出来 ≠ 没有记录：对比这一行是用户判断「这工具到底有没有用」的唯一客观依据，
+      # 说成「暂无历史记录」会让他以为自己还没攒够对局。
+      default { $(if ($comparisonState.ReadFailed) { '历史记录读不出来' } else { '暂无历史记录' }) }
     }
     foreach ($key in 'fps','cpu','gpu','memory') {
       Set-LiveMetricComparison -Key $key -Before $null -After $null -EmptyText $emptyText `
@@ -4807,19 +4802,41 @@ function Get-PerformanceMetricHistoryRows([object[]]$Sessions, [string]$Key) {
   @($rows)
 }
 
+# 性能历史的读取原来在两处各写一遍，而且都是 `try { … } catch { $sessions = @() }` ——
+# 「文件不存在（全新安装）」「JSON 被截断」「文件被占用」「超过 4MB」四种状态在屏幕上
+# 收敛成同一句「暂无有效历史记录。运行游戏…就会自动出现」。
+#
+# 更要命的是写入侧用的是同一句解析：旧文件解析不了 → 整次写入被静默放弃 → 新记录也
+# 存不进去。所以那句「运行游戏就会出现」不只是文不对题，它是一条**永远兑现不了**的承诺：
+# 用户会以为是自己对局时长不够，一局一局地打，而每一局的记录都在收尾时被丢掉。
+function Read-PerformanceSessionsState([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    return [pscustomobject]@{ Sessions = @(); ReadFailed = $false; Reason = '' }
+  }
+  try {
+    $file = Get-Item -LiteralPath $Path -Force
+    if ($file.Length -le 0) {
+      return [pscustomobject]@{ Sessions = @(); ReadFailed = $false; Reason = '' }
+    }
+    if ($file.Length -gt 4MB) {
+      return [pscustomobject]@{ Sessions = @(); ReadFailed = $true
+        Reason = "性能记录文件超过 4MB（$([math]::Round($file.Length / 1MB, 1))MB），已拒绝读取" }
+    }
+    $decoded = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    [pscustomobject]@{ Sessions = @(Expand-PerformanceSessions $decoded); ReadFailed = $false; Reason = '' }
+  } catch {
+    [pscustomobject]@{ Sessions = @(); ReadFailed = $true; Reason = "性能记录文件读取失败：$($_.Exception.Message)" }
+  }
+}
+
 function Show-PerformanceMetricHistory([string]$Key) {
   $definition = Get-PerformanceMetricHistoryDefinition $Key
   if (-not $definition) { return }
   $sessions = @()
   $path = Join-Path $script:UserConfigDir 'performance-sessions.json'
-  try {
-    if (Test-Path -LiteralPath $path -PathType Leaf) {
-      $file = Get-Item -LiteralPath $path -Force
-      if ($file.Length -gt 0 -and $file.Length -le 4MB) {
-        $sessions = @(Expand-PerformanceSessions (Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json))
-      }
-    }
-  } catch { $sessions = @() }
+  $sessionState = Read-PerformanceSessionsState $path
+  $sessions = @($sessionState.Sessions)
+  if ($sessionState.ReadFailed) { Write-Log "[性能记录] $($sessionState.Reason)" }
   $rows = @(Get-PerformanceMetricHistoryRows $sessions $Key)
 
   $historyXaml = @'
@@ -4851,10 +4868,15 @@ function Show-PerformanceMetricHistory([string]$Key) {
   $dialog.Resources.MergedDictionaries.Add($script:ThemeRes)
   $dialog.Owner = $window
   $dialog.FindName('MetricTitle').Text = $definition.Title
-  $dialog.FindName('StatusText').Text = "共 $($rows.Count) 条有效记录 · 按时间倒序 · 未使用工具的记录也会保留并明确标注"
+  $dialog.FindName('StatusText').Text = $(if ($sessionState.ReadFailed) {
+      "$($sessionState.Reason) —— 这不等于没有记录"
+    } else { "共 $($rows.Count) 条有效记录 · 按时间倒序 · 未使用工具的记录也会保留并明确标注" })
   $panel = $dialog.FindName('ItemsPanel')
   if (-not $rows.Count) {
-    $empty = New-Text '暂无有效历史记录。运行游戏并保持一段稳定对局后，这里会自动出现记录。' $script:C.TextSec 13
+    # 读不出来时绝不能说「运行游戏就会出现」——那是一条永远兑现不了的承诺
+    $empty = New-Text $(if ($sessionState.ReadFailed) {
+        "读不出已有的性能记录，所以这里是空的 —— 这不等于没有记录。`n请导出诊断信息，或删掉 config\performance-sessions.json 重新开始（旧记录将丢失）。"
+      } else { '暂无有效历史记录。运行游戏并保持一段稳定对局后，这里会自动出现记录。' }) $script:C.TextSec 13
     $empty.TextWrapping = 'Wrap'; $empty.HorizontalAlignment = 'Center'; $empty.Margin = '18,70,18,0'
     [void]$panel.Children.Add($empty)
   } else {
@@ -5397,8 +5419,23 @@ public static class DfbForegroundWindow {
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $old = @()
     if (Test-Path -LiteralPath $SessionFile) {
-      $decoded = Get-Content -LiteralPath $SessionFile -Raw -Encoding UTF8 | ConvertFrom-Json
-      $old = @(Expand-PerformanceSessions $decoded)
+      # 这一句原来没有自己的 catch：旧文件坏了会让**整次写入**被外层 try 静默放弃，
+      # 于是新记录也存不进去 —— 用户一局一局地打，每一局都在收尾时被丢掉，
+      # 而界面一直说「运行游戏就会出现」。
+      # 坏文件改名留档后以空数组继续：宁可丢掉读不出来的旧记录，也不能连新的一起丢。
+      try {
+        $decoded = Get-Content -LiteralPath $SessionFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $old = @(Expand-PerformanceSessions $decoded)
+      } catch {
+        $corruptPath = "$SessionFile.corrupt-$((Get-Date).ToString('yyyyMMdd-HHmmss'))"
+        try {
+          Move-Item -LiteralPath $SessionFile -Destination $corruptPath -Force
+          Write-Log "[性能记录] 旧记录文件解析失败（$($_.Exception.Message)），已改名保留为 $(Split-Path -Leaf $corruptPath)，从本局起重新累积。"
+        } catch {
+          Write-Log "[性能记录] 旧记录文件解析失败且无法改名（$($_.Exception.Message)）；本局记录仍会写入，旧记录将被覆盖。"
+        }
+        $old = @()
+      }
     }
     $all = @($old) + $session
     if ($all.Count -gt 50) { $all = @($all | Select-Object -Last 50) }
@@ -9035,7 +9072,18 @@ $window.Add_ContentRendered({
     $ui.HwGrid.Children.Add((New-HwCard 'CPU' $cpuShort "$($hw.Cores)核 / $($hw.Threads)线程" -TemperatureKey 'cpu')) | Out-Null
     $ui.HwGrid.Children.Add((New-HwCard 'GPU' $gpu.Name "$($gpu.Vendor) · $(if (@($hw.Gpus).Count -gt 1) { '双显卡' } else { '单显卡' })" -Ribbon -TemperatureKey 'gpu')) | Out-Null
     $systemName = "$($hw.ComputerBrand) $($hw.ComputerModel)".Trim()
-    $ui.HwGrid.Children.Add((New-HwCard 'SYSTEM' $systemName "$($hw.RamGB) GB · $(if ($hw.IsLaptop) { '笔记本' } else { '台式机' }) · Build $($hw.Build)")) | Out-Null
+    # 机型是**三态**（laptop/desktop/unknown + 置信度），不是布尔。原来这里写的是
+    # `if ($hw.IsLaptop) { '笔记本' } else { '台式机' }` —— unknown 直接塌成「台式机」，
+    # 而这是屏幕上唯一露出机型的地方。一台机箱类型缺失、或合盖接扩展坞（内屏 inactive）
+    # 的笔记本会被笃定地写成「台式机」，用户没有理由怀疑；而「关闭休眠与快速启动」
+    # 正是靠这个判断决定要不要替他勾上的。
+    $formFactorLabel = Get-FormFactorLabel $hw
+    $systemCard = New-HwCard 'SYSTEM' $systemName "$($hw.RamGB) GB · $formFactorLabel · Build $($hw.Build)"
+    if ($formFactorLabel -ne '笔记本' -and $formFactorLabel -ne '台式机') {
+      $systemCard.ToolTip = '未能从 SMBIOS 机箱类型确定机型（常见于白牌本、部分整机厂 BIOS，或合盖接扩展坞时内屏处于非活动状态）。' +
+        "`n「关闭休眠与快速启动」因此不会替你默认勾选 —— 如果这是笔记本，勾上它会让合盖不再休眠。"
+    }
+    $ui.HwGrid.Children.Add($systemCard) | Out-Null
     $displayClass = Resolve-DisplayClassLabel ([int]$hw.DisplayWidth) ([int]$hw.DisplayHeight)
     $displayName = $(if ("$($hw.DisplayName)".Trim()) { "$($hw.DisplayName)".Trim() } else { '显示器' })
     $displayValue = $(if ($displayClass -in '1K','2K','4K') { "$displayClass · $displayName" } else { $displayClass })

@@ -17,6 +17,16 @@ $tokens = $null; $errors = $null
 $engineAst = [Management.Automation.Language.Parser]::ParseFile($enginePath,[ref]$tokens,[ref]$errors)
 Assert-True ($errors.Count -eq 0) ('engine AST parse failed: ' + (($errors | ForEach-Object Message) -join '; '))
 
+function Get-GuiFunctionText([string]$Name) {
+  $wanted = $Name
+  $found = @($guiAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $wanted
+  }, $true) | Select-Object -First 1)
+  if ($found.Count -ne 1) { throw "ASSERT FAILED: 界面里找不到函数 $Name" }
+  $found[0].Extent.Text
+}
+
 $raw = Get-Content -LiteralPath $guiPath -Raw -Encoding UTF8
 $engineRaw = Get-Content -LiteralPath $enginePath -Raw -Encoding UTF8
 Assert-True ($raw -match '(?s)<Grid>\s*<Grid\.ColumnDefinitions>\s*<ColumnDefinition Width="Auto"/>\s*<ColumnDefinition Width="\*"/>\s*<ColumnDefinition Width="Auto"/>\s*</Grid\.ColumnDefinitions>.*?x:Name="GameText" Grid\.Column="1".*?x:Name="BrowseBtn" Grid\.Column="2"') `
@@ -252,5 +262,180 @@ try {
 } finally { $cpuSampler.Dispose() }
 $memory = [DfbLiveSystemMetrics]::ReadMemoryUsage()
 Assert-True (-not [double]::IsNaN($memory) -and $memory -ge 0 -and $memory -le 100) 'memory usage probe returned an invalid value'
+
+
+# ---------------------------------------------------------------------------
+#  机型三态必须一路走到屏幕上
+# ---------------------------------------------------------------------------
+#
+# Resolve-FormFactor 是**刻意做的三态**（laptop / desktop / unknown + 置信度），
+# 引擎明确拒绝在证据不足时猜机型。但界面原来把它塌成布尔 `$hw.IsLaptop`：
+# unknown 直接显示成「台式机」，而这是屏幕上唯一露出机型的地方 —— 用户没有理由怀疑。
+# 下游更要命：`hibernate-off` 的默认勾选是 `-not $hw.IsLaptop`，于是一台
+# 机箱类型缺失（白牌本）、或**合盖接扩展坞**（内屏 inactive）的笔记本，
+# 会被**默认勾上**「关闭休眠与快速启动」——hiberfil.sys 被删、合盖不再休眠。
+. $enginePath
+
+$formFactorCases = @(
+  @{ Name='真台式机';                 Chassis=@(3);    Battery=$false; Internal=$false; Label='台式机';     HibDefault=$true  },
+  @{ Name='真笔记本';                 Chassis=@(10);   Battery=$true;  Internal=$true;  Label='笔记本';     HibDefault=$false },
+  @{ Name='机箱类型缺失（白牌本）';   Chassis=@();     Battery=$null;  Internal=$null;  Label='机型未确认'; HibDefault=$false },
+  @{ Name='合盖接扩展坞（内屏非活动）'; Chassis=@();   Battery=$true;  Internal=$false; Label='机型未确认'; HibDefault=$false },
+  @{ Name='变形本（机箱类型自相矛盾）'; Chassis=@(3,10); Battery=$true; Internal=$true; Label='机型未确认'; HibDefault=$false },
+  @{ Name='台式机接 UPS';             Chassis=@(3);    Battery=$true;  Internal=$false; Label='台式机';     HibDefault=$true  }
+)
+foreach ($ffCase in $formFactorCases) {
+  $ff = Resolve-FormFactor $ffCase.Chassis $ffCase.Battery $ffCase.Internal
+  $hwProbe = [pscustomobject]@{
+    FormFactor = "$($ff.FormFactor)"; FormFactorConfidence = "$($ff.Confidence)"
+    IsUpsAmbiguous = [bool]$ff.IsUpsAmbiguous; IsLaptop = ($ff.FormFactor -eq 'laptop')
+  }
+  Assert-True ((Get-FormFactorLabel $hwProbe) -eq $ffCase.Label) `
+    "$($ffCase.Name)：卡片应显示「$($ffCase.Label)」，实际「$(Get-FormFactorLabel $hwProbe)」"
+  # hibernate-off 的默认勾选判据必须是「**确认**是台式机」，不是「不是笔记本」
+  $hibDefault = [bool]($hwProbe -and "$($hwProbe.FormFactor)" -eq 'desktop')
+  Assert-True ($hibDefault -eq $ffCase.HibDefault) `
+    "$($ffCase.Name)：「关闭休眠与快速启动」的默认勾选应为 $($ffCase.HibDefault)，实际 $hibDefault"
+}
+# 判不出机型时绝不能预先勾上 —— 这条单独钉死，上面那张表改坏了也还有它
+$unknownProbe = [pscustomobject]@{ FormFactor='unknown'; FormFactorConfidence='low'; IsUpsAmbiguous=$false; IsLaptop=$false }
+Assert-True ((Get-FormFactorLabel $unknownProbe) -notin '笔记本','台式机') `
+  '机型 unknown 时卡片仍然说出了一个确定的机型'
+Assert-True ($engineRaw.Contains("Default = [bool](`$hw -and `"`$(`$hw.FormFactor)`" -eq 'desktop')")) `
+  '「关闭休眠与快速启动」的默认勾选又回到了 -not $hw.IsLaptop —— unknown 会被当成台式机替用户勾上'
+# 性能历史：「没有记录」和「读不出来」必须分开。
+# 写入侧和读取侧原来共用同一句解析，旧文件坏了会让**新记录也存不进去**，
+# 而界面一直说「运行游戏就会出现」—— 一条永远兑现不了的承诺。
+& {
+  foreach ($fn in 'Read-PerformanceSessionsState') { Invoke-Expression (Get-GuiFunctionText $fn) }
+  function Expand-PerformanceSessions($Decoded) { @($Decoded) }
+  $probeDir = Join-Path ([IO.Path]::GetTempPath()) ("dfb-perf-" + [guid]::NewGuid().ToString('N'))
+  [void][IO.Directory]::CreateDirectory($probeDir)
+  try {
+    $missing = Join-Path $probeDir 'none.json'
+    $st = Read-PerformanceSessionsState $missing
+    Assert-True (-not $st.ReadFailed -and @($st.Sessions).Count -eq 0) '文件不存在应是「没有记录」，不是「读不出来」'
+
+    $broken = Join-Path $probeDir 'broken.json'
+    [IO.File]::WriteAllText($broken, '[{"a":1', (New-Object Text.UTF8Encoding($false)))
+    $st2 = Read-PerformanceSessionsState $broken
+    Assert-True ($st2.ReadFailed -and "$($st2.Reason)" -like '*读取失败*') `
+      'JSON 被截断时必须报「读不出来」，不能和「还没有记录」收敛成同一种呈现'
+
+    $good = Join-Path $probeDir 'good.json'
+    [IO.File]::WriteAllText($good, '[{"a":1}]', (New-Object Text.UTF8Encoding($false)))
+    $st3 = Read-PerformanceSessionsState $good
+    Assert-True (-not $st3.ReadFailed -and @($st3.Sessions).Count -eq 1) '正常文件应能读出记录'
+  } finally { Remove-Item -LiteralPath $probeDir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+# 界面必须把这个区分**用出来**，而不是读了就扔。
+# 这里查关系不查字面量：只断言 '$sessionState.ReadFailed' 这串字存在的话，
+# 把赋值那一行换成写死的 @{ReadFailed=$false} 仍然全绿（下面两处引用还在）——
+# 这个坑本轮已经踩过三次了。
+foreach ($perfFn in 'Show-PerformanceMetricHistory', 'Refresh-PerformanceComparison') {
+  $wantedPerfFn = $perfFn
+  $perfFnAst = @($guiAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $wantedPerfFn
+  }, $true) | Select-Object -First 1)
+  Assert-True ($perfFnAst.Count -eq 1) "找不到函数 $perfFn"
+  $perfReads = @($perfFnAst[0].FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+    "$($node.GetCommandName())" -eq 'Read-PerformanceSessionsState'
+  }, $true))
+  Assert-True ($perfReads.Count -ge 1) `
+    "$perfFn 没有走 Read-PerformanceSessionsState —— 「没有记录」和「读不出来」又被压成同一种呈现"
+}
+Assert-True ($raw.Contains('这不等于没有记录')) '读不出来时仍然可能被当成「还没有记录」'
+
+# 写入侧：旧文件坏了不能把新记录一起丢掉。
+# 同样查结构 —— 那句解析必须被**自己的** try/catch 包住，而不是只靠外层那个
+# （外层一接住，整次写入就被静默放弃，新记录也存不进去）。
+$captureWorkerAst = @($guiAst.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+  "$($node.Left)" -eq '$script:PerformanceCaptureWorker'
+}, $true) | Select-Object -First 1)
+Assert-True ($captureWorkerAst.Count -eq 1) '找不到性能采集 worker'
+$guardedParse = @($captureWorkerAst[0].FindAll({
+  param($node)
+  # 必须同时钉住 catch 里那个改名动作：只要求「body 含 Expand-PerformanceSessions 且有
+  # catch」的话，**外层**那个包住整次写入的 try 也满足 —— 而它正是要防的那一个。
+  $node -is [Management.Automation.Language.TryStatementAst] -and
+  $node.Body.Extent.Text.Contains('Expand-PerformanceSessions') -and
+  @($node.CatchClauses).Count -ge 1 -and
+  (@($node.CatchClauses) | Where-Object { $_.Extent.Text.Contains('corrupt-') }).Count -ge 1
+}, $true))
+Assert-True ($guardedParse.Count -ge 1) `
+  '旧记录文件的解析没有被自己的 try/catch 包住 —— 文件一坏，整次写入被外层静默放弃，新记录也存不进去'
+Assert-True ($raw.Contains('.corrupt-') -and $raw.Contains('从本局起重新累积')) `
+  '旧记录文件解析失败后没有改名留档并继续累积'
+
+# 「着色器缓存读不出来」不能说成「没有缓存」。清理着色器缓存是「进游戏后每隔十几秒
+# 卡 2~3 秒」唯一对症的那一项 —— 把「我不知道」说成「没有」，等于把最需要它的人
+# 从它面前赶走。（缓存目录可能是目录联接或被权限挡住，Get-SafeFilesUnderRoot 会把它
+# 计进 .Rejected 并返回空文件表。）
+& {
+  $cacheItem = @{ Kind = 'cache' }
+  $originalDirs = ${function:Get-ShaderCacheDirs}
+  $originalScan = ${function:Get-SafeFilesUnderRoot}
+  try {
+    function Get-ShaderCacheDirs { @([pscustomobject]@{ Path = $env:TEMP; Scope = 'user' }) }
+
+    function Get-SafeFilesUnderRoot([string]$Root) { [pscustomobject]@{ Files=@(); Rejected=@($Root) } }
+    $blockedText = "$((Get-ItemState $cacheItem).Current)"
+    Assert-True ($blockedText -like '*读不出来*' -and $blockedText -like '*这不等于没有缓存*') `
+      "缓存目录读不出来时说成了「$blockedText」—— 那是把「我不知道」说成了「没有」"
+
+    function Get-SafeFilesUnderRoot([string]$Root) { [pscustomobject]@{ Files=@(); Rejected=@() } }
+    Assert-True ("$((Get-ItemState $cacheItem).Current)" -eq '当前无缓存可清理') `
+      '确实读到 0 且全部可读时，就该直说没有缓存可清理'
+
+    function Get-SafeFilesUnderRoot([string]$Root) {
+      [pscustomobject]@{ Files=@([pscustomobject]@{ Length = 5MB }); Rejected=@() }
+    }
+    Assert-True ("$((Get-ItemState $cacheItem).Current)" -like '*约 5MB*') '有缓存时应报出占用量'
+
+    function Get-SafeFilesUnderRoot([string]$Root) {
+      [pscustomobject]@{ Files=@([pscustomobject]@{ Length = 5MB }); Rejected=@('X') }
+    }
+    $mixedText = "$((Get-ItemState $cacheItem).Current)"
+    Assert-True ($mixedText -like '*约 5MB*' -and $mixedText -like '*读不出来*') `
+      '部分目录读不出来时，报出来的占用量必须同时说明它可能不完整'
+  } finally {
+    Set-Item -LiteralPath Function:\Get-ShaderCacheDirs -Value $originalDirs
+    Set-Item -LiteralPath Function:\Get-SafeFilesUnderRoot -Value $originalScan
+  }
+}
+
+# 显卡指引的「检测依据」那一行同样不能硬写台式机：它给出的是一个用户无从质疑的前提，
+# 而「笔记本补充」（插电、厂商性能模式、别靠提高功耗上限硬撑）会因此整段消失。
+$unknownHw = [pscustomobject]@{
+  FormFactor='unknown'; FormFactorConfidence='low'; IsUpsAmbiguous=$false; IsLaptop=$false
+  DisplayWidth=1920; DisplayHeight=1080; DisplayRefreshHz=144; RamGB=16
+}
+$unknownGuide = Get-AmdConfiguredGuideText $unknownHw 'Radeon RX 7800 XT' $false
+Assert-True ($unknownGuide -match '检测依据：[^
+]*机型未确认') `
+  '机型未确认时，显卡指引的「检测依据」仍然笃定地写着台式机'
+Assert-True ($unknownGuide.Contains('如果这是笔记本')) `
+  '机型未确认时，笔记本那几条补充被整段跳过了 —— 判不出来就该两边都说'
+$desktopGuide = Get-AmdConfiguredGuideText ([pscustomobject]@{
+  FormFactor='desktop'; FormFactorConfidence='high'; IsUpsAmbiguous=$false; IsLaptop=$false
+  DisplayWidth=1920; DisplayHeight=1080; DisplayRefreshHz=144; RamGB=16 }) 'Radeon RX 7800 XT' $false
+Assert-True ($desktopGuide -match '检测依据：[^
+]*台式机') '确认是台式机时就该直说台式机'
+Assert-True (-not $desktopGuide.Contains('如果这是笔记本')) '机型确定时不该再给「如果这是笔记本」的兜底'
+
+# 界面必须用三态文案，不能再自己写 if ($hw.IsLaptop) { '笔记本' } else { '台式机' }。
+# 注意：这条只能钉**构造那一行**，不能全文搜 —— 解释这段历史的注释里就有那串字，
+# 全文搜会命中注释自己（这个坑在本仓库已经踩过一次）。
+$systemCardLine = @($raw -split "`r?`n" | Where-Object { $_ -match "New-HwCard 'SYSTEM'" })
+Assert-True ($systemCardLine.Count -eq 1) '找不到 SYSTEM 硬件卡的构造行'
+Assert-True ($systemCardLine[0].Contains('$formFactorLabel')) `
+  'SYSTEM 硬件卡没有使用三态机型文案'
+Assert-True (-not $systemCardLine[0].Contains('IsLaptop')) `
+  'SYSTEM 硬件卡又把机型塌回了布尔 IsLaptop'
 
 'UI hardware dashboard tests passed.'
