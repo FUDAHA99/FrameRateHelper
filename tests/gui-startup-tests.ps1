@@ -1196,4 +1196,170 @@ foreach ($disabledProbe in @(
   $probeControl.IsEnabled = $true
 }
 
+# ---------------------------------------------------------------------------
+#  诊断报告第 1 页的两个「全选」
+# ---------------------------------------------------------------------------
+#
+# 「遇到的问题」有 19 项、「优化后已有改善」有 10 项，原来一个全选入口都没有：
+# 想说明情况复杂的用户得点 19 下，而这一页还硬性要求至少勾一项才能继续。
+#
+# 这一整段都不查源码里有没有那个按钮，而是把对话框那段 XAML 原样解析出来、
+# 把**真的接线上去的那个处理器**跑一遍，再读真控件的状态和布局。
+$feedbackFn = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+  $node.Name -eq 'Show-DiagnosticFeedbackDialog'
+}, $true) | Select-Object -First 1)
+Assert-True ($feedbackFn.Count -eq 1) '找不到诊断反馈对话框'
+$feedbackXaml = [regex]::Match($feedbackFn[0].Extent.Text, '(?s)\$fxaml\s*=\s*@''\r?\n(.*?)\r?\n''@')
+Assert-True $feedbackXaml.Success '找不到诊断反馈对话框的 XAML'
+$feedbackDlgProbe = [Windows.Markup.XamlReader]::Parse($feedbackXaml.Groups[1].Value)
+
+$script:FeedbackIssuePanel = $feedbackDlgProbe.FindName('IssuePanel')
+$script:FeedbackBenefitPanel = $feedbackDlgProbe.FindName('BenefitPanel')
+$script:FeedbackIssueAllBtn = $feedbackDlgProbe.FindName('IssueAllBtn')
+$script:FeedbackBenefitAllBtn = $feedbackDlgProbe.FindName('BenefitAllBtn')
+Assert-True ($null -ne $script:FeedbackIssueAllBtn -and $null -ne $script:FeedbackBenefitAllBtn) `
+  '诊断反馈对话框的两列没有全选按钮 —— 「遇到的问题」19 项要一项一项点'
+# 真代码给这两个按钮套的是主窗口的 Ghost 样式，量布局就得照着套，否则量的是另一个东西
+foreach ($feedbackStyled in @($script:FeedbackIssueAllBtn, $script:FeedbackBenefitAllBtn)) {
+  $feedbackStyled.Style = $mainXamlWindow.FindResource('Ghost')
+}
+
+foreach ($feedbackFnName in 'Test-FeedbackGroupAllChecked', 'Update-FeedbackSelectAllButtons',
+                            'Switch-FeedbackGroupSelection') {
+  $wantedFeedbackFn = $feedbackFnName
+  $feedbackHelper = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $wantedFeedbackFn
+  }, $true) | Select-Object -First 1)
+  Assert-True ($feedbackHelper.Count -eq 1) "找不到函数 $feedbackFnName"
+  Invoke-Expression $feedbackHelper[0].Extent.Text
+}
+
+# 空组不能算「已全选」：@($null).Count 在 PS 5.1 里是 1，这里判错的话按钮一开始
+# 就写着「全不选」，点一下什么也不会发生。
+Assert-True (-not (Test-FeedbackGroupAllChecked $script:FeedbackIssuePanel)) `
+  '空的选择组被当成了「已全部勾选」'
+
+foreach ($feedbackRowCount in @(@{ Panel=$script:FeedbackIssuePanel; N=19 },
+                                @{ Panel=$script:FeedbackBenefitPanel; N=10 })) {
+  for ($fi = 0; $fi -lt $feedbackRowCount.N; $fi++) {
+    $feedbackRowCount.Panel.Children.Add((New-Object Windows.Controls.CheckBox)) | Out-Null
+  }
+}
+Update-FeedbackSelectAllButtons
+Assert-True ("$($script:FeedbackIssueAllBtn.Content)" -eq '全选') '一项没勾时按钮不该写着「全不选」'
+
+# 跑的是**真的挂到按钮上的那个**处理器，不是测试自己写的一份
+$feedbackAllClicks = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+  "$($node.Member)" -eq 'Add_Click' -and
+  "$($node.Expression)" -like '$script:Feedback*AllBtn'
+}, $true))
+Assert-True ($feedbackAllClicks.Count -eq 2) `
+  "两列的全选按钮只接线了 $($feedbackAllClicks.Count) 个 —— 按钮在屏幕上，点下去没反应"
+$feedbackIssueClick = @($feedbackAllClicks | Where-Object {
+  "$($_.Expression)" -eq '$script:FeedbackIssueAllBtn' } | Select-Object -First 1)
+Assert-True ($feedbackIssueClick.Count -eq 1) '「遇到的问题」那列的全选按钮没有接线'
+$feedbackIssueHandler = $feedbackIssueClick[0].Arguments[0].ScriptBlock.GetScriptBlock()
+
+& $feedbackIssueHandler
+Assert-True (@($script:FeedbackIssuePanel.Children | Where-Object { $_.IsChecked -eq $true }).Count -eq 19) `
+  '点「全选」之后 19 项没有全部勾上'
+Assert-True ("$($script:FeedbackIssueAllBtn.Content)" -eq '全不选') `
+  '全部勾上之后按钮还写着「全选」—— 用户想一键清空只能一项一项点回去'
+# 两组语义完全不同（「我遇到了什么」vs「我获得了什么改善」），一列的全选不能波及另一列
+Assert-True (@($script:FeedbackBenefitPanel.Children | Where-Object { $_.IsChecked -eq $true }).Count -eq 0) `
+  '「遇到的问题」的全选把「优化后已有改善」也一起勾了 —— 等于替用户声称他获得了全部改善'
+Assert-True ("$($script:FeedbackBenefitAllBtn.Content)" -eq '全选') '另一列的按钮文字被带着改了'
+
+& $feedbackIssueHandler
+Assert-True (@($script:FeedbackIssuePanel.Children | Where-Object { $_.IsChecked -eq $true }).Count -eq 0) `
+  '再点一次没有全部取消 —— 这个按钮必须是开关，不是一次性动作'
+Assert-True ("$($script:FeedbackIssueAllBtn.Content)" -eq '全选') '全部取消之后按钮还写着「全不选」'
+
+# 另一列的按钮也得**自己**跑一遍：两个按钮接到同一个面板上，只驱动其中一个是看不出来的
+$feedbackBenefitClick = @($feedbackAllClicks | Where-Object {
+  "$($_.Expression)" -eq '$script:FeedbackBenefitAllBtn' } | Select-Object -First 1)
+Assert-True ($feedbackBenefitClick.Count -eq 1) '「优化后已有改善」那列的全选按钮没有接线'
+$feedbackBenefitHandler = $feedbackBenefitClick[0].Arguments[0].ScriptBlock.GetScriptBlock()
+& $feedbackBenefitHandler
+Assert-True (@($script:FeedbackBenefitPanel.Children | Where-Object { $_.IsChecked -eq $true }).Count -eq 10) `
+  '点「优化后已有改善」的全选之后 10 项没有全部勾上'
+Assert-True (@($script:FeedbackIssuePanel.Children | Where-Object { $_.IsChecked -eq $true }).Count -eq 0) `
+  '「优化后已有改善」的全选把「遇到的问题」也一起勾了 —— 两个按钮接到了同一个面板上'
+Assert-True ("$($script:FeedbackBenefitAllBtn.Content)" -eq '全不选' -and
+             "$($script:FeedbackIssueAllBtn.Content)" -eq '全选') '两列的按钮文字串了'
+& $feedbackBenefitHandler
+Assert-True (@($script:FeedbackBenefitPanel.Children | Where-Object { $_.IsChecked -eq $true }).Count -eq 0) `
+  '「优化后已有改善」再点一次没有全部取消'
+
+# 手动勾满最后一项时按钮文字也要跟上：代码改 IsChecked 不触发 Click，反过来手点会。
+$feedbackRowClick = @($feedbackFn[0].FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+  "$($node.Member)" -eq 'Add_Click' -and "$($node.Expression)" -eq '$cb'
+}, $true) | Select-Object -First 1)
+Assert-True ($feedbackRowClick.Count -eq 1) `
+  '逐项勾选没有通知全选按钮 —— 手动勾满 19 项之后按钮仍写着「全选」，再点一下反而全清了'
+$feedbackRowHandler = $feedbackRowClick[0].Arguments[0].ScriptBlock.GetScriptBlock()
+foreach ($feedbackRow in @($script:FeedbackIssuePanel.Children)) { $feedbackRow.IsChecked = $true }
+& $feedbackRowHandler
+Assert-True ("$($script:FeedbackIssueAllBtn.Content)" -eq '全不选') `
+  '手动勾满之后按钮文字没跟上 —— 点下去会全清，和它写的字正好相反'
+foreach ($feedbackRow in @($script:FeedbackIssuePanel.Children)) { $feedbackRow.IsChecked = $false }
+Update-FeedbackSelectAllButtons
+
+# 列宽：这个对话框是写死的 700 宽、ResizeMode=NoResize，所以量一次就够。
+# 标题「优化后已有改善（可多选）」比按钮先占位，挤不下时 WPF 不会报错，只会让两者重叠。
+$feedbackDlgContent = $feedbackDlgProbe.Content
+$feedbackDlgProbe.Content = $null
+foreach ($feedbackLabelState in '全选', '全不选') {
+  $script:FeedbackIssueAllBtn.Content = $feedbackLabelState
+  $script:FeedbackBenefitAllBtn.Content = $feedbackLabelState
+  $feedbackDlgContent.Measure((New-Object Windows.Size 700, 650))
+  $feedbackDlgContent.Arrange((New-Object Windows.Rect 0, 0, 700, 650))
+  $feedbackDlgContent.UpdateLayout()
+  foreach ($feedbackPair in @(
+    @{ Btn=$script:FeedbackIssueAllBtn; Title='遇到的问题（可多选）' },
+    @{ Btn=$script:FeedbackBenefitAllBtn; Title='优化后已有改善（可多选）' })) {
+    $feedbackBtn = $feedbackPair.Btn
+    $feedbackTitle = @($feedbackBtn.Parent.Children | Where-Object {
+      $_ -is [Windows.Controls.TextBlock] -and "$($_.Text)" -eq $feedbackPair.Title })[0]
+    Assert-True ($null -ne $feedbackTitle) "找不到列标题「$($feedbackPair.Title)」"
+    # 标题和按钮分属两列，压不到一起；真正剩下的风险是标题被挤成省略号。
+    # 拿一个同样字体字号的离屏 TextBlock 量出这行字的自然宽度再比。
+    $feedbackRuler = New-Object Windows.Controls.TextBlock
+    $feedbackRuler.Text = $feedbackPair.Title
+    $feedbackRuler.FontSize = $feedbackTitle.FontSize
+    $feedbackRuler.FontWeight = $feedbackTitle.FontWeight
+    $feedbackRuler.FontFamily = $feedbackTitle.FontFamily
+    $feedbackRuler.Measure((New-Object Windows.Size ([double]::PositiveInfinity), ([double]::PositiveInfinity)))
+    # 先钉结构：标题和按钮必须各占一列。同在一格时 TextBlock 会拉伸占满整格、
+    # 直接压在按钮底下画，而今天这几个字恰好还没长到撞上按钮 —— 也就是说
+    # 「有没有被裁」这条查不出来，得量它们各自**分到**的宽度加起来有没有超格。
+    $feedbackHeaderGrid = $feedbackBtn.Parent
+    $feedbackAllotted = $feedbackTitle.ActualWidth + $feedbackBtn.ActualWidth + $feedbackBtn.Margin.Left
+    Assert-True ($feedbackAllotted -le $feedbackHeaderGrid.ActualWidth + 0.5) `
+      ("列标题「$($feedbackPair.Title)」和全选按钮挤在同一格里（两者分到 " +
+       "$([math]::Round($feedbackAllotted,1))，整格只有 $([math]::Round($feedbackHeaderGrid.ActualWidth,1))）—— " +
+       '标题一变长就会直接压在按钮上，WPF 不报错也不截断')
+    Assert-True ($feedbackTitle.ActualWidth -ge $feedbackRuler.DesiredSize.Width) `
+      ("按钮写「$feedbackLabelState」时把列标题「$($feedbackPair.Title)」挤成了省略号" +
+       "（给了 $([math]::Round($feedbackTitle.ActualWidth,1))，这行字要 $([math]::Round($feedbackRuler.DesiredSize.Width,1))）")
+    # 按钮宽度是写死的 64，而「全不选」比「全选」宽一个字。24 = Ghost 模板里
+    # ContentPresenter 的左右 Margin（12,0），文字能用的只有 64-24。
+    $feedbackBtnRuler = New-Object Windows.Controls.TextBlock
+    $feedbackBtnRuler.Text = $feedbackLabelState
+    $feedbackBtnRuler.FontSize = $feedbackBtn.FontSize
+    $feedbackBtnRuler.FontFamily = $feedbackBtn.FontFamily
+    $feedbackBtnRuler.Measure((New-Object Windows.Size ([double]::PositiveInfinity), ([double]::PositiveInfinity)))
+    Assert-True ($feedbackBtn.ActualWidth -ge $feedbackBtnRuler.DesiredSize.Width + 24) `
+      ("按钮写「$feedbackLabelState」时它自己的文字被裁掉了" +
+       "（宽 $([math]::Round($feedbackBtn.ActualWidth,1))，这三个字加模板留白要 $([math]::Round($feedbackBtnRuler.DesiredSize.Width + 24,1))）")
+  }
+}
+
 Write-Host 'PASS: GUI UAC recovery and WinPS5.1 Generic.List result paths are regression covered'

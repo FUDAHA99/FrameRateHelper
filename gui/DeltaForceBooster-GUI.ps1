@@ -6433,6 +6433,35 @@ $script:DiagnosticBenefitChoices = @(
 
 # “导出完整诊断”的第一步：先让用户标记当前问题和已经感受到的改善。两组都支持多选；
 # 至少选择一项才进入隐私确认页，避免收到没有反馈上下文的完整诊断。
+# 「全选」在这里是一个开关，不是一次性动作：整组都勾上之后它变成「全不选」，
+# 否则用户勾满 19 项之后想全部清掉，只能一个一个点回去。两列各一个，互不影响 ——
+# 「遇到的问题」和「优化后已有改善」是两个语义完全不同的组，合成一个按钮等于
+# 让用户一键声称自己既遇到了全部问题、又获得了全部改善。
+function Test-FeedbackGroupAllChecked($Panel) {
+  if (-not $Panel) { return $false }
+  $rows = @($Panel.Children)
+  if ($rows.Count -eq 0) { return $false }
+  (@($rows | Where-Object { $_.IsChecked -eq $true }).Count -eq $rows.Count)
+}
+
+function Update-FeedbackSelectAllButtons {
+  foreach ($pair in @(
+    @($script:FeedbackIssuePanel, $script:FeedbackIssueAllBtn),
+    @($script:FeedbackBenefitPanel, $script:FeedbackBenefitAllBtn))) {
+    if ((-not $pair[0]) -or (-not $pair[1])) { continue }
+    # 文字必须跟着状态走：按钮写着「全选」而点下去是清空，比没有这个按钮更糟
+    $pair[1].Content = $(if (Test-FeedbackGroupAllChecked $pair[0]) { '全不选' } else { '全选' })
+  }
+}
+
+function Switch-FeedbackGroupSelection($Panel) {
+  if (-not $Panel) { return }
+  $on = -not (Test-FeedbackGroupAllChecked $Panel)
+  foreach ($row in @($Panel.Children)) { $row.IsChecked = $on }
+  # 代码改 IsChecked 不会触发 Click，按钮文字得自己刷
+  Update-FeedbackSelectAllButtons
+}
+
 function Show-DiagnosticFeedbackDialog {
   $fxaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -6506,14 +6535,28 @@ function Show-DiagnosticFeedbackDialog {
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
           <Border Grid.Column="0" Background="{DynamicResource LogBg}" BorderBrush="{DynamicResource Line}" BorderThickness="1" Padding="11">
             <StackPanel>
-              <TextBlock Text="遇到的问题（可多选）" Foreground="{DynamicResource Gold}" FontSize="13" FontWeight="Bold"/>
+              <!-- 必须是两列：单列 Grid 里 TextBlock 会拉伸占满整格，标题一长就直接钻到
+                   按钮底下压着画，WPF 不会报错也不会截断。和优化项那张表的列名是同一个坑。 -->
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="遇到的问题（可多选）" Foreground="{DynamicResource Gold}" FontSize="13"
+                           FontWeight="Bold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                <Button Grid.Column="1" x:Name="IssueAllBtn" Content="全选" VerticalAlignment="Center"
+                        Width="64" Height="22" FontSize="11" Margin="8,0,0,0"/>
+              </Grid>
               <TextBlock Text="CURRENT PROBLEMS" Foreground="{DynamicResource TextMut}" FontFamily="Consolas" FontSize="9" Margin="0,2,0,9"/>
               <StackPanel x:Name="IssuePanel"/>
             </StackPanel>
           </Border>
           <Border Grid.Column="2" Background="{DynamicResource LogBg}" BorderBrush="{DynamicResource Line}" BorderThickness="1" Padding="11">
             <StackPanel>
-              <TextBlock Text="优化后已有改善（可多选）" Foreground="{DynamicResource Green}" FontSize="13" FontWeight="Bold"/>
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="优化后已有改善（可多选）" Foreground="{DynamicResource Green}" FontSize="13"
+                           FontWeight="Bold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                <Button Grid.Column="1" x:Name="BenefitAllBtn" Content="全选" VerticalAlignment="Center"
+                        Width="64" Height="22" FontSize="11" Margin="8,0,0,0"/>
+              </Grid>
               <TextBlock Text="IMPROVEMENTS" Foreground="{DynamicResource TextMut}" FontFamily="Consolas" FontSize="9" Margin="0,2,0,9"/>
               <StackPanel x:Name="BenefitPanel"/>
             </StackPanel>
@@ -6537,6 +6580,8 @@ function Show-DiagnosticFeedbackDialog {
   $script:FeedbackDlg.Owner = $window
   $script:FeedbackIssuePanel = $script:FeedbackDlg.FindName('IssuePanel')
   $script:FeedbackBenefitPanel = $script:FeedbackDlg.FindName('BenefitPanel')
+  $script:FeedbackIssueAllBtn = $script:FeedbackDlg.FindName('IssueAllBtn')
+  $script:FeedbackBenefitAllBtn = $script:FeedbackDlg.FindName('BenefitAllBtn')
   foreach ($group in @(
     [pscustomobject]@{ Panel = $script:FeedbackIssuePanel; Choices = $script:DiagnosticIssueChoices }
     [pscustomobject]@{ Panel = $script:FeedbackBenefitPanel; Choices = $script:DiagnosticBenefitChoices }
@@ -6551,8 +6596,20 @@ function Show-DiagnosticFeedbackDialog {
       $label.Foreground = New-Brush $script:C.TextPri
       $label.FontSize = 11
       $cb.Content = $label
+      # 手动勾选之后按钮文字要跟着变（勾满最后一项 → 变成「全不选」）
+      $cb.Add_Click({ Update-FeedbackSelectAllButtons })
       $group.Panel.Children.Add($cb) | Out-Null
     }
+  }
+  foreach ($allBtn in @($script:FeedbackIssueAllBtn, $script:FeedbackBenefitAllBtn)) {
+    if ($allBtn) { $allBtn.Style = $window.FindResource('Ghost') }
+  }
+  Update-FeedbackSelectAllButtons
+  if ($script:FeedbackIssueAllBtn) {
+    $script:FeedbackIssueAllBtn.Add_Click({ Switch-FeedbackGroupSelection $script:FeedbackIssuePanel })
+  }
+  if ($script:FeedbackBenefitAllBtn) {
+    $script:FeedbackBenefitAllBtn.Add_Click({ Switch-FeedbackGroupSelection $script:FeedbackBenefitPanel })
   }
   $script:FeedbackDlg.FindName('CancelBtn').Style = $window.FindResource('Ghost')
   $script:FeedbackDlg.FindName('NextBtn').Style = $window.FindResource('Primary')
