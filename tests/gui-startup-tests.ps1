@@ -968,4 +968,19 @@ Assert-True ($startupSection.Contains('Set-BusyState $true') -and $startupSectio
 Assert-True ($raw.Contains('$ui.SymptomClearBtn.IsEnabled = ($active.Count -gt 0) -and -not $script:Busy')) `
   'Update-SymptomFilterUi 会在忙碌期把 SymptomClearBtn 重新启用 —— 普通刷新不该能撤销 Set-BusyState'
 
+# 自绘标题栏（WindowStyle="None"）没有系统的最大化按钮，补出来的那个必须同时带上
+# 工作区约束：无边框窗口一旦 Maximized，默认会铺满整个屏幕**连任务栏一起盖掉**。
+# 这条约束是纯 interop，界面上看不出来，最容易在后续重构里被当成「没人用的代码」删掉。
+Assert-True ($raw.Contains('x:Name="MaxBtn"')) '标题栏没有最大化按钮'
+Assert-True ($raw.Contains('0x0024')) `
+  '最大化没有处理 WM_GETMINMAXINFO —— 最大化后会盖住任务栏'
+# 钉**调用点**连同那个 flag，不是钉「MonitorFromWindow 这个词出现过」：
+# 只查词的话，把 DllImport 删掉、函数体里的调用留着，断言照样绿。
+# 2 = MONITOR_DEFAULTTONEAREST：窗口跨屏时取重叠最多的那台。
+Assert-True ($raw.Contains('MonitorFromWindow(hwnd, 2)') -and $raw.Contains('rcWork')) `
+  '工作区约束没有按**窗口所在的那台显示器**算 —— 多屏用户在副屏最大化会错位'
+Assert-True ($raw.Contains('if ($_.ClickCount -eq 2)')) '双击标题栏不能最大化/还原'
+Assert-True ($raw.Contains('$window.Add_StateChanged')) `
+  '最大化后按钮图标不跟着变 —— 用户不知道怎么退出最大化'
+
 Write-Host 'PASS: GUI UAC recovery and WinPS5.1 Generic.List result paths are regression covered'

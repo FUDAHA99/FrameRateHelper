@@ -1030,8 +1030,12 @@ $xaml = @'
               </ControlTemplate>
             </Button.Template>
           </Button>
-          <Button x:Name="MinBtn" Content="—" Style="{StaticResource WinBtn}"/>
-          <Button x:Name="CloseBtn" Content="✕" Style="{StaticResource WinBtn}"/>
+          <Button x:Name="MinBtn" Content="—" Style="{StaticResource WinBtn}" ToolTip="最小化"/>
+          <!-- 窗口是 WindowStyle="None" 自绘标题栏，系统的最大化按钮不存在，得自己补。
+               直接给 WindowState=Maximized 会盖住任务栏（无边框窗口的经典坑），
+               所以另有一段 WM_GETMINMAXINFO 钩子把它限制在当前显示器的工作区内。 -->
+          <Button x:Name="MaxBtn" Content="☐" Style="{StaticResource WinBtn}" ToolTip="最大化"/>
+          <Button x:Name="CloseBtn" Content="✕" Style="{StaticResource WinBtn}" ToolTip="关闭"/>
         </StackPanel>
       </Grid>
     </Border>
@@ -1871,7 +1875,7 @@ $script:ThemeRes = [Windows.Markup.XamlReader]::Parse($script:ThemeResXaml)
 $window.Resources.MergedDictionaries.Add($script:ThemeRes)
 
 $ui = @{}
-foreach ($n in 'TitleBar','MinBtn','CloseBtn','UpdateBtn','ThemeBtn','ScanState','MetricsGrid','HwGrid','GameText','BrowseBtn','CountText',
+foreach ($n in 'TitleBar','MinBtn','MaxBtn','CloseBtn','UpdateBtn','ThemeBtn','ScanState','MetricsGrid','HwGrid','GameText','BrowseBtn','CountText',
                'SelAllChk','SymptomPanel','SymptomSummary','SymptomClearBtn',
                'SymptomAdviceBox','SymptomAdviceText','SymptomAdviceActions','SymptomEmptyText',
                'ItemPanel','RiskyGroup','RiskyPanel','ApplyBtn','RestoreBtn','RefreshBtn','GuideBtn','CheckUpdBtn',
@@ -9067,8 +9071,85 @@ $window.Add_ContentRendered({
   }
 })
 
-$ui.TitleBar.Add_MouseLeftButtonDown({ $window.DragMove() })
+# ---------- 最大化（自绘标题栏必须自己处理工作区约束） ----------
+#
+# WindowStyle="None" 的窗口一旦 WindowState=Maximized，默认会铺满整个屏幕**连任务栏
+# 一起盖掉**——这是无边框窗口的经典坑。正确做法是处理 WM_GETMINMAXINFO，把最大尺寸和
+# 位置限制在**窗口当前所在那台显示器**的工作区内（不是主显示器：多屏用户把窗口拖到副屏
+# 再最大化，按主屏算就会错位）。
+try {
+  if (-not ('DfbWindowChrome' -as [type])) {
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class DfbWindowChrome {
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int x; public int y; }
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int left, top, right, bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct MINMAXINFO {
+    public POINT ptReserved, ptMaxSize, ptMaxPosition, ptMinTrackSize, ptMaxTrackSize;
+  }
+  [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO {
+    public int cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags;
+  }
+  [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+  [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO info);
+  // 把 WM_GETMINMAXINFO 里的最大尺寸/位置改写成当前显示器的工作区。
+  // MONITOR_DEFAULTTONEAREST = 2：窗口跨屏时取重叠最多的那台。
+  public static void ApplyWorkArea(IntPtr hwnd, IntPtr lParam) {
+    IntPtr monitor = MonitorFromWindow(hwnd, 2);
+    if (monitor == IntPtr.Zero) { return; }
+    MONITORINFO info = new MONITORINFO();
+    info.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+    if (!GetMonitorInfo(monitor, ref info)) { return; }
+    MINMAXINFO mmi = (MINMAXINFO)Marshal.PtrToStructure(lParam, typeof(MINMAXINFO));
+    mmi.ptMaxPosition.x = info.rcWork.left - info.rcMonitor.left;
+    mmi.ptMaxPosition.y = info.rcWork.top - info.rcMonitor.top;
+    mmi.ptMaxSize.x = info.rcWork.right - info.rcWork.left;
+    mmi.ptMaxSize.y = info.rcWork.bottom - info.rcWork.top;
+    Marshal.StructureToPtr(mmi, lParam, true);
+  }
+}
+'@
+  }
+  $windowHandle = (New-Object Windows.Interop.WindowInteropHelper($window)).EnsureHandle()
+  [Windows.Interop.HwndSource]::FromHwnd($windowHandle).AddHook({
+    param($hwnd, $msg, $wParam, $lParam, $handled)
+    if ($msg -eq 0x0024) {   # WM_GETMINMAXINFO
+      try { [DfbWindowChrome]::ApplyWorkArea($hwnd, $lParam) } catch {}
+    }
+    [IntPtr]::Zero
+  }) | Out-Null
+} catch {
+  # 钩子挂不上时不拦最大化，只是最大化会盖住任务栏 —— 退化，不是故障
+  Write-Log "窗口最大化的工作区约束未能挂上：$($_.Exception.Message)"
+}
+
+function Switch-AppWindowMaximized {
+  $window.WindowState = $(if ($window.WindowState -eq [Windows.WindowState]::Maximized) {
+    [Windows.WindowState]::Normal } else { [Windows.WindowState]::Maximized })
+}
+
+# 标题栏：单击拖动、双击最大化/还原（和系统标题栏一致的习惯）。
+# 最大化状态下 DragMove 会抛「Can only call DragMove when the primary mouse button is down」
+# 之外的怪异行为，所以先还原再拖。
+$ui.TitleBar.Add_MouseLeftButtonDown({
+  if ($_.ClickCount -eq 2) {
+    $_.Handled = $true
+    Switch-AppWindowMaximized
+    return
+  }
+  if ($window.WindowState -eq [Windows.WindowState]::Maximized) { $window.WindowState = 'Normal' }
+  $window.DragMove()
+})
 $ui.MinBtn.Add_Click({ $window.WindowState = 'Minimized' })
+$ui.MaxBtn.Add_Click({ Switch-AppWindowMaximized })
+# 按钮图标跟着状态走：最大化后它是「还原」，图标和提示都要变，否则用户不知道怎么退出来
+$window.Add_StateChanged({
+  if (-not $ui.MaxBtn) { return }
+  $maximized = ($window.WindowState -eq [Windows.WindowState]::Maximized)
+  $ui.MaxBtn.Content = $(if ($maximized) { '❐' } else { '☐' })
+  $ui.MaxBtn.ToolTip = $(if ($maximized) { '向下还原' } else { '最大化' })
+})
 if ($script:LightThemeEnabled) {
   $ui.ThemeBtn.Add_Click({ Set-AppTheme $(if ($script:CurrentTheme -eq 'dark') { 'light' } else { 'dark' }) -Persist })
 }
