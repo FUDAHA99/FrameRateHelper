@@ -521,6 +521,23 @@ Assert-True ($guiRaw.Contains("Initialize-SymptomFilterPanel`r`n    Update-ItemL
              $guiRaw.Contains("Initialize-SymptomFilterPanel`n    Update-ItemList")) `
   '启动时没有初始化症状筛选带'
 # 诊断报告与筛选带共用同一份症状数据
+# 上面那条只说明「报告的问题清单来自同一份目录」。真正会出事的是长度：
+# 这 19 条 Id 拼起来 306 字符，超过报告单字段上限 256，而原来是按字符硬切的 ——
+# 切口落在 noise_power 中间，报告里那一行结尾变成「...,gpu_heat,no」。
+# 用**真目录**再验一遍：合成样本证明不了真实 Id 的长度组合恰好会不会切出词中间。
+foreach ($reportFnName in 'ConvertTo-DiagnosticFieldValue', 'ConvertTo-DiagnosticIdListValue') {
+  Invoke-Expression (Import-GuiFunction $reportFnName)
+}
+$script:DiagnosticFieldMaxLength = 256
+$catalogIds = @(@(Get-SymptomCatalog) | ForEach-Object { "$($_.Id)" })
+$catalogIdOut = ConvertTo-DiagnosticIdListValue $catalogIds
+Assert-True ($catalogIdOut.Length -le 256) "19 条症状 Id 输出 $($catalogIdOut.Length) 字符，超过报告单字段上限"
+foreach ($catalogIdPart in @($catalogIdOut -split ',')) {
+  Assert-True ($catalogIdPart.StartsWith('~') -or (@($catalogIds) -contains $catalogIdPart)) `
+    ("报告的 feedback_issue_ids 里出现了一个目录里根本没有的症状「$catalogIdPart」—— " +
+     '按字符硬切会把 Id 切成两半，而半个 Id 看上去和真的一模一样')
+}
+
 Assert-True ($guiRaw -match '\$script:DiagnosticIssueChoices\s*=\s*@\(@\(Get-SymptomCatalog\)') `
   '诊断报告的问题清单又自己写了一份，迟早与筛选带漂移'
 

@@ -1362,4 +1362,99 @@ foreach ($feedbackLabelState in '全选', '全不选') {
   }
 }
 
+# ---------------------------------------------------------------------------
+#  回车必须仍然归「下一步」
+# ---------------------------------------------------------------------------
+#
+# Button 的静态构造把 KeyboardNavigation.AcceptsReturn 设成 True，而鼠标按下时
+# ButtonBase 会 Focus() 自己 —— 于是用户点完「全选」，焦点就留在这个按钮上
+# （Ghost 样式的 FocusVisualStyle 是 {x:Null}，屏幕上还看不出来）。这一刻
+# IsDefault 的「下一步」让位，回车触发的是全选按钮自己，而它是个**开关**：
+# 刚勾上的 19 项被这一下回车全部清空，页面纹丝不动。再按一次又全勾上，来回翻，
+# 不用鼠标或 Tab 把焦点移走就永远进不了第 2 页。
+#
+# 这条必须真的把窗口 Show 出来：IsDefaulted 是 WPF 在真实焦点范围内算出来的，
+# 不 Show 的窗口没有焦点范围，读出来的值没有意义。
+$enterProbeWindow = [Windows.Markup.XamlReader]::Parse($feedbackXaml.Groups[1].Value)
+$enterProbeNext = $enterProbeWindow.FindName('NextBtn')
+$enterProbeCheck = New-Object Windows.Controls.CheckBox
+$enterProbeWindow.FindName('IssuePanel').Children.Add($enterProbeCheck) | Out-Null
+$enterProbeWindow.ShowInTaskbar = $false
+$enterProbeWindow.Left = -32000
+$enterProbeWindow.Top = -32000
+$enterProbeWindow.Show()
+try {
+  $enterProbeWindow.UpdateLayout()
+  [void]$enterProbeCheck.Focus()
+  $enterProbeWindow.Dispatcher.Invoke([action]{}, [Windows.Threading.DispatcherPriority]::Render)
+  Assert-True ($enterProbeNext.IsDefaulted) `
+    '基准就不成立：焦点在复选框上时回车都没有归「下一步」—— 这条探针本身坏了'
+  foreach ($enterProbeName in 'IssueAllBtn', 'BenefitAllBtn') {
+    $enterProbeBtn = $enterProbeWindow.FindName($enterProbeName)
+    [void]$enterProbeBtn.Focus()
+    $enterProbeWindow.Dispatcher.Invoke([action]{}, [Windows.Threading.DispatcherPriority]::Render)
+    Assert-True ($enterProbeNext.IsDefaulted) `
+      ("焦点落在 $enterProbeName 上之后回车不再归「下一步」—— 用户点完全选直接按回车，" +
+       '刚勾上的整列会被这一下回车清空，而页面不会前进')
+    Assert-True ($enterProbeBtn.Focusable) `
+      "$enterProbeName 变得不可聚焦了 —— 键盘用户再也 Tab 不到这个按钮"
+  }
+} finally { $enterProbeWindow.Close() }
+
+# ---------------------------------------------------------------------------
+#  Id 列表不能被切出半个 Id
+# ---------------------------------------------------------------------------
+#
+# 单字段上限 256 原来是按**字符**硬切的。19 条症状拼起来 306 字符、全套 32 个
+# 优化项 424 字符，都会被切，而切口正好落在某个 Id 中间：报告里那一行结尾变成
+# 「...,gpu_heat,no」。少掉的几条还能从上方人眼清单里补回来，凭空多出来的
+# 「症状 no」查不出来 —— 它和真 Id 在字面上没有任何区别。
+foreach ($idListFn in 'ConvertTo-DiagnosticFieldValue', 'ConvertTo-DiagnosticIdListValue') {
+  $wantedIdListFn = $idListFn
+  $idListAst = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $wantedIdListFn
+  }, $true) | Select-Object -First 1)
+  Assert-True ($idListAst.Count -eq 1) "找不到函数 $idListFn"
+  Invoke-Expression $idListAst[0].Extent.Text
+}
+$script:DiagnosticFieldMaxLength = 256
+
+# 短列表原样输出，一个字都不能改
+$shortIdList = @('input_latency', 'stutter', 'low_fps')
+Assert-True ((ConvertTo-DiagnosticIdListValue $shortIdList) -eq ($shortIdList -join ',')) `
+  '没超上限的 Id 列表被改动了'
+Assert-True ((ConvertTo-DiagnosticIdListValue @()) -eq '') '空列表应该输出空串'
+
+# 造一组必然被切、且切口落在词中间的 Id
+$longIdList = @(1..24 | ForEach-Object { 'symptom_number_{0:00}' -f $_ })
+$longIdJoined = $longIdList -join ','
+Assert-True ($longIdJoined.Length -gt 256) "构造的样本只有 $($longIdJoined.Length) 字符，根本触发不了截断"
+$longIdOut = ConvertTo-DiagnosticIdListValue $longIdList
+Assert-True ($longIdOut.Length -le 256) "截断之后仍有 $($longIdOut.Length) 字符，超过单字段上限"
+$longIdParts = @($longIdOut -split ',')
+$longIdMarkers = @($longIdParts | Where-Object { $_.StartsWith('~') })
+Assert-True ($longIdMarkers.Count -eq 1) '截断了却没有留下标记 —— 读报告的人无从知道这一行是不完整的'
+$longIdReal = @($longIdParts | Where-Object { -not $_.StartsWith('~') })
+$longIdBogus = @($longIdReal | Where-Object { @($longIdList) -notcontains $_ })
+Assert-True ($longIdBogus.Count -eq 0) `
+  ("截断切出了原列表里根本不存在的 Id：$($longIdBogus -join ' / ') —— " +
+   '半个 Id 和真 Id 在字面上没有区别，机读这一段的人会当成真的')
+Assert-True ($longIdReal.Count -lt $longIdList.Count) '这个样本本来就该丢掉一些，一条没丢说明没走截断分支'
+Assert-True ("$($longIdMarkers[0])" -eq "~truncated:$($longIdList.Count - $longIdReal.Count)") `
+  "标记里的条数和实际丢掉的对不上：$($longIdMarkers[0])，实际丢了 $($longIdList.Count - $longIdReal.Count) 条"
+# 保留的那些必须是**前缀**的完整若干条，不能跳着留
+for ($idListI = 0; $idListI -lt $longIdReal.Count; $idListI++) {
+  Assert-True ($longIdReal[$idListI] -eq $longIdList[$idListI]) '保留的 Id 不是原列表开头的连续若干条'
+}
+# 报告里所有 Id 列表字段都必须走这个函数，不能有漏网的
+foreach ($idListField in 'feedback_issue_ids', 'feedback_benefit_ids', 'optimization_item_ids',
+                         'active_related_process_keys', 'chassis_types', 'display_connectors',
+                         'gpu_panel_installed_keys', 'gpu_panel_missing_keys') {
+  $idListLine = @($raw -split "`n" | Where-Object { $_.Contains("`"$idListField=") })
+  Assert-True ($idListLine.Count -eq 1) "报告里找不到字段 $idListField"
+  Assert-True ($idListLine[0].Contains('ConvertTo-DiagnosticIdListValue')) `
+    "$idListField 仍按字符硬切 —— 超长时会切出半个 Id"
+}
+
 Write-Host 'PASS: GUI UAC recovery and WinPS5.1 Generic.List result paths are regression covered'

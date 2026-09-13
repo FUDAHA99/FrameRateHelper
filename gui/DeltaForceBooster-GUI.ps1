@@ -6542,7 +6542,8 @@ function Show-DiagnosticFeedbackDialog {
                 <TextBlock Grid.Column="0" Text="遇到的问题（可多选）" Foreground="{DynamicResource Gold}" FontSize="13"
                            FontWeight="Bold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
                 <Button Grid.Column="1" x:Name="IssueAllBtn" Content="全选" VerticalAlignment="Center"
-                        Width="64" Height="22" FontSize="11" Margin="8,0,0,0"/>
+                        Width="64" Height="22" FontSize="11" Margin="8,0,0,0"
+                        KeyboardNavigation.AcceptsReturn="False"/>
               </Grid>
               <TextBlock Text="CURRENT PROBLEMS" Foreground="{DynamicResource TextMut}" FontFamily="Consolas" FontSize="9" Margin="0,2,0,9"/>
               <StackPanel x:Name="IssuePanel"/>
@@ -6555,7 +6556,8 @@ function Show-DiagnosticFeedbackDialog {
                 <TextBlock Grid.Column="0" Text="优化后已有改善（可多选）" Foreground="{DynamicResource Green}" FontSize="13"
                            FontWeight="Bold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
                 <Button Grid.Column="1" x:Name="BenefitAllBtn" Content="全选" VerticalAlignment="Center"
-                        Width="64" Height="22" FontSize="11" Margin="8,0,0,0"/>
+                        Width="64" Height="22" FontSize="11" Margin="8,0,0,0"
+                        KeyboardNavigation.AcceptsReturn="False"/>
               </Grid>
               <TextBlock Text="IMPROVEMENTS" Foreground="{DynamicResource TextMut}" FontFamily="Consolas" FontSize="9" Margin="0,2,0,9"/>
               <StackPanel x:Name="BenefitPanel"/>
@@ -6658,10 +6660,39 @@ function Protect-ReportText([string]$Text) {
   $t
 }
 
+$script:DiagnosticFieldMaxLength = 256
+
 function ConvertTo-DiagnosticFieldValue([object]$Value) {
   $text = ("$Value" -replace '[\x00-\x1f\x7f]', ' ').Trim()
-  if ($text.Length -gt 256) { $text = $text.Substring(0, 256) }
+  if ($text.Length -gt $script:DiagnosticFieldMaxLength) {
+    $text = $text.Substring(0, $script:DiagnosticFieldMaxLength)
+  }
   $text
+}
+
+# Id 列表不能按字符硬切。19 条症状拼起来 306 字符、全套 32 个优化项 424 字符，
+# 都超过单字段上限，而 Substring 正好切在 noise_power 中间 —— 这一行结尾变成
+# 「...,gpu_heat,no」。少掉三条还能从报告上方那份人眼清单里补回来，凭空多出来的
+# 那条「症状 no」是查不出来的：它和一个真实 Id 在字面上毫无区别，而机读这一段的人
+# 拿到的是一条从未存在过的症状。所以截断只落在分隔符上，并显式标出丢了几条。
+function ConvertTo-DiagnosticIdListValue($Values) {
+  $ids = @(@($Values) | ForEach-Object { ConvertTo-DiagnosticFieldValue $_ } | Where-Object { $_ })
+  if ($ids.Count -eq 0) { return '' }
+  $joined = $ids -join ','
+  if ($joined.Length -le $script:DiagnosticFieldMaxLength) { return $joined }
+  # 先给标记留出位置再往里装，保证结果仍在上限内
+  $budget = $script:DiagnosticFieldMaxLength - 18
+  $kept = New-Object Collections.Generic.List[string]
+  $used = 0
+  foreach ($id in $ids) {
+    $step = $id.Length + $(if ($kept.Count -gt 0) { 1 } else { 0 })
+    if (($used + $step) -gt $budget) { break }
+    [void]$kept.Add($id)
+    $used += $step
+  }
+  # 「~」开头，任何真实 Id 都不可能长这样，机读时一眼能认出这是标记不是数据
+  [void]$kept.Add("~truncated:$($ids.Count - $kept.Count)")
+  $kept -join ','
 }
 
 # 报告只放排查需要的：硬件 + 各优化项当前状态 + 本次/最近历史运行日志 + 版本号 + 最近备份的项目名。
@@ -6741,15 +6772,15 @@ function New-DiagnosticReport($Feedback) {
   $lines.Add('== 分析字段（schema v3） ==')
   $lines.Add('diagnostic_schema=3')
   $lines.Add("app_version=$(ConvertTo-DiagnosticFieldValue $script:GuiVersion)")
-  $lines.Add("feedback_issue_ids=$(ConvertTo-DiagnosticFieldValue ($issueIds -join ','))")
-  $lines.Add("feedback_benefit_ids=$(ConvertTo-DiagnosticFieldValue ($benefitIds -join ','))")
+  $lines.Add("feedback_issue_ids=$(ConvertTo-DiagnosticIdListValue $issueIds)")
+  $lines.Add("feedback_benefit_ids=$(ConvertTo-DiagnosticIdListValue $benefitIds)")
   $optimizationContext = Get-TelemetryOptimizationContext
   $lines.Add("config_tier=$(ConvertTo-DiagnosticFieldValue $optimizationContext.ConfigTier)")
   $lines.Add("optimization_scheme=$(ConvertTo-DiagnosticFieldValue $optimizationContext.Scheme)")
-  $lines.Add("optimization_item_ids=$(ConvertTo-DiagnosticFieldValue (@($optimizationContext.ItemIds) -join ','))")
+  $lines.Add("optimization_item_ids=$(ConvertTo-DiagnosticIdListValue @($optimizationContext.ItemIds))")
   $lines.Add("optimization_item_set_hash=$(ConvertTo-DiagnosticFieldValue $optimizationContext.ItemSetHash)")
   $lines.Add("optimization_items_complete=$([bool]$optimizationContext.ItemsComplete)".ToLowerInvariant())
-  $lines.Add("active_related_process_keys=$(ConvertTo-DiagnosticFieldValue ($runningRelatedProcessKeys -join ','))")
+  $lines.Add("active_related_process_keys=$(ConvertTo-DiagnosticIdListValue $runningRelatedProcessKeys)")
   if ($hw) {
     $installedPanelKeys = @($gpuPanelInventory.Apps | Where-Object Installed | ForEach-Object Key | Sort-Object -Unique)
     $missingPanelKeys = @($gpuPanelInventory.Apps | Where-Object { -not $_.Installed } | ForEach-Object Key | Sort-Object -Unique)
@@ -6765,7 +6796,7 @@ function New-DiagnosticReport($Feedback) {
     $lines.Add("memory_module_count=$([int]$hw.MemoryModuleCount)")
     $lines.Add("device_type=$(ConvertTo-DiagnosticFieldValue $hw.FormFactor)")
     $lines.Add("form_factor_confidence=$(ConvertTo-DiagnosticFieldValue $hw.FormFactorConfidence)")
-    $lines.Add("chassis_types=$(ConvertTo-DiagnosticFieldValue (@($hw.ChassisTypes) -join ','))")
+    $lines.Add("chassis_types=$(ConvertTo-DiagnosticIdListValue @($hw.ChassisTypes))")
     $lines.Add("has_battery=$(if ($null -eq $hw.HasBattery) { 'unknown' } else { "$([bool]$hw.HasBattery)".ToLowerInvariant() })")
     $lines.Add("has_internal_display=$(if ($null -eq $hw.HasInternalDisplay) { 'unknown' } else { "$([bool]$hw.HasInternalDisplay)".ToLowerInvariant() })")
     $lines.Add("ups_ambiguous=$([bool]$hw.IsUpsAmbiguous)".ToLowerInvariant())
@@ -6790,11 +6821,11 @@ function New-DiagnosticReport($Feedback) {
     $lines.Add("active_display_count=$([int]$hw.ActiveDisplayCount)")
     $lines.Add("internal_display_count=$([int]$hw.InternalDisplayCount)")
     $lines.Add("external_display_count=$([int]$hw.ExternalDisplayCount)")
-    $lines.Add("display_connectors=$(ConvertTo-DiagnosticFieldValue (@($hw.DisplayConnectors) -join ','))")
+    $lines.Add("display_connectors=$(ConvertTo-DiagnosticIdListValue @($hw.DisplayConnectors))")
     $lines.Add("pagefile_auto_managed=$([bool]$hw.AutomaticManagedPagefile)".ToLowerInvariant())
     $lines.Add("gpu_panel_status=$(ConvertTo-DiagnosticFieldValue $gpuPanelInventory.Status)")
-    $lines.Add("gpu_panel_installed_keys=$(ConvertTo-DiagnosticFieldValue ($installedPanelKeys -join ','))")
-    $lines.Add("gpu_panel_missing_keys=$(ConvertTo-DiagnosticFieldValue ($missingPanelKeys -join ','))")
+    $lines.Add("gpu_panel_installed_keys=$(ConvertTo-DiagnosticIdListValue $installedPanelKeys)")
+    $lines.Add("gpu_panel_missing_keys=$(ConvertTo-DiagnosticIdListValue $missingPanelKeys)")
     $analysis = Get-TelemetryAnalysisContext $hw $script:TargetExe
     foreach ($pair in ([ordered]@{
       windows_display_version=$analysis.windowsDisplayVersion;windows_build_revision=$analysis.windowsBuildRevision
