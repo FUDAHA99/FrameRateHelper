@@ -2626,7 +2626,7 @@ $script:SymptomCatalog = @(
     Items = @('sysmain-off','wsearch-off','visualfx-perf','transparency-off','sys-responsiveness',
               'paging-exec','hibernate-off','mem-compress-off')
     Pages = @()
-    Note  = '不只在游戏里卡，说明是系统级的后台占用。这一组的副作用也最明显（搜索变慢、桌面变朴素），逐项看清说明再勾。' }
+    Note  = '不只在游戏里卡，说明是系统级的后台占用。这一组是全部症状里副作用最重的一组，而且「全选」会把其中大部分直接勾上：Windows 搜索变慢、桌面动画和阴影全没、**休眠与快速启动一起关掉**（笔记本合盖只剩睡眠）、内核代码常驻内存（内存 8G 以下不建议）。逐项看清说明再勾，别整组一起来。' }
   [ordered]@{ Id = 'cpu_heat'; Label = 'CPU 占用或温度过高'
     Items = @()
     Pages = @('restore','report')

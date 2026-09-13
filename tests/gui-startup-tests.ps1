@@ -117,10 +117,29 @@ Assert-True ($raw.Contains('x:Name="FrameFixCacheBtn" Content="清理着色器�
 # 将来新增 risky 项时「全选」必须仍然覆盖它们，且高风险勾选仍走独立的二次确认。
 # 主列表表头上那句「高风险项单独列出 · 执行前二次确认」已让位给列标题：同一句话
 # RiskyGroup 自己的标题里有，而且只在真有 risky 项时才出现 —— 断言改钉那一处。
-Assert-True ($raw.Contains('@($ui.ItemPanel.Children) + @($ui.RiskyPanel.Children)') -and
-  $raw.Contains('默认不勾选 · 执行前单独二次确认') -and
-  $raw.Contains('$riskyIds = @($ui.RiskyPanel.Children')) `
-  'optimization select-all no longer covers the risky group'
+# 这条原来查的是「`@($ui.ItemPanel.Children) + @($ui.RiskyPanel.Children)` 这串字在文件里
+# 存不存在」—— 而它在文件里出现 **5 次**（Update-Count、全选、套方案、存方案、执行）。
+# 把 RiskyPanel 从**全选处理器**里删掉，另外四处还在，断言照样绿。改成 AST 查那个处理器
+# 自己的函数体。
+$selAllHandler = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+  "$($node.Member)" -eq 'Add_Click' -and "$($node.Expression)" -eq '$ui.SelAllChk'
+}, $true) | Select-Object -First 1)
+Assert-True ($selAllHandler.Count -eq 1) 'cannot locate the select-all click handler'
+Assert-True ($selAllHandler[0].Extent.Text.Contains('$ui.RiskyPanel.Children')) `
+  'optimization select-all no longer enumerates the risky group'
+$applyHandler = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+  "$($node.Member)" -eq 'Add_Click' -and "$($node.Expression)" -eq '$ui.ApplyBtn'
+}, $true) | Select-Object -First 1)
+Assert-True ($applyHandler.Count -eq 1) 'cannot locate the apply click handler'
+Assert-True ($applyHandler[0].Extent.Text.Contains('$riskyIds = @($ui.RiskyPanel.Children') -and
+  $applyHandler[0].Extent.Text.Contains('AllowRisky')) `
+  'apply no longer collects risky selections through the separate high-risk confirmation'
+Assert-True ($raw.Contains('默认不勾选 · 执行前单独二次确认')) `
+  'the risky group header no longer tells the user those items are separate and confirmed'
 Assert-True ($raw.Contains("BulkSelect = [bool](-not `$Item.ContainsKey('BulkSelect') -or `$Item.BulkSelect)") -and
   $raw.Contains('$bulkSelect = [bool]($row.DataContext -and $row.DataContext.BulkSelect)') -and
   $raw.Contains('$bulkSelect -and $row.Tag -ne $true')) `

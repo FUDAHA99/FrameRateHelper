@@ -285,13 +285,35 @@ function Import-GuiFunction([string]$Name) {
   Assert-True ($null -ne $restoreButton) 'cpu_heat 没有给出复原入口'
 
   # 去处按钮真的把人送到那一页
+  # 五个去处**逐个**验。原来只验了 framefix 和 residue 两个，把 restore / report / ref
+  # 任意一条改坏，测试都照样绿 —— 而那三条恰恰是走 RaiseEvent 的，最容易挂错按钮。
   $script:LogLines.Clear()
-  Invoke-SymptomPageAction 'framefix'
-  Assert-True (@($script:LogLines) -contains 'TAB:framefix') '「去掉帧修复页」没有真的切页'
-  Invoke-SymptomPageAction 'residue'
-  Assert-True (@($script:LogLines) -contains 'RESIDUE') '「检查工具残留」没有真的打开'
+  $script:PageActionHits = New-Object Collections.Generic.List[string]
+  $ui.RestoreBtn.Add_Click({ [void]$script:PageActionHits.Add('restore') })
+  $ui.ReportBtn.Add_Click({ [void]$script:PageActionHits.Add('report') })
+  $ui.InlineRestorePanel.Visibility = 'Collapsed'
+  foreach ($pageCase in @(
+    @{ Page='framefix'; Check={ @($script:LogLines) -contains 'TAB:framefix' }; Msg='「去掉帧修复页」没有真的切页' },
+    @{ Page='ref'; Check={ @($script:LogLines) -contains 'TAB:ref' }; Msg='「去游戏内设置参考页」没有真的切页' },
+    @{ Page='residue'; Check={ @($script:LogLines) -contains 'RESIDUE' }; Msg='「检查工具残留」没有真的打开' },
+    @{ Page='restore'; Check={ @($script:PageActionHits) -contains 'restore' }; Msg='「打开复原入口」没有真的触发 RestoreBtn' },
+    @{ Page='report'; Check={ @($script:PageActionHits) -contains 'report' }; Msg='「导出诊断报告」没有真的触发 ReportBtn' })) {
+    Invoke-SymptomPageAction $pageCase.Page
+    Assert-True ([bool](& $pageCase.Check)) $pageCase.Msg
+  }
+  Assert-True (@($script:SymptomPageLabels.Keys).Count -eq 5) `
+    "症状目录里的去处有 $(@($script:SymptomPageLabels.Keys).Count) 种，上面只逐个验了 5 种 —— 新增一种就必须在这里补一条"
   Invoke-SymptomPageAction '不存在的去处'
   Assert-True (@($script:LogLines | Where-Object { $_ -like '*未知的症状去处*' }).Count -eq 1) '未知去处应如实记日志而不是静默'
+
+  # 忙碌闸门：RaiseEvent 不看 IsEnabled，所以这个函数必须自己拦
+  $script:PageActionHits.Clear()
+  $script:Busy = $true
+  try {
+    Invoke-SymptomPageAction 'report'
+    Assert-True (@($script:PageActionHits).Count -eq 0) `
+      '执行优化/还原途中，症状说明框的「导出诊断报告」仍然把 ReportBtn 触发了 —— 它的 finally 会把全局忙碌态清零'
+  } finally { $script:Busy = $false }
 
   Clear-SymptomFilter
   Assert-True (@($ui.ItemPanel.Children | Where-Object { $_.Visibility -eq 'Collapsed' }).Count -eq 0) '「显示全部」没有恢复完整列表'
