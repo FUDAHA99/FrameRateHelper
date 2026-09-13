@@ -866,4 +866,37 @@ Assert-True ($uiGhost.Count -eq 0) `
   ("注册清单里这些名字 `$window.FindName 取不到（XAML 里没有，或者被定义在 ControlTemplate 的名称作用域里），" +
    "`$ui.X 同样恒为 `$null：$($uiGhost -join '、')")
 
+# 上面那两条是静态关系；这一条**真的把 38 处事件接线在真控件上执行一遍**。
+#
+# 关系对得上还不够：把 Add_Click 挂到一个 TextBlock 上，名字在清单里、FindName 也取得到，
+# 照样在启动时抛「找不到方法」。而这类错误发生在脚本顶层，$ErrorActionPreference='Stop'
+# 会让界面在 ShowDialog 之前整个死掉——和 ResidueBtn 那次是同一种死法。
+#
+# 启动网关（父进程必须是安装根下的 EngineHost.exe + 管理员令牌 + ProgramData 会话临时
+# 目录）刻意无法伪造，所以跑不了完整启动；但坏掉的从来不是网关，是网关之后这段接线。
+$wiringCalls = @($ast.FindAll({
+  param($node)
+  if ($node -isnot [Management.Automation.Language.InvokeMemberExpressionAst]) { return $false }
+  if ("$($node.Member)" -notlike 'Add_*') { return $false }
+  $target = $node.Expression
+  ($target -is [Management.Automation.Language.MemberExpressionAst]) -and ("$($target.Expression)" -eq '$ui')
+}, $true))
+Assert-True ($wiringCalls.Count -gt 30) "只解析出 $($wiringCalls.Count) 处 `$ui 事件接线，AST 匹配多半失配了"
+
+$wiringFailures = New-Object Collections.Generic.List[string]
+foreach ($wiringCall in $wiringCalls) {
+  $controlName = "$($wiringCall.Expression.Member)"
+  $eventName = "$($wiringCall.Member)"
+  $control = $mainXamlWindow.FindName($controlName)
+  if ($null -eq $control) {
+    [void]$wiringFailures.Add("$controlName.$eventName —— `$ui.$controlName 是 `$null")
+    continue
+  }
+  try { $control.$eventName({ }) }
+  catch { [void]$wiringFailures.Add("$controlName.$eventName —— $($_.Exception.Message)") }
+}
+Assert-True ($wiringFailures.Count -eq 0) `
+  ("这些事件接线在真控件上执行会抛异常，启动时会让界面在 ShowDialog 之前整个死掉：" +
+   ($wiringFailures -join '；'))
+
 Write-Host 'PASS: GUI UAC recovery and WinPS5.1 Generic.List result paths are regression covered'
