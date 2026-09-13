@@ -685,9 +685,17 @@ $xaml = @'
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="CheckBox">
+            <!-- 这里原来是 <StackPanel Orientation="Horizontal">。横向 StackPanel 用**无限宽**
+                 测量子元素，所以内容里那个 TextBlock 永远拿不到受限宽度，TextTrimming 也就
+                 永远不触发 —— 长项名不是被裁成省略号，而是直接画到隔壁「当前状态」列上
+                 （Grid 默认不裁剪子元素）。默认 780px 下只有 1 行溢出 8px 看不太出来，
+                 但窗口可以拉窄：560px 时 32 行里有 18 行的项名压在隔壁列上，最多溢出 130px。
+                 DockPanel + LastChildFill 会先量左边的勾选框，把**剩下的**宽度给内容，
+                 于是 TextTrimming 正常工作。代价是勾选框的可点区域变宽到整列 —— 对项目行
+                 来说这是好事（点名字就能勾），对「全选」那一行影响也只是热区变大。 -->
             <Border Background="Transparent" Padding="0,3">
-              <StackPanel Orientation="Horizontal">
-                <Border x:Name="Box" Width="13" Height="13" BorderBrush="{DynamicResource LineHi}"
+              <DockPanel LastChildFill="True">
+                <Border x:Name="Box" DockPanel.Dock="Left" Width="13" Height="13" BorderBrush="{DynamicResource LineHi}"
                         BorderThickness="1" Background="Transparent" VerticalAlignment="Center">
                   <Grid>
                     <Path x:Name="Mark" Data="M 2,5.5 L 4.5,8.5 L 10,2" Stroke="{DynamicResource GreenDark}"
@@ -700,7 +708,7 @@ $xaml = @'
                   </Grid>
                 </Border>
                 <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center"/>
-              </StackPanel>
+              </DockPanel>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsChecked" Value="True">
@@ -2958,6 +2966,7 @@ function Initialize-SymptomFilterPanel {
 }
 
 function Switch-SymptomFilter([string]$Id) {
+  if ($script:Busy) { Write-Log '正在执行优化/还原，请等本轮结束后再改筛选。'; return }
   if (-not (Get-SymptomById $Id)) { Write-Log "未知的症状：$Id"; return }
   $current = @($script:ActiveSymptomIds)
   $script:ActiveSymptomIds = @(
@@ -2969,6 +2978,7 @@ function Switch-SymptomFilter([string]$Id) {
 }
 
 function Clear-SymptomFilter {
+  if ($script:Busy) { Write-Log '正在执行优化/还原，请等本轮结束后再改筛选。'; return }
   if (@($script:ActiveSymptomIds).Count -eq 0) { return }
   $script:ActiveSymptomIds = @()
   Update-Count
@@ -3033,7 +3043,11 @@ function Update-SymptomFilterUi($Rows, [int]$ShownCount) {
   foreach ($entry in $script:SymptomChips.GetEnumerator()) {
     Set-SymptomChipVisual $entry.Value ($active -contains "$($entry.Key)")
   }
-  if ($ui.SymptomClearBtn) { $ui.SymptomClearBtn.IsEnabled = ($active.Count -gt 0) }
+  # 必须带上 -not $script:Busy：这是界面里唯一一处无条件改控件启用态的刷新逻辑，
+  # 而 Update-Count 在执行期间是会被触达的（收尾的 Update-ItemList 就会调）。
+  # 不带的话，一次普通刷新就能把 Set-BusyState 的禁用逐项撤销掉 ——
+  # 「靠 IsEnabled 集中禁用」这条防线本身就不该是唯一防线。
+  if ($ui.SymptomClearBtn) { $ui.SymptomClearBtn.IsEnabled = ($active.Count -gt 0) -and -not $script:Busy }
 
   if ($active.Count -eq 0) {
     $ui.SymptomSummary.Text = '未筛选 · 显示全部优化项'
@@ -3280,6 +3294,9 @@ function New-ItemRow($Item, $State, [bool]$Last) {
           else { New-Pill '待定' $script:C.Gray '#00000000' $script:C.Line }
   $tail = New-Object Windows.Controls.StackPanel
   $tail.Orientation = 'Horizontal'
+  # 「优化状态」表头是右对齐的；这一列走 SharedSizeGroup，宽度取所有行的最大值，
+  # 所以窄一些的行如果左对齐，徽标就不在标题下方。右对齐让两者落在同一条线上。
+  $tail.HorizontalAlignment = 'Right'
   $tail.Children.Add($offFilterMark) | Out-Null
   # 体检项查出问题时给行内直达入口：不执行优化也能看到教程和下载按钮，
   # 不用等日志（纯文本链接没人会手抄——实机反馈）
@@ -7194,6 +7211,11 @@ function Set-BusyState([bool]$On) {
                  'InlineRestoreSelectAllBtn','InlineRestoreClearBtn','InlineRestoreSelectedBtn',
                  'InlineRestoreAllBtn','InlineRestoreCloseBtn','ResidueBtn',
                  'SymptomClearBtn','SymptomPanel','SymptomAdviceActions',
+                 # 整张勾选表也要锁。提权引擎往返时那个 DoEvents 轮询走的是 Background
+                 # 优先级，**低于 Input**，所以待处理的鼠标/键盘事件会被派发进来：
+                 # 引擎正在写注册表，用户却能照常点勾选框和「全选」，被取消勾选又与当前
+                 # 症状筛选无关的那一行会当场从屏幕上消失 —— 而它正在被写进系统。
+                 'ItemPanel','RiskyPanel','SelAllChk',
                  'TuneCreateBtn','TuneNextBtn','TuneStopBtn') {
     if ($ui[$n]) { $ui[$n].IsEnabled = -not $On }
   }
@@ -9008,10 +9030,17 @@ $window.Add_ContentRendered({
     Initialize-SymptomFilterPanel
     Update-ItemList
     Update-PresetList
+    # 这是一次**真实的提权子进程往返**，和别处一样会跑 DoEvents 轮询把输入放进来；
+    # 原来它全程 $script:Busy = $false，于是所有以 Busy 为闸门的防线（症状直达按钮、
+    # 关窗拦截、RestoreBtn / ReportBtn、更新弹窗）在这段时间里一起敞开，而 ApplyBtn
+    # 当时只靠 IsEnabled 挡、也是启用的 —— 用户能在启动扫描没结束时就点「执行优化」，
+    # 让一次 Apply 嵌套在启动处理器内部跑完。
+    Set-BusyState $true
     try {
       $startupCatalog = Invoke-ElevatedEngineAction -Action Restore -ListRestoreItems
       Update-TelemetryOptimizationContextFromCatalog -Catalog $startupCatalog
     } catch { Write-Log "当前优化项目归属暂未同步：$($_.Exception.Message)" }
+    finally { Set-BusyState $false }
     # 启动即默认选中主推方案（实机诉求「进去之后默认直接选择主推全套」）：
     # SelectionChanged 处理器会完成勾选，其中已就绪的项自动跳过不重复勾
     for ($fi = 0; $fi -lt $script:PresetList.Count; $fi++) {
@@ -9298,6 +9327,9 @@ $ui.DelPresetBtn.Add_Click({
 })
 
 $ui.ApplyBtn.Add_Click({
+  # 这道闸门不能只靠 IsEnabled：启动块里那次提权往返全程 Busy=false（见下方注释），
+  # 而且 Update-SymptomFilterUi 那种刷新函数能把禁用态逐项撤销。按钮自己要会拒绝。
+  if ($script:Busy) { Write-Log '正在执行优化/还原，请等本轮结束。'; return }
   $adminBatchReturned = $false
   $adminBatchBackupLogged = $false
   $r = $null
@@ -9354,6 +9386,22 @@ $ui.ApplyBtn.Add_Click({
            (@($names | ForEach-Object { "· $_" }) -join "`n")
     if (-not (Show-ConfirmDialog '确认执行' 'CONFIRM APPLY' $msg '执行优化')) { return }
     Set-BusyState $true
+    # 上面那份 $ids 是在**四个模态确认框之前**采的。模态框自己会跑消息泵，期间用户
+    # 完全可以回到主窗口改勾选。置忙之后重新采一次，两次不一致就中止：宁可让用户
+    # 重点一次，也不能把「他以为取消了的项目」写进系统。
+    $script:ApplySelectionSnapshot = @($ui.ItemPanel.Children | Where-Object { $_.Child.Children[0].IsChecked } |
+                                       ForEach-Object { "$($_.Child.Children[0].Tag)" })
+    $riskySnapshot = @($ui.RiskyPanel.Children | Where-Object { $_.Child.Children[0].IsChecked } |
+                       ForEach-Object { "$($_.Child.Children[0].Tag)" })
+    if ((@($ids | ForEach-Object { "$_" } | Sort-Object) -join '|') -ne (@($script:ApplySelectionSnapshot | Sort-Object) -join '|') -or
+        (@($riskyIds | ForEach-Object { "$_" } | Sort-Object) -join '|') -ne (@($riskySnapshot | Sort-Object) -join '|')) {
+      Set-BusyState $false
+      Write-Log '确认过程中勾选发生了变化，本次执行已中止。请核对勾选后重新点「执行优化」。'
+      Show-ConfirmDialog '勾选已变化' 'SELECTION CHANGED' `
+        "确认过程中优化项的勾选发生了变化，为避免执行你已经取消的项目，本次没有做任何改动。`n`n请核对勾选后重新点「执行优化」。" `
+        '知道了' -InfoOnly | Out-Null
+      return
+    }
     $ui.ProgressPanel.Visibility = 'Visible'
     $ui.ProgFill.Width = 0
     $ui.ProgText.Text = '准备执行…'

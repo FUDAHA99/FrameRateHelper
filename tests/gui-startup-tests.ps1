@@ -918,4 +918,54 @@ Assert-True ($wiringFailures.Count -eq 0) `
   ("这些事件接线在真控件上执行会抛异常，启动时会让界面在 ShowDialog 之前整个死掉：" +
    ($wiringFailures -join '；'))
 
+
+# ---------------------------------------------------------------------------
+#  忙碌闸门：提权往返期间界面是「活的」
+# ---------------------------------------------------------------------------
+#
+# Invoke-ElevatedEngineAction 等提权子进程时跑的是 DoEvents 轮询，而且用的是
+# DispatcherPriority::Background —— 它**低于** Input，所以待处理的鼠标/键盘事件会被
+# 派发进来。复核用真 Win32 键盘消息复现过：引擎正在写注册表时，用户能照常点勾选框和
+# 「全选」，被取消勾选又与当前症状筛选无关的那一行会当场从屏幕上消失，而它正在被写入。
+#
+# 所以这里钉三件事，任何一件单独失守都不够安全：
+#   ① 整张勾选表在忙碌期间禁用
+#   ② 按钮**自己**要有 $script:Busy 闸门（IsEnabled 会被普通刷新函数撤销，
+#      而 RaiseEvent 根本不看 IsEnabled）
+#   ③ 每一次真实的提权往返都必须被 Set-BusyState 包住 —— 启动那次原来没有
+foreach ($busyGuard in 'ItemPanel', 'RiskyPanel', 'SelAllChk', 'SymptomPanel', 'SymptomClearBtn',
+                       'SymptomAdviceActions', 'ResidueBtn', 'ApplyBtn', 'RestoreBtn', 'ReportBtn') {
+  $busyFn = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Set-BusyState'
+  }, $true) | Select-Object -First 1)
+  Assert-True ($busyFn.Count -eq 1) 'cannot locate Set-BusyState'
+  Assert-True ($busyFn[0].Extent.Text.Contains("'$busyGuard'")) `
+    "Set-BusyState 的禁用清单漏了 $busyGuard —— 执行期间它仍然可点"
+}
+$applyClick = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+  "$($node.Member)" -eq 'Add_Click' -and "$($node.Expression)" -eq '$ui.ApplyBtn'
+}, $true) | Select-Object -First 1)
+Assert-True ($applyClick.Count -eq 1) 'cannot locate the apply click handler'
+Assert-True ($applyClick[0].Extent.Text.Contains('if ($script:Busy)')) `
+  '「执行优化」按钮自己没有 $script:Busy 闸门 —— 它只靠 IsEnabled，而启动那次提权往返期间它是启用的'
+# 钉的是**中止分支**，不是那个变量名：只查变量名的话，把赋值改个名、比较照留，
+# 断言仍然绿。
+Assert-True ($applyClick[0].Extent.Text.Contains('ApplySelectionSnapshot') -and
+  $applyClick[0].Extent.Text.Contains('SELECTION CHANGED')) `
+  '「执行优化」没有在置忙之后重新核对勾选并在不一致时中止 —— $ids 是在四个模态确认框之前采的，期间用户可以改勾选'
+# 启动块里那次真实提权往返必须被 Set-BusyState 包住
+# 锚点必须唯一：'Invoke-ElevatedEngineAction -Action Restore -ListRestoreItems' 在文件里
+# 出现 6 次，IndexOf 命中的是第一处（还原面板那条），根本不是启动块。
+$startupAnchor = $raw.IndexOf('$startupCatalog = Invoke-ElevatedEngineAction')
+Assert-True ($startupAnchor -gt 0) 'cannot locate the startup catalog round-trip'
+$startupSection = $raw.Substring($startupAnchor - 900, 1500)
+Assert-True ($startupSection.Contains('Set-BusyState $true') -and $startupSection.Contains('finally { Set-BusyState $false }')) `
+  '启动时那次提权往返全程 $script:Busy=false —— 所有以 Busy 为闸门的防线在那段时间一起敞开'
+# 刷新函数不能把忙碌期的禁用撤销掉
+Assert-True ($raw.Contains('$ui.SymptomClearBtn.IsEnabled = ($active.Count -gt 0) -and -not $script:Busy')) `
+  'Update-SymptomFilterUi 会在忙碌期把 SymptomClearBtn 重新启用 —— 普通刷新不该能撤销 Set-BusyState'
+
 Write-Host 'PASS: GUI UAC recovery and WinPS5.1 Generic.List result paths are regression covered'

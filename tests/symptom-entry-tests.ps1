@@ -376,6 +376,34 @@ function Import-GuiFunction([string]$Name) {
   }
   # 名称列必须真的拿到大半个宽度，否则长项名全被裁成一截
   Assert-True ($headerWidths[0] -gt $headerWidths[1]) '名称列反而比当前状态列窄'
+
+  # 列对齐还不够：名称列是定比宽度，长项名必须**被裁成省略号**，而不是画到隔壁
+  # 「当前状态」列上（Grid 默认不裁剪子元素）。
+  # 这条一定要在**窄窗口**下验：780px 默认宽度只有 1 行溢出 8px，几乎看不出来；
+  # 而窗口是可以拉窄的（ResizeMode=CanResize，没有 MinWidth），560px 时 32 行里有
+  # 18 行的项名压在隔壁列上，最多溢出 130px。
+  # 根因是 TacCheck 模板原来用横向 StackPanel 包 ContentPresenter —— 横向 StackPanel
+  # 用**无限宽**测量子元素，TextTrimming 因此永远不触发。
+  foreach ($probeWidth in 778, 620, 500) {
+    $content.Measure((New-Object Windows.Size $probeWidth, 1198))
+    $content.Arrange((New-Object Windows.Rect 0, 0, $probeWidth, 1198))
+    $content.UpdateLayout()
+    $nameOverflow = New-Object Collections.Generic.List[string]
+    foreach ($row in @($itemPanel.Children)) {
+      $rowGrid = $row.Child
+      $nameText = $rowGrid.Children[0].Content
+      if ($nameText -isnot [Windows.Controls.TextBlock]) { continue }
+      # TacCheck 的勾选框 13px + 内容左间距 8px
+      $budget = $rowGrid.ColumnDefinitions[0].ActualWidth - 21
+      if ($nameText.ActualWidth -gt $budget + 1) {
+        [void]$nameOverflow.Add("$($row.DataContext.ItemId)（超出 $([math]::Round($nameText.ActualWidth - $budget, 1))px）")
+      }
+    }
+    Assert-True ($nameOverflow.Count -eq 0) `
+      ("窗口 ${probeWidth}px 下这些项名画到了「当前状态」列上，没有被裁成省略号：" +
+       "$($nameOverflow -join '、')")
+  }
+
 }
 
 # ---------- 5. 接线：可见性不变式必须在每条改勾选的路径末尾被执行 ----------
