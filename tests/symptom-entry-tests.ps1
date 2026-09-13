@@ -319,6 +319,32 @@ function Import-GuiFunction([string]$Name) {
   Assert-True (@($ui.ItemPanel.Children | Where-Object { $_.Visibility -eq 'Collapsed' }).Count -eq 0) '「显示全部」没有恢复完整列表'
   Assert-True ($ui.SymptomSummary.Text -eq '未筛选 · 显示全部优化项') '摘要没有回到未筛选状态'
 
+  # 症状 chip 是代码手搭的 Border，不走任何样式，所以 Ghost/Primary/TacCheck/TacCombo
+  # 那四处禁用态一个也覆盖不到它。执行期间 Set-BusyState 会禁用整条 SymptomPanel，
+  # 而 chip 在屏幕上零变化 —— 用户点下去毫无反应，又是一次「像卡死了」。
+  $chipBusyProbe = @($script:SymptomChips.Values)[0]
+  Assert-True ($null -ne $chipBusyProbe) '症状 chip 一个都没建出来'
+  $script:Busy = $false
+  Set-SymptomChipVisual $chipBusyProbe $false
+  $chipIdleOpacity = [double]$chipBusyProbe.Border.Opacity
+  $script:Busy = $true
+  try {
+    Set-SymptomChipVisual $chipBusyProbe $false
+    Assert-True ([double]$chipBusyProbe.Border.Opacity -lt $chipIdleOpacity) `
+      '执行期间症状 chip 被禁用了却毫无外观变化 —— 用户点下去没反应，读起来就是卡死'
+    Assert-True ("$($chipBusyProbe.Border.Cursor)" -ne 'Hand') `
+      '忙碌时 chip 还显示成可点的手形光标 —— 光标本身就是「这里能点」的承诺'
+  } finally { $script:Busy = $false }
+  # 选中态不能把忙碌态顶掉：两者是同一个函数的两个维度
+  $script:Busy = $true
+  try {
+    Set-SymptomChipVisual $chipBusyProbe $true
+    Assert-True ([double]$chipBusyProbe.Border.Opacity -lt $chipIdleOpacity) `
+      '已选中的 chip 在忙碌期又变回了正常外观 —— 选中与否和能不能点是两件事'
+  } finally { $script:Busy = $false }
+  Set-SymptomChipVisual $chipBusyProbe $false
+  Assert-True ([double]$chipBusyProbe.Border.Opacity -eq $chipIdleOpacity) '忙碌结束后 chip 没有恢复外观'
+
   # 未知症状 Id 不该改变任何筛选状态
   Switch-SymptomFilter '根本没有这条症状'
   Assert-True (@($script:ActiveSymptomIds).Count -eq 0) '未知症状 Id 不该进入筛选'

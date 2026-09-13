@@ -1001,6 +1001,15 @@ $xaml = @'
           </ControlTemplate>
         </Setter.Value>
       </Setter>
+      <!-- TacCombo 的禁用态：实测切 IsEnabled 前后整块像素完全不变（Opacity 恒为 1）。
+           执行优化期间「预设方案」下拉会被 Set-BusyState 禁用，用户点下去毫无反应。
+           这里走**样式级**触发器改整个控件的 Opacity —— 模板里那个 IsMouseOver 触发器
+           挂在内部 ToggleButton 上，改它只会淡化右边那个箭头，选中项的文字照常是亮的。 -->
+      <Style.Triggers>
+        <Trigger Property="IsEnabled" Value="False">
+          <Setter Property="Opacity" Value="{StaticResource DisabledOpacity}"/>
+        </Trigger>
+      </Style.Triggers>
     </Style>
   </Window.Resources>
 
@@ -1061,7 +1070,17 @@ $xaml = @'
           <!-- 窗口是 WindowStyle="None" 自绘标题栏，系统的最大化按钮不存在，得自己补。
                直接给 WindowState=Maximized 会盖住任务栏（无边框窗口的经典坑），
                所以另有一段 WM_GETMINMAXINFO 钩子把它限制在当前显示器的工作区内。 -->
-          <Button x:Name="MaxBtn" Content="☐" Style="{StaticResource WinBtn}" ToolTip="最大化"/>
+          <!-- 图标必须画出来，不能靠字形：☐(U+2610) 和 ❐(U+2750) 在 Microsoft YaHei UI 里
+               都没有对应字形，两态会落到同一个回退方框上，用户看不出自己在哪个状态。 -->
+          <Button x:Name="MaxBtn" Style="{StaticResource WinBtn}" ToolTip="最大化">
+            <Grid Width="11" Height="11">
+              <Path x:Name="MaxGlyphMaximize" Stroke="{DynamicResource TextSec}" StrokeThickness="1" Fill="Transparent"
+                    Data="M 0.5,0.5 L 10.5,0.5 L 10.5,10.5 L 0.5,10.5 Z"/>
+              <Path x:Name="MaxGlyphRestore" Visibility="Collapsed" Stroke="{DynamicResource TextSec}"
+                    StrokeThickness="1" Fill="Transparent"
+                    Data="M 0.5,3.5 L 7.5,3.5 L 7.5,10.5 L 0.5,10.5 Z M 3.5,3.5 L 3.5,0.5 L 10.5,0.5 L 10.5,7.5 L 7.5,7.5"/>
+            </Grid>
+          </Button>
           <Button x:Name="CloseBtn" Content="✕" Style="{StaticResource WinBtn}" ToolTip="关闭"/>
         </StackPanel>
       </Grid>
@@ -2957,6 +2976,11 @@ function Get-SymptomById([string]$Id) {
 
 function Set-SymptomChipVisual($Chip, [bool]$On) {
   if (-not $Chip) { return }
+  # 症状 chip 是代码手搭的 Border，不走任何样式，所以 Ghost/Primary/TacCheck 那三处
+  # 禁用态覆盖不到它。执行优化期间 Set-BusyState 会把整条 SymptomPanel 禁用，
+  # 而 chip 在屏幕上零变化 —— 用户点下去毫无反应，又是一次「像卡死了」。
+  $Chip.Border.Opacity = $(if ($script:Busy) { 0.42 } else { 1.0 })
+  $Chip.Border.Cursor = $(if ($script:Busy) { 'Arrow' } else { 'Hand' })
   $Chip.Border.Background = New-Brush $(if ($On) { $script:C.AccentPanel } else { $script:C.PanelDeep })
   $Chip.Border.BorderBrush = New-Brush $(if ($On) { $script:C.Green } else { $script:C.Line })
   $Chip.Text.Foreground = New-Brush $(if ($On) { $script:C.Green } else { $script:C.TextSec })
@@ -3251,10 +3275,7 @@ function New-ItemRow($Item, $State, [bool]$Last) {
   # 勾选变化时实时刷新计数；手动改动后清掉方案选中态（勾选已不再等于该方案）
   $cb.Add_Click({
     Update-Count
-    if (-not $script:ApplyingPreset -and $ui.PresetBox -and $ui.PresetBox.SelectedIndex -ge 0) {
-      $ui.PresetBox.SelectedIndex = -1
-      $ui.PresetNote.Text = ''
-    }
+    if (-not $script:ApplyingPreset) { Clear-PresetSelection }
   })
   [Windows.Controls.Grid]::SetColumn($cb, 0)
   $g.Children.Add($cb) | Out-Null
@@ -7287,6 +7308,10 @@ function Set-BusyState([bool]$On) {
                  'TuneCreateBtn','TuneNextBtn','TuneStopBtn') {
     if ($ui[$n]) { $ui[$n].IsEnabled = -not $On }
   }
+  # chip 是手搭 Border，禁用不会自动改外观，得主动刷一遍
+  foreach ($chipEntry in @($script:SymptomChips.GetEnumerator())) {
+    Set-SymptomChipVisual $chipEntry.Value (@($script:ActiveSymptomIds) -contains "$($chipEntry.Key)")
+  }
   # 更新恰好在执行优化/还原时被检测到：先不打断系统修改，收尾后立即补弹详情
   if (-not $On -and $script:UpdateInfo -and
       "$script:UpdatePromptedVersion" -ne "$($script:UpdateInfo.Version)") {
@@ -8864,6 +8889,15 @@ function Show-DetectedUpdateDialog {
   }
 }
 
+# 方案指示器（下拉 + 方案说明）失效的统一出口。三条路径共用：手动改勾选、全选、
+# 重建整张表。缺了任何一条，界面就会拿一个已经不成立的方案名继续对用户做断言。
+function Clear-PresetSelection {
+  if (-not $ui.PresetBox) { return }
+  if ($ui.PresetBox.SelectedIndex -lt 0) { return }
+  $ui.PresetBox.SelectedIndex = -1
+  if ($ui.PresetNote) { $ui.PresetNote.Text = '' }
+}
+
 function Update-ItemList {
   $ui.ItemPanel.Children.Clear()
   $ui.RiskyPanel.Children.Clear()
@@ -8885,6 +8919,15 @@ function Update-ItemList {
     $ui.RiskyPanel.Children.Add((New-ItemRow $risky[$i] $st ($i -eq $risky.Count - 1))) | Out-Null
   }
   $ui.RiskyGroup.Visibility = $(if ($risky.Count -gt 0) { 'Visible' } else { 'Collapsed' })
+  # 整张表刚被推倒重建，勾选已经回到「各项自己的默认值」，不再等于任何一个方案。
+  # 不清的话下拉会继续写着上一个方案名、方案说明继续描述它的收益和代价 ——
+  # 而实际勾上的可能只是默认集（主推全套 27 项 → 17 项，10 项静默消失）。
+  # 启动时这里先于「自动选中主推全套」执行，所以不会把那次自动选中清掉。
+  if (-not $script:ApplyingPreset) {
+    $hadPreset = ($ui.PresetBox -and $ui.PresetBox.SelectedIndex -ge 0)
+    Clear-PresetSelection
+    if ($hadPreset) { Write-Log '已重新检测优化项，勾选回到各项默认值；原先选中的方案已取消，需要的话请重新选择。' }
+  }
   Update-Count
 }
 
@@ -9179,8 +9222,16 @@ public static class DfbWindowChrome {
     MINMAXINFO mmi = (MINMAXINFO)Marshal.PtrToStructure(lParam, typeof(MINMAXINFO));
     mmi.ptMaxPosition.x = info.rcWork.left - info.rcMonitor.left;
     mmi.ptMaxPosition.y = info.rcWork.top - info.rcMonitor.top;
-    mmi.ptMaxSize.x = info.rcWork.right - info.rcWork.left;
-    mmi.ptMaxSize.y = info.rcWork.bottom - info.rcWork.top;
+    int workW = info.rcWork.right - info.rcWork.left;
+    int workH = info.rcWork.bottom - info.rcWork.top;
+    mmi.ptMaxSize.x = workW;
+    mmi.ptMaxSize.y = workH;
+    // ptMinTrackSize 也要夹住：WPF 的 MinHeight（XAML 里写死 640）会盖过 ptMaxSize，
+    // 于是在工作区高度小于 640 的屏幕（1024x600 上网本、竖屏、缩放 150% 的 1366x768）上，
+    // 「已最大化」的窗口反而比工作区还高，底部整行主操作按钮掉到屏幕外 —— 而用户
+    // 在最大化状态下没法拖动窗口把它拽回来。
+    if (mmi.ptMinTrackSize.x > workW) { mmi.ptMinTrackSize.x = workW; }
+    if (mmi.ptMinTrackSize.y > workH) { mmi.ptMinTrackSize.y = workH; }
     Marshal.StructureToPtr(mmi, lParam, true);
   }
 }
@@ -9213,7 +9264,21 @@ $ui.TitleBar.Add_MouseLeftButtonDown({
     Switch-AppWindowMaximized
     return
   }
-  if ($window.WindowState -eq [Windows.WindowState]::Maximized) { $window.WindowState = 'Normal' }
+  if ($window.WindowState -eq [Windows.WindowState]::Maximized) {
+    # 直接还原会让窗口按还原前的坐标落回去，光标可能完全不在标题栏上，
+    # 拖拽的手感是「窗口被甩走了」。Windows 原生行为是按光标的横向比例重放位置，
+    # 让光标仍落在标题栏的同一相对位置上。
+    $grabPoint = $_.GetPosition($window)
+    $ratioX = $(if ($window.ActualWidth -gt 0) { $grabPoint.X / $window.ActualWidth } else { 0.5 })
+    $restoreWidth = [double]$window.RestoreBounds.Width
+    if ([double]::IsNaN($restoreWidth) -or $restoreWidth -le 0) { $restoreWidth = [double]$window.Width }
+    $window.WindowState = 'Normal'
+    if ($restoreWidth -gt 0) {
+      $cursor = $window.PointToScreen($grabPoint)
+      $window.Left = $cursor.X - ($restoreWidth * $ratioX)
+      $window.Top = [math]::Max(0.0, $cursor.Y - $grabPoint.Y)
+    }
+  }
   $window.DragMove()
 })
 $ui.MinBtn.Add_Click({ $window.WindowState = 'Minimized' })
@@ -9222,7 +9287,11 @@ $ui.MaxBtn.Add_Click({ Switch-AppWindowMaximized })
 $window.Add_StateChanged({
   if (-not $ui.MaxBtn) { return }
   $maximized = ($window.WindowState -eq [Windows.WindowState]::Maximized)
-  $ui.MaxBtn.Content = $(if ($maximized) { '❐' } else { '☐' })
+  # 切的是两个 Path 的可见性，不是 Content 里的字 —— 那两个字形微软雅黑里没有
+  $maximizeGlyph = $window.FindName('MaxGlyphMaximize')
+  $restoreGlyph = $window.FindName('MaxGlyphRestore')
+  if ($maximizeGlyph) { $maximizeGlyph.Visibility = $(if ($maximized) { 'Collapsed' } else { 'Visible' }) }
+  if ($restoreGlyph) { $restoreGlyph.Visibility = $(if ($maximized) { 'Visible' } else { 'Collapsed' }) }
   $ui.MaxBtn.ToolTip = $(if ($maximized) { '向下还原' } else { '最大化' })
 })
 if ($script:LightThemeEnabled) {
@@ -9334,10 +9403,7 @@ $ui.SelAllChk.Add_Click({
     $row.Child.Children[0].IsChecked = $(if ($on) { $bulkSelect -and $row.Tag -ne $true } else { $false })
   }
   Update-Count
-  if ($ui.PresetBox -and $ui.PresetBox.SelectedIndex -ge 0) {
-    $ui.PresetBox.SelectedIndex = -1
-    $ui.PresetNote.Text = ''
-  }
+  Clear-PresetSelection
 })
 
 # 复制成功后按钮短暂变「已复制」再复原：给出即时反馈但不打断视线

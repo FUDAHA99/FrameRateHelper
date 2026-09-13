@@ -943,6 +943,20 @@ foreach ($busyGuard in 'ItemPanel', 'RiskyPanel', 'SelAllChk', 'SymptomPanel', '
   Assert-True ($busyFn[0].Extent.Text.Contains("'$busyGuard'")) `
     "Set-BusyState 的禁用清单漏了 $busyGuard —— 执行期间它仍然可点"
 }
+# chip 是代码手搭的 Border，禁用父面板不会自动改它的外观，Set-BusyState 必须主动刷一遍。
+# （外观本身在 symptom-entry-tests 里用真控件验，这里只钉「置忙这条路会走到刷新」。）
+$busyStateFn = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Set-BusyState'
+}, $true) | Select-Object -First 1)
+$busyChipRefresh = @($busyStateFn[0].FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.CommandAst] -and
+  "$($node.GetCommandName())" -eq 'Set-SymptomChipVisual'
+}, $true))
+Assert-True ($busyChipRefresh.Count -ge 1) `
+  'Set-BusyState 没有刷新症状 chip 的外观 —— 禁用父面板不会改手搭 Border 的一个像素，用户点下去只会觉得卡死了'
+
 $applyClick = @($ast.FindAll({
   param($node)
   $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
@@ -964,6 +978,61 @@ Assert-True ($startupAnchor -gt 0) 'cannot locate the startup catalog round-trip
 $startupSection = $raw.Substring($startupAnchor - 900, 1500)
 Assert-True ($startupSection.Contains('Set-BusyState $true') -and $startupSection.Contains('finally { Set-BusyState $false }')) `
   '启动时那次提权往返全程 $script:Busy=false —— 所有以 Busy 为闸门的防线在那段时间一起敞开'
+# 「预设方案」下拉和方案说明是界面对用户做的一个断言（「你现在勾的就是★主推全套」）。
+# 手动改勾选、点「全选」两条路径本来就会把它清掉（注释原话：勾选已不再等于该方案）。
+# Update-ItemList 把整张表推倒重建、勾选回到各项默认值，是同一件事的更彻底版本 ——
+# 原来唯独它不清，于是下拉继续写着「★ 主推全套」（27 项）、方案说明继续描述它的收益
+# 和代价，而实际勾上的只有默认集（17 项），10 项静默消失。
+$presetClearFn = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Clear-PresetSelection'
+}, $true) | Select-Object -First 1)
+Assert-True ($presetClearFn.Count -eq 1) '方案指示器没有统一的失效出口 Clear-PresetSelection'
+Assert-True ($presetClearFn[0].Extent.Text.Contains('SelectedIndex = -1') -and
+             $presetClearFn[0].Extent.Text.Contains('PresetNote')) `
+  'Clear-PresetSelection 没有把下拉和方案说明一起清掉 —— 清一半等于换个地方继续误导'
+# 钉的是「三条改勾选的路径都调了它」，不是「文件里出现过这个词」
+foreach ($presetClearScope in 'Update-ItemList', 'New-ItemRow') {
+  $wantedPresetScope = $presetClearScope
+  $presetScopeAst = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $wantedPresetScope
+  }, $true) | Select-Object -First 1)
+  Assert-True ($presetScopeAst.Count -eq 1) "找不到函数 $presetClearScope"
+  $presetClearCalls = @($presetScopeAst[0].FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+    "$($node.GetCommandName())" -eq 'Clear-PresetSelection'
+  }, $true))
+  Assert-True ($presetClearCalls.Count -ge 1) `
+    "$presetClearScope 改了勾选却没让方案指示器失效 —— 下拉会继续写着一个已经不成立的方案名"
+}
+$selAllPresetClick = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+  "$($node.Member)" -eq 'Add_Click' -and "$($node.Expression)" -eq '$ui.SelAllChk'
+}, $true) | Select-Object -First 1)
+Assert-True ($selAllPresetClick.Count -eq 1) 'cannot locate the select-all click handler'
+$selAllPresetCalls = @($selAllPresetClick[0].FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.CommandAst] -and
+  "$($node.GetCommandName())" -eq 'Clear-PresetSelection'
+}, $true))
+Assert-True ($selAllPresetCalls.Count -ge 1) '「全选」改了勾选却没让方案指示器失效'
+# 启动时那次自动套用不能被自己清掉：重建整张表的那处必须挡在 $script:ApplyingPreset 后面
+$updateItemListAst = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Update-ItemList'
+}, $true) | Select-Object -First 1)
+$presetGuardedCall = @($updateItemListAst[0].FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.IfStatementAst] -and
+  $node.Clauses[0].Item1.Extent.Text.Contains('ApplyingPreset') -and
+  $node.Extent.Text.Contains('Clear-PresetSelection')
+}, $true))
+Assert-True ($presetGuardedCall.Count -ge 1) `
+  'Update-ItemList 里清方案的那步没有挡在 $script:ApplyingPreset 后面 —— 套用方案本身会重建表，会把刚选中的方案立刻清掉'
+
 # 刷新函数不能把忙碌期的禁用撤销掉
 Assert-True ($raw.Contains('$ui.SymptomClearBtn.IsEnabled = ($active.Count -gt 0) -and -not $script:Busy')) `
   'Update-SymptomFilterUi 会在忙碌期把 SymptomClearBtn 重新启用 —— 普通刷新不该能撤销 Set-BusyState'
@@ -980,8 +1049,100 @@ Assert-True ($raw.Contains('0x0024')) `
 Assert-True ($raw.Contains('MonitorFromWindow(hwnd, 2)') -and $raw.Contains('rcWork')) `
   '工作区约束没有按**窗口所在的那台显示器**算 —— 多屏用户在副屏最大化会错位'
 Assert-True ($raw.Contains('if ($_.ClickCount -eq 2)')) '双击标题栏不能最大化/还原'
-Assert-True ($raw.Contains('$window.Add_StateChanged')) `
+# 图标必须是画出来的 Path：☐(U+2610) 和 ❐(U+2750) 在 Microsoft YaHei UI 里**都没有字形**
+# （实测 CharacterToGlyphMap 里两个码位都不存在），靠字体回退两态很可能落到同一个方框上，
+# 用户看不出自己在哪个状态。这条不查源码里有没有那两个 Path，而是把 StateChanged
+# 处理器**真的跑一遍**再读渲染出来的可见性 —— 写了却 FindName 打错名字，查源码看不出来。
+$stateChangedCall = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+  "$($node.Member)" -eq 'Add_StateChanged'
+}, $true) | Select-Object -First 1)
+Assert-True ($stateChangedCall.Count -eq 1) `
   '最大化后按钮图标不跟着变 —— 用户不知道怎么退出最大化'
+$stateChangedBody = $stateChangedCall[0].Arguments[0].ScriptBlock.GetScriptBlock()
+& {
+  $window = $mainXamlWindow
+  $ui = @{ MaxBtn = $mainXamlWindow.FindName('MaxBtn') }
+  Assert-True ($null -ne $ui.MaxBtn) '标题栏没有最大化按钮'
+  $maximizeGlyph = $window.FindName('MaxGlyphMaximize')
+  $restoreGlyph = $window.FindName('MaxGlyphRestore')
+  Assert-True ($null -ne $maximizeGlyph -and $null -ne $restoreGlyph) `
+    '最大化按钮的两态图标不是画出来的 Path —— ☐/❐ 在微软雅黑里都没有字形，别指望字体回退'
+  Assert-True ("$($maximizeGlyph.Data)" -ne "$($restoreGlyph.Data)") `
+    '最大化态和还原态画的是同一个图形 —— 用户看不出自己在哪个状态'
+  foreach ($glyphCase in @(
+    @{ State='Maximized'; Shown=$restoreGlyph; Hidden=$maximizeGlyph; Tip='向下还原' },
+    @{ State='Normal'; Shown=$maximizeGlyph; Hidden=$restoreGlyph; Tip='最大化' })) {
+    $window.WindowState = $glyphCase.State
+    & $stateChangedBody
+    Assert-True ($glyphCase.Shown.Visibility -eq 'Visible' -and $glyphCase.Hidden.Visibility -eq 'Collapsed') `
+      "窗口切到 $($glyphCase.State) 之后按钮上画的还是另一个状态的图形"
+    Assert-True ("$($ui.MaxBtn.ToolTip)" -eq $glyphCase.Tip) `
+      "窗口切到 $($glyphCase.State) 之后按钮提示还写着「$($ui.MaxBtn.ToolTip)」"
+  }
+  $window.WindowState = 'Normal'
+}
+
+# 工作区约束必须**成对**夹住 ptMaxSize 和 ptMinTrackSize：WPF 的 MinHeight（XAML 里
+# 写死 640）会盖过 ptMaxSize，于是在工作区高度小于 640 的屏幕（1024x600 上网本、
+# 竖屏、1366x768 缩放 150%）上，「已最大化」的窗口反而比工作区还高，底部整行主操作
+# 按钮掉到屏幕外 —— 而最大化状态下用户没法拖窗口把它拽回来。
+# 这条不查源码里有没有那两行 clamp，而是把这段 C# 原样编译出来**真的调一次**：
+# 喂一个 ptMinTrackSize = 99999 的 MINMAXINFO 进去，看它出来时有没有被夹到工作区以内。
+$chromeSource = [regex]::Match($raw,
+  "(?s)Add-Type @'\r?\n(using System;\r?\nusing System\.Runtime\.InteropServices;\r?\npublic static class DfbWindowChrome.*?)\r?\n'@")
+Assert-True $chromeSource.Success '找不到自绘标题栏的 interop 源码'
+Add-Type -TypeDefinition $chromeSource.Groups[1].Value
+# MINMAXINFO = 5 个 POINT：ptReserved 0 / ptMaxSize 8 / ptMaxPosition 16 / ptMinTrackSize 24 / ptMaxTrackSize 32
+$mmiBuffer = [Runtime.InteropServices.Marshal]::AllocHGlobal(40)
+try {
+  for ($mmiOffset = 0; $mmiOffset -lt 40; $mmiOffset += 4) {
+    [Runtime.InteropServices.Marshal]::WriteInt32($mmiBuffer, $mmiOffset, 0)
+  }
+  # 模拟 WPF 按 XAML 里写死的 MinWidth/MinHeight 填进来的下限
+  [Runtime.InteropServices.Marshal]::WriteInt32($mmiBuffer, 24, 99999)
+  [Runtime.InteropServices.Marshal]::WriteInt32($mmiBuffer, 28, 99999)
+  [DfbWindowChrome]::ApplyWorkArea([IntPtr]::Zero, $mmiBuffer)
+  $mmiMaxW = [Runtime.InteropServices.Marshal]::ReadInt32($mmiBuffer, 8)
+  $mmiMaxH = [Runtime.InteropServices.Marshal]::ReadInt32($mmiBuffer, 12)
+  $mmiMinW = [Runtime.InteropServices.Marshal]::ReadInt32($mmiBuffer, 24)
+  $mmiMinH = [Runtime.InteropServices.Marshal]::ReadInt32($mmiBuffer, 28)
+  Assert-True ($mmiMaxW -gt 0 -and $mmiMaxH -gt 0) `
+    "工作区约束整个没生效（最大尺寸仍是 $mmiMaxW x $mmiMaxH）—— 最大化会盖住任务栏"
+  # 夹不住 ptMinTrackSize 的话，WPF 的 MinHeight（XAML 里写死 640）会盖过 ptMaxSize：
+  # 工作区高度小于 640 的屏幕（1024x600 上网本、竖屏、1366x768 缩放 150%）上，
+  # 「已最大化」的窗口反而比工作区还高，底部整行主操作按钮掉到屏幕外 ——
+  # 而最大化状态下用户没法拖窗口把它拽回来。
+  Assert-True ($mmiMinW -le $mmiMaxW -and $mmiMinH -le $mmiMaxH) `
+    "最小尺寸下限（$mmiMinW x $mmiMinH）没有跟着夹到工作区（$mmiMaxW x $mmiMaxH）以内 —— 小屏上最大化后底部整行按钮会掉到屏幕外"
+} finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($mmiBuffer) }
+
+# 最大化状态下拖标题栏：必须**先**还原、**再**按光标位置重放窗口坐标。顺序反了的话
+# WindowState 的还原会把刚算好的 Left/Top 一起冲掉，窗口按还原前的旧坐标落回去，
+# 光标可能完全不在标题栏上 —— 手感是「窗口被甩走了」。
+$titleBarDrag = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+  "$($node.Member)" -eq 'Add_MouseLeftButtonDown' -and "$($node.Expression)" -eq '$ui.TitleBar'
+}, $true) | Select-Object -First 1)
+Assert-True ($titleBarDrag.Count -eq 1) '找不到标题栏拖拽处理器'
+$dragAssignments = @($titleBarDrag[0].FindAll({
+  param($node) $node -is [Management.Automation.Language.AssignmentStatementAst]
+}, $true))
+$dragRestoreState = @($dragAssignments | Where-Object { "$($_.Left)" -eq '$window.WindowState' } |
+  Select-Object -First 1)
+$dragReplayLeft = @($dragAssignments | Where-Object { "$($_.Left)" -eq '$window.Left' } |
+  Select-Object -First 1)
+Assert-True ($dragRestoreState.Count -eq 1 -and $dragReplayLeft.Count -eq 1) `
+  '最大化状态下拖标题栏没有按光标位置重放窗口坐标 —— 窗口会落回还原前的旧位置，光标够不着标题栏'
+Assert-True ($dragReplayLeft[0].Extent.StartOffset -gt $dragRestoreState[0].Extent.EndOffset) `
+  '重放窗口坐标排在还原 WindowState 之前 —— 还原会把刚算好的 Left/Top 冲掉，等于没写'
+$dragCursor = @($dragAssignments | Where-Object { $_.Right.Extent.Text.Contains('PointToScreen') } |
+  Select-Object -First 1)
+Assert-True ($dragCursor.Count -eq 1) '重放的坐标不是按光标实际位置算的'
+Assert-True ($dragReplayLeft[0].Right.Extent.Text.Contains("$($dragCursor[0].Left)")) `
+  '重放的横坐标没有用到光标位置 —— 窗口还是会落到一个和光标无关的地方'
 
 # ---------------------------------------------------------------------------
 #  禁用态必须看得出来
@@ -1012,10 +1173,14 @@ function Get-DisabledProbeOpacity($Control, [string]$PartName) {
   [double]$Control.Opacity
 }
 
+# TacCombo 那条注意：模板里的 IsMouseOver 触发器挂在**内部 ToggleButton** 上，
+# 只改它的话淡化的是右边那个箭头，选中项的文字照常是亮的 —— 实测切 IsEnabled
+# 前后整个控件 Opacity 恒为 1。所以这里读的是控件自身的 Opacity（Part=''）。
 foreach ($disabledProbe in @(
   @{ Name='RefreshBtn'; Style='Ghost'; Part='B' },
   @{ Name='ApplyBtn'; Style='Primary'; Part='Bg' },
-  @{ Name='SelAllChk'; Style='TacCheck'; Part='' })) {
+  @{ Name='SelAllChk'; Style='TacCheck'; Part='' },
+  @{ Name='PresetBox'; Style='TacCombo'; Part='' })) {
   $probeControl = $disabledProbeWindow.FindName($disabledProbe.Name)
   Assert-True ($null -ne $probeControl) "找不到控件 $($disabledProbe.Name)"
   $probeControl.IsEnabled = $true
