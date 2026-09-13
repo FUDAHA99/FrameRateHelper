@@ -36,3 +36,6 @@ __pycache__/
 /tests/admin-experiment-dashboard-tests.ps1
 /tests/website-responsive-tests.ps1
 /tests/website-stats-highlight-tests.js
+
+# workflow/agent 的临时 git worktree，不是项目内容
+.claude/worktrees/
