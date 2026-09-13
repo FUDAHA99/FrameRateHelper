@@ -785,7 +785,7 @@ $hashRowsText
             string validationError = ValidateFiles(root);
             if (validationError != null) {
                 MessageBox.Show("程序文件不完整或已被修改：" + validationError +
-                    "\n\n为避免运行异常文件，启动已停止。请从官网重新安装完整版本。",
+                    "\n\n为避免运行异常文件，启动已停止。请从发布页重新下载安装包，安装完整版本。",
                     "帧率优化助手", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }

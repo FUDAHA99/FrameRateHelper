@@ -119,7 +119,7 @@ static class Program {
         string selfError = VerifySelfIntegrity(expectedSha256, expectedSize);
         if (selfError != null) {
             Log(logFile, "安装器启动复验失败: " + selfError);
-            if (runAfter) WarnBox("更新安装包在启动前复验失败，已停止安装。\r\n\r\n" + selfError + "\r\n\r\n请重新检查更新或从官网下载。 ");
+            if (runAfter) WarnBox("更新安装包在启动前复验失败，已停止安装。\r\n\r\n" + selfError + "\r\n\r\n请重新检查更新，或前往发布页重新下载安装包。 ");
             Environment.Exit(5); return;
         }
         if (checkDir != null) { Environment.Exit(RunCheck(checkDir, logFile)); return; }

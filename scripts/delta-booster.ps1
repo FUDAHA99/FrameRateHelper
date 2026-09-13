@@ -2542,6 +2542,12 @@ function Get-OptItems([string]$GamePath) {
   $items
 }
 
+# 「这个项目已经回到优化前了」只有这两种 Outcome 算数。conflict / unsupported /
+# no_record 都是「没有回去」，failed 是「试了但没成」。Ok 字段、Skipped 通道、
+# RestoredItemIds 三处必须用同一份判据，否则就会出现「Ok=true 却 Outcome=conflict、
+# 既不进 Failed 也不进 Skipped」这种既不报错也不承认的第三态。
+$script:RestoreOutcomeSettled = @('restored', 'already_restored')
+
 # ---------- 按症状检索（信息架构，不改任何系统设置） ----------
 
 # 用户找的是「我遇到的问题」，不是「用什么手段」。项名写的全是手段（HwSchMode、MMCSS、
@@ -4781,8 +4787,12 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
               [void]$touched.Add($unit.TargetKey)
               Invoke-RestoreRegOperation $unit.Restore
             }
-            $ok = $true
             $outcome = $(if ($writeUnits.Count -eq 0) { 'already_restored' } elseif ($conflictUnits.Count -gt 0) { 'conflict' } else { 'restored' })
+            # Ok 必须始终等价于 Outcome ∈ {restored, already_restored}（SKILL.md 的契约）。
+            # 原来这里无条件 $ok=$true：一个项目只要有一条 unit 写回成功，哪怕同时有 unit
+            # 处于冲突被刻意保留，也会被算成「整体回到优化前」—— 既不进 Failed 也不进
+            # Skipped，退出码 0，界面说「已恢复到第一次被工具修改前」。那是一句假话。
+            $ok = ($outcome -in $script:RestoreOutcomeSettled)
             $message = "已复原 $($writeUnits.Count) 个底层设置" +
                        $(if ($settledUnits.Count -gt 0) { "（另有 $($settledUnits.Count) 项本来就已经是原值，仅归档记录）" }) +
                        $conflictNote
@@ -4835,7 +4845,10 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
       Mode='selected_items'; File=$(if($files.Count){$files[0]}else{$null}); Files=$files; MergedCount=$files.Count
       # 只数真正写回去的：already_restored 的 unit 进了凭证但一个字节都没写
       RestoredOps=@($successArray | ForEach-Object { @($_.Snapshots.Keys).Count } | Measure-Object -Sum).Sum
-      RestoredItems=$successArray.Count; Failed=@($failed.ToArray())
+      # RestoredItems / RestoredItemIds 回答的是「哪些项目**整体**回到了优化前」，
+      # 所以按 Outcome 算，不能按 $successArray（那是消费台账，部分冲突项也在里面）。
+      RestoredItems=@($itemResults.ToArray() | Where-Object { $_.Outcome -in $script:RestoreOutcomeSettled }).Count
+      Failed=@($failed.ToArray())
       # 冲突 / 不支持 / 没有记录都进 Skipped：它们没有还原，但也不是执行失败。
       # 把这三类混进 Failed 会让退出码变成 4、界面说「还原未完成」，两个结论都不对。
       Skipped=@($skippedItems.ToArray()); Notes=@($state.Notes)
@@ -4845,10 +4858,11 @@ function Invoke-RestoreSelected([string[]]$ItemIds, [scriptblock]$Progress) {
       SkippedItemIds=@($itemResults.ToArray() | Where-Object { -not $_.Ok } | ForEach-Object Id)
       SkippedItems=@($itemResults.ToArray() | Where-Object { -not $_.Ok } | ForEach-Object Name)
       # 可发现性字段：两条还原路径的形状必须一致，界面才能用同一套渲染
-      UnreadableBackupCount=[int]$state.UnreadableCount; UnrestorableOpCount=@(Get-FaultedRestoreOps $state.Records).Count
+      UnreadableBackupCount=[int]$state.UnreadableCount; UnrestorableOpCount=[int]$state.OpFaultCount
+      EnumerationFailureCount=[int]$state.EnumerationFailureCount
       UnreadableReceiptCount=@($consumed.Unreadable).Count
       ItemResults=@($itemResults.ToArray()); RebootItems=@($successArray | Where-Object RebootRequired | ForEach-Object Name)
-      RestoredItemIds=@($successArray | ForEach-Object Id)
+      RestoredItemIds=@($itemResults.ToArray() | Where-Object { $_.Outcome -in $script:RestoreOutcomeSettled } | ForEach-Object Id)
       RebootItemIds=@($successArray | Where-Object RebootRequired | ForEach-Object Id)
       ApplyIds=@($successArray | ForEach-Object { @($_.Wrappers | ForEach-Object { "$($_.Op.ApplyId)" }) } | Select-Object -Unique)
       Receipt=$receiptPath
@@ -4869,7 +4883,8 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
     return [pscustomobject]@{ Mode='all'; File=$File; Files=@($File); MergedCount=1; RestoredOps=0
       Failed=@(); Skipped=@(); Notes=@($state.Notes); BookkeepingFailed=@(); RestoredItemIds=@();
       SkippedItemIds=@(); SkippedItems=@(); RebootItems=@()
-      UnreadableBackupCount=[int]$state.UnreadableCount; UnrestorableOpCount=0; UnreadableReceiptCount=0
+      UnreadableBackupCount=[int]$state.UnreadableCount; UnrestorableOpCount=[int]$state.OpFaultCount
+      EnumerationFailureCount=[int]$state.EnumerationFailureCount; UnreadableReceiptCount=0
       RebootItemIds=@(); ApplyIds=@(); Receipt=$null }
   }
   $restoreNotes = @($state.Notes)
@@ -4896,7 +4911,8 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
         Skipped=@(); BookkeepingFailed=@()
         Notes=@($(if ($faultedFailures.Count -gt 0) { '指定备份里的改动都没有通过校验，无法自动还原' } else { '指定备份此前已完成还原，本次无需重复执行' }))
         RestoredItemIds=@(); SkippedItemIds=@(); SkippedItems=@(); RebootItems=@(); RebootItemIds=@()
-        UnreadableBackupCount=[int]$state.UnreadableCount; UnrestorableOpCount=$faultedOps.Count
+        UnreadableBackupCount=[int]$state.UnreadableCount; UnrestorableOpCount=[int]$state.OpFaultCount
+        EnumerationFailureCount=[int]$state.EnumerationFailureCount
         UnreadableReceiptCount=@($consumed.Unreadable).Count
         ApplyIds=@(); Receipt=$null }
     }
@@ -5250,7 +5266,8 @@ function Invoke-Restore([string]$File, [scriptblock]$Progress) {
                      # 可发现性字段：$state 早就算出来了，只是从没透传。界面要能分清
                      # 「没有可还原的」「有但读不了」「读到了但那条改动还不回去」。
                      UnreadableBackupCount = [int]$state.UnreadableCount
-                     UnrestorableOpCount = $faultedOps.Count
+                     UnrestorableOpCount = [int]$state.OpFaultCount
+                     EnumerationFailureCount = [int]$state.EnumerationFailureCount
                      UnreadableReceiptCount = @($consumed.Unreadable).Count
                      Receipt=$receiptPath }
   } finally { Exit-EngineMutex $engineMutex }
@@ -5438,6 +5455,15 @@ function Remove-ToolResidue([string]$Kind, [string]$Id) {
       "已删除电源方案 $Id"
     }
     'sched-task' {
+      # 两条都要，少一条就可能删掉别人的任务 —— 这正是 Get-BoosterLockTaskState 的注释
+      # 写死的规则：Test-BoosterLockTask 只验命令行是 powercfg /setactive <guid>，而别家
+      # 厂商（OEM 电源管理、网吧管理软件）的电源任务完全可能长得一模一样。名字这半条
+      # 原来漏在外面，而 Kind/Id 是跨 UAC 边界传进来的不可信输入，
+      # \Lenovo\Power\ApplyHighPerformance 这种目标能直接被删掉。
+      # 正则与 :993 的 $nameRx 和 Assert-BackupOperation 的 sched 白名单逐字一致。
+      if ("$Id" -notmatch ('^' + [regex]::Escape($script:LockTaskPrefix) + '(-[0-9A-Fa-f]{12})?$')) {
+        throw '该计划任务名不在本工具的命名空间内，已拒绝删除'
+      }
       if (-not (Test-BoosterLockTask "$Id")) { throw '该计划任务不是本工具创建，已拒绝删除' }
       Remove-BoosterTask "$Id"
       "已删除计划任务 $Id"
@@ -5454,7 +5480,19 @@ function Remove-ToolResidue([string]$Kind, [string]$Id) {
       $allowed = @(@(Get-BoosterIfeoResiduePaths) + @(Get-BoosterIfeoResiduePaths | ForEach-Object { "$_\PerfOptions" }))
       if ($allowed -notcontains "$Id") { throw '该注册表路径不在可清理白名单内，已拒绝删除' }
       Remove-EmptyRegKey "$Id"
-      "已删除空键 $Id"
+      $removedPaths = @("$Id")
+      # 删掉 PerfOptions 之后，以**游戏主程序**命名的父键通常就空了 —— 而那个键才是
+      # 这个功能自己说的「杀软和反作弊的重点扫描位」。Invoke-Restore 的收尾清理一趟
+      # 删两级，这里原来只删一级：界面按第一次扫描的快照报「已清理 1 项 / 清理完成」，
+      # 而那个键还在，用户得再点一次「检查工具残留」才看得到它。
+      # 父键仍然要过同一份白名单，判据一个字都不放宽。
+      $parentPath = "$Id" -replace ('\\PerfOptions$'), ''
+      if ($parentPath -ne "$Id" -and $allowed -contains $parentPath -and
+          (Test-RegKeyExists $parentPath) -and (Test-RegKeyEmpty $parentPath)) {
+        Remove-EmptyRegKey $parentPath
+        $removedPaths += $parentPath
+      }
+      "已删除空键 $($removedPaths -join '、')"
     }
     'programdata' { throw '受保护数据目录不会由本工具删除：里面有你的备份和完整性密钥，请在确认不再需要还原后手动删除' }
     default { throw "未知的残留类型：$Kind" }
@@ -5472,6 +5510,22 @@ function Remove-BoosterTask([string]$TaskName) {
   $ErrorActionPreference = 'Stop'
   $after = Get-TaskQueryState $TaskName
   if ($after -ne 'absent') { throw "计划任务删除失败（退出码 $code，删除后状态 $after）：$(("$out").Trim())" }
+}
+
+# 还原结果的六档标签。GUI 的运行日志、CLI 的文本输出必须用同一套措辞，否则同一件事
+# 在两个地方有两个名字。「冲突」「不支持」「没有记录」都不是失败：把它们说成失败会让
+# 用户以为改动还留在系统里，跑去重试还原或手动折腾。
+function Get-RestoreOutcomeTag($ItemResult) {
+  switch ("$($ItemResult.Outcome)") {
+    'restored'         { '[复原成功]' }
+    'already_restored' { '[本来就是原值]' }
+    'conflict'         { '[保留后续修改]' }
+    'unsupported'      { '[不支持自动还原]' }
+    'no_record'        { '[没有可复原记录]' }
+    'failed'           { '[复原失败]' }
+    # Outcome 缺失只可能是结果对象被改坏了，照实说，别猜成成功
+    default            { '[结果未知]' }
+  }
 }
 
 # ---------- 输出 ----------
@@ -5493,9 +5547,13 @@ function Get-ApplyExitCode($Result) {
 function Get-RestoreExitCode($Result) {
   if (@($Result.Failed | Where-Object { $_ }).Count -gt 0) { return 4 }
   if (@($Result.BookkeepingFailed | Where-Object { $_ }).Count -gt 0) { return 6 }
+  # 「一整个备份目录读不出来」和「某一份备份读不出来」是同一件事：那些改动**还在系统里**。
+  # 它原来只进了目录（还原清单页），没进还原结果，于是退出码照给 0、界面照说「全部还原
+  # 成功，各项已回到优化前的状态」，而那个目录里的备份一条都没被列出来过。
   if (@($Result.Skipped | Where-Object { $_ }).Count -gt 0 -or
       [int]$Result.UnreadableBackupCount -gt 0 -or
-      [int]$Result.UnrestorableOpCount -gt 0) { return 5 }
+      [int]$Result.UnrestorableOpCount -gt 0 -or
+      [int]$Result.EnumerationFailureCount -gt 0) { return 5 }
   0
 }
 
@@ -5718,8 +5776,17 @@ elseif ($Restore) {
   if ($Json) { $r | ConvertTo-Json -Depth 4 }
   else {
     if ($r.Mode -eq 'selected_items') {
-      foreach ($item in @($r.ItemResults)) { Write-Output "  $(if ($item.Ok) { '[复原成功]' } else { '[复原失败]' }) $($item.Name) — $($item.Message)" }
-      Write-Output "按项目复原完成：$($r.RestoredItems) 项成功，共写回 $($r.RestoredOps) 个底层设置"
+      # 这里原来只有「成功 / 失败」两档，于是冲突、不支持、没有记录全被打成「[复原失败]」，
+      # 而同一次运行的退出码是 5（部分回退）—— 标准输出、汇总行、退出码三个结论互相打架。
+      # 「把冲突说成失败」正是 SKILL.md 明写不许做的那件事：用户（或照着转述的 agent）
+      # 会据此判断工具坏了、改动还留在系统里，而真相是这一项按设计保留了他后来的新值。
+      foreach ($item in @($r.ItemResults)) {
+        Write-Output "  $(Get-RestoreOutcomeTag $item) $($item.Name) — $($item.Message)"
+      }
+      $cliSettled = @($r.ItemResults | Where-Object { "$($_.Outcome)" -in $script:RestoreOutcomeSettled }).Count
+      $cliNotSettled = @($r.ItemResults).Count - $cliSettled
+      Write-Output ("按项目复原完成：$cliSettled 项已回到原值，共写回 $($r.RestoredOps) 个底层设置" +
+        $(if ($cliNotSettled -gt 0) { "；另有 $cliNotSettled 项没有回到原值（原因见上面每一行的标签）" }))
     } elseif ($r.MergedCount -gt 1) { Write-Output "已合并 $($r.MergedCount) 份备份，共还原 $($r.RestoredOps) 项改动（同一设置以最早备份的原值为准）" }
     else { Write-Output "已按备份还原 $($r.RestoredOps) 项改动（备份：$($r.File)）" }
     foreach ($f in $r.Failed) { Write-Output "  [还原失败] $f" }

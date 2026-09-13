@@ -188,6 +188,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booste
 - `SkippedItemIds` / `SkippedItems`——有改动没回到原样的项目 Id / 显示名。
 - `RebootItems` / `RebootItemIds`——只要有改动真的写回去了就会出现，哪怕同项目里另有一条失败。
 - `Notes`——可能包含必须转述的事实（如某份备份没被还原、工具自建电源方案保留的说明）。
+- `UnreadableBackupCount` / `UnrestorableOpCount` / `EnumerationFailureCount`——三种
+  「工具知道有改动没回去」的信号，共同点是**那些改动仍然留在系统里**：分别是某份备份读不了、
+  某条 op 的记录没通过校验（含 v1 旧备份迁移时被剔除的 op，那类**永远**还不回去），
+  以及整整一个备份目录读不出来（「读不出来」≠「里面没有备份」）。
+  只要有一个不为 0，就**不许**说「全部还原成功／已回到优化前」。
 
 按项目复原的 `ItemResults` 每行带 `Outcome`，比 `Ok` 布尔多说很多：
 
@@ -197,6 +202,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booste
 `Ok` 仍然等价于 `Outcome ∈ {restored, already_restored}`。
 **只有 `failed` 进 `Failed`**，其余进 `Skipped`——把冲突说成失败会让退出码和界面结论都变错。
 
+**一个项目里只有部分设置冲突时，整项算 `conflict`，不算复原完成。** 它进 `Skipped`、
+不进 `RestoredItemIds`、退出码 5。这条以前是反的：只要有一条 unit 写回成功就算整项成功，
+于是出现「`Ok=true` 却 `Outcome=conflict`」——既不进 `Failed` 也不进 `Skipped` 的第三态，
+退出码 0，而那个项目根本没有整体回到优化前。转述时要说清「这一项里有 N 条设置按设计保留了
+你后来的值，改回去之后可以再复原」，不要说成「已恢复到优化前」。
+
+CLI 文本输出（不带 `-Json`）用同一套六档标签：`[复原成功]` / `[本来就是原值]` /
+`[保留后续修改]` / `[不支持自动还原]` / `[没有可复原记录]` / `[复原失败]`。
+看到 `[保留后续修改]` **不要**判断成工具坏了或改动没回去——那是按设计保留了用户的新值。
+
 `-Restore` 的退出码，四档对应四种完全不同的下一步：
 
 | 码 | 含义 | 用户该做什么 |
@@ -204,7 +219,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<root>\scripts\delta-booste
 | `0` | 全部还原成功 | 无 |
 | `4` | 有 `Failed` | 对应改动仍留在系统里，排查后可重试还原 |
 | `6` | 有 `BookkeepingFailed` | **别立刻重试**，先修好备份目录，否则下次还原会重复写回旧值 |
-| `5` | 有 `Skipped`／读不了的备份／还不回去的改动 | 系统能用，但没有完全回到优化前，按提示逐条处理 |
+| `5` | 有 `Skipped`／读不了的备份／还不回去的改动／读不出来的备份目录 | 系统能用，但没有完全回到优化前，按提示逐条处理 |
 
 优先级即上表顺序：4 最严重，其次 6（有数据在危险里），再次 5。
 

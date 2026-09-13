@@ -952,7 +952,8 @@ try {
   # 界面和 agent 用同一套渲染。少一个字段，某条路径上的那类信息就对用户彻底不可见。
   $shapeFields = @('Mode','File','Files','MergedCount','RestoredOps','Failed','Skipped','Notes',
     'BookkeepingFailed','RestoredItemIds','SkippedItemIds','SkippedItems','RebootItems','RebootItemIds',
-    'ApplyIds','Receipt','UnreadableBackupCount','UnrestorableOpCount','UnreadableReceiptCount')
+    'ApplyIds','Receipt','UnreadableBackupCount','UnrestorableOpCount','UnreadableReceiptCount',
+    'EnumerationFailureCount')
   [void](New-AccountingRegBackup @(
     [pscustomobject]@{ItemId='sys-responsiveness';DisplayName='系统响应度';Hash=('5'*63+'6');RebootRequired=$false
       Path=$mmPath;Name='SystemResponsiveness';OldValue=20;AppliedValue=10}
@@ -984,6 +985,107 @@ try {
     $namedFail.Failed[0] -like '*HwSchMode*') `
     '失败行只给注册表值名，用户根本不知道是哪一项出了问题'
 
+  # ---------- 12. 「没完全回去」的三种形状都必须说出来 ----------
+  #
+  # 这三条都是同一个病：工具**知道**某些改动没有回到优化前，却在结果里把这件事丢掉了，
+  # 于是退出码给 0、界面给绝对断言「全部还原成功，各项已回到优化前的状态」。
+  # 用户关掉窗口，以为事情结束了。
+
+  # 12a 一个项目两条设置，一条可还原、一条在优化后被改成第三个值。
+  # 原来：只要有一条写回成功 $ok 就是 $true，于是 Outcome='conflict' 但 Ok=true，
+  # 「if failed / elseif -not ok」两条都不命中 —— 既不进 Failed 也不进 Skipped，
+  # 反而被算进 RestoredItemIds，退出码 0。
+  [void](New-AccountingItemBackup 'game-mode' '开启 Windows 游戏模式' ('c' * 63 + 'd') @(
+    [pscustomobject]@{Path=$gameModePath;Name='AutoGameModeEnabled';OldValue=0;AppliedValue=1}
+    [pscustomobject]@{Path=$gameModePath;Name='AllowAutoGameMode';OldValue=0;AppliedValue=1}
+  ))
+  # 用户之后自己在 Windows 设置里动过一次，只改到其中一个值
+  $script:RegState[(Get-TestRegKey $gameModePath 'AllowAutoGameMode')] = [pscustomobject]@{ Value=7;Kind='DWord' }
+  $partial = Invoke-RestoreSelected @('game-mode')
+  $partialRow = @($partial.ItemResults)[0]
+  Assert-True ("$($partialRow.Outcome)" -eq 'conflict') '一项里有冲突设置时 Outcome 应为 conflict'
+  Assert-True (-not $partialRow.Ok) `
+    'Ok 必须始终等价于 Outcome ∈ {restored, already_restored}；部分冲突不是「已回到优化前」'
+  Assert-True (@($partial.Skipped | Where-Object { $_ }).Count -eq 1) `
+    '部分冲突的项目既没进 Failed 也没进 Skipped —— 那是一个既不报错也不承认的第三态'
+  Assert-True (@($partial.RestoredItemIds) -notcontains 'game-mode') `
+    'RestoredItemIds 只能收「全部改动都写回了原值」的项目'
+  Assert-True ([int]$partial.RestoredItems -eq 0) `
+    'RestoredItems 是给界面说「N 个项目已恢复到优化前」用的，部分冲突项不能算进去'
+  Assert-True ((Get-RestoreExitCode $partial) -eq 5) `
+    '部分冲突的退出码必须是 5（系统能用，但没有完全回到优化前），不是 0'
+  # 真正写回的那条要写回；冲突那条要保留用户的值
+  Assert-True ($script:RegState[(Get-TestRegKey $gameModePath 'AutoGameModeEnabled')].Value -eq 0) `
+    '可还原的那条设置没有被写回原值'
+  Assert-True ($script:RegState[(Get-TestRegKey $gameModePath 'AllowAutoGameMode')].Value -eq 7) `
+    '冲突那条必须保留用户的当前值，不能被覆盖'
+  # 冲突 unit 不消费：用户把值改回去之后还应该能复原
+  Assert-True (@(Get-RestoreItemCatalog).Items.Id -contains 'game-mode') `
+    '冲突 unit 被消费掉了，用户改回原值后再也复原不了'
+
+  # 12b 「一整个备份目录读不出来」和「某一份备份读不出来」是同一件事：
+  # 那些改动**还在系统里**。它原来只进了还原清单页，没进还原结果，也没进退出码。
+  foreach ($enumCase in @(
+    @{ Name='EnumerationFailureCount'; Result=[pscustomobject]@{ Failed=@();BookkeepingFailed=@();Skipped=@()
+       UnreadableBackupCount=0;UnrestorableOpCount=0;EnumerationFailureCount=1 } },
+    @{ Name='UnreadableBackupCount'; Result=[pscustomobject]@{ Failed=@();BookkeepingFailed=@();Skipped=@()
+       UnreadableBackupCount=1;UnrestorableOpCount=0;EnumerationFailureCount=0 } },
+    @{ Name='UnrestorableOpCount'; Result=[pscustomobject]@{ Failed=@();BookkeepingFailed=@();Skipped=@()
+       UnreadableBackupCount=0;UnrestorableOpCount=1;EnumerationFailureCount=0 } })) {
+    Assert-True ((Get-RestoreExitCode $enumCase.Result) -eq 5) `
+      "$($enumCase.Name) 不为 0 时退出码必须是 5 —— 有改动没回去，不能给 0"
+  }
+  Assert-True ((Get-RestoreExitCode ([pscustomobject]@{ Failed=@();BookkeepingFailed=@();Skipped=@()
+    UnreadableBackupCount=0;UnrestorableOpCount=0;EnumerationFailureCount=0 })) -eq 0) `
+    '五个信号全为 0 时才允许给 0'
+
+  # 12c v1 旧备份迁移时被剔除的 op（白名单不通过）必须算进 UnrestorableOpCount。
+  # 它和「校验没过的 op」是同一件事：这条改动**永远**还不回去 —— 而且迁移后的签名副本
+  # 里已经没有它了，下次读副本时连提示都不会再出现。
+  #
+  # 必须隔离到一套干净的备份目录里跑：前面几节留下了一堆 fault op，直接在原目录上断言
+  # 「UnrestorableOpCount ≥ 1」会在**没修**的代码上也成立 —— 那就是一条假绿。
+  # 这里干净目录里只有一份旧备份（1 条被剔除的 file op + 1 条正常 reg op），
+  # 旧写法（只看 OpFaults）会得到 0，新写法（看 OpFaultCount）得到 1。
+  $isolatedRoot = Join-Path $temp ('legacy-drop-' + [guid]::NewGuid().ToString('N'))
+  $savedBackupDir = $script:BackupDir
+  $savedLegacyBackupDir = $script:LegacyBackupDir
+  $savedLegacyRootsFile = $script:LegacyRootsFile
+  try {
+    $script:BackupDir = Join-Path $isolatedRoot 'backup'
+    # 旧安装根的目录名必须匹配 ^\.DeltaForceBooster\.migrated-[0-9A-Fa-f]{32}$（冻结标识符），
+    # 否则 Get-LegacyRoots 会把它当成「格式无效」直接跳过，这一节就什么都测不到了。
+    $isolatedLegacyRoot = Join-Path $isolatedRoot '.DeltaForceBooster.migrated-0123456789abcdef0123456789abcdef'
+    $script:LegacyBackupDir = Join-Path $isolatedLegacyRoot 'backup'
+    $script:LegacyRootsFile = Join-Path $isolatedRoot 'legacy-roots.json'
+    [void][IO.Directory]::CreateDirectory($script:BackupDir)
+    [void][IO.Directory]::CreateDirectory($script:LegacyBackupDir)
+    [IO.File]::WriteAllText($script:LegacyRootsFile,
+      (([ordered]@{ SchemaVersion=1; Roots=@($isolatedLegacyRoot) }) | ConvertTo-Json),
+      (New-Object Text.UTF8Encoding($false)))
+    $droppedLegacyPath = Join-Path $script:LegacyBackupDir 'backup-20260812-000000.json'
+    [IO.File]::WriteAllText($droppedLegacyPath, (([pscustomobject]@{ Time='2026-08-12T00:00:00'; Ops=@(
+      [pscustomobject]@{ Kind='file'; Path=(Join-Path $temp 'nvidia-app.cfg'); OrigB64=[Convert]::ToBase64String([byte[]](9,9)) },
+      [pscustomobject]@{ Kind='reg'; Path=$hagsPath; Name='HwSchMode'; Existed=$true; OldValue=1; OldKind='DWord' }
+    ) }) | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+    $script:RegState[(Get-TestRegKey $hagsPath 'HwSchMode')] = [pscustomobject]@{ Value=2;Kind='DWord' }
+
+    $legacyDropResult = Invoke-Restore $null
+    Assert-True ([int]$legacyDropResult.UnrestorableOpCount -eq 1) `
+      ("迁移时被剔除的 op 没进 UnrestorableOpCount（实际 $($legacyDropResult.UnrestorableOpCount)）—— " +
+       '那条改动永远还不回去，而界面的五信号闸门看不见它，会照常说「全部还原成功，各项已回到优化前的状态」')
+    Assert-True (@($legacyDropResult.Failed | Where-Object { $_ }).Count -eq 0) `
+      '干净目录里的这次还原不该有失败项，否则下面的退出码断言测的就不是同一件事'
+    Assert-True ((Get-RestoreExitCode $legacyDropResult) -eq 5) `
+      '有 op 在迁移时被剔除，退出码必须是 5 而不是 0'
+    Assert-True ($script:RegState[(Get-TestRegKey $hagsPath 'HwSchMode')].Value -eq 1) `
+      '同一份旧备份里正常的那条 reg op 仍然要被还原'
+  } finally {
+    $script:BackupDir = $savedBackupDir
+    $script:LegacyBackupDir = $savedLegacyBackupDir
+    $script:LegacyRootsFile = $savedLegacyRootsFile
+  }
+
   # ---------- 11. 工具残留反查 ----------
   # 还原「成功」之后系统里仍然留着以本产品命名、用户自己查不到也删不掉的东西。
   # 还原成功会消费掉备份，此后连 GUID / 任务名都不可达——不给反查入口，
@@ -1002,6 +1104,8 @@ try {
     $script:ResidueActiveGuid = $script:BalancedGuid
     $script:ResidueOrphanTask = "$($script:LockTaskPrefix)-998877665544"
     $script:ResidueOneShot = "$($script:PowerCleanupTaskPrefix)-$('a' * 32)"
+    # 命令行与我们一模一样、只是名字属于别家命名空间的 OEM 电源任务
+    $script:ResidueForeignPowerTask = '\Lenovo\Power\ApplyHighPerformance'
     $script:ResidueEmptyKeys = @{}
     $script:ResidueRemovedKeys = @()
     $script:ResidueForeignGuid = '44444444-5555-4666-8777-888888888888'
@@ -1018,15 +1122,35 @@ try {
       if ($TaskName -in @($script:ResidueOrphanTask, $script:ResidueOneShot)) { return 'present' }
       'absent'
     }
-    function Test-BoosterLockTask([string]$TaskName) { $TaskName -eq $script:ResidueOrphanTask }
-    function Test-RegKeyExists([string]$Path) { $script:ResidueEmptyKeys.ContainsKey($Path) }
-    function Test-RegKeyEmpty([string]$Path) { [bool]$script:ResidueEmptyKeys[$Path] }
+    # 这个桩必须按**命令行**判，不能按名字判：Test-BoosterLockTask 真身验的就是命令行
+    # 是不是 powercfg /setactive <guid>，而别家厂商（OEM 电源管理、网吧管理软件）的电源
+    # 任务完全可能长一模一样。按名字打桩会把「命名空间」那半条判据一起桩掉 —— 那条
+    # 判据就永远测不到，而它正是「别删掉别人的任务」的唯一防线。
+    function Test-BoosterLockTask([string]$TaskName) {
+      @($script:ResidueOrphanTask, $script:ResidueForeignPowerTask) -contains $TaskName
+    }
+    function Test-RegKeyExists([string]$Path) {
+      if ("$Path" -eq "$script:ResidueIfeoParent") { return $script:ResidueParentExists }
+      $script:ResidueEmptyKeys.ContainsKey($Path)
+    }
+    function Test-RegKeyEmpty([string]$Path) {
+      # 父键在 PerfOptions 还在的时候**不是**空的 —— 这正是「一趟删两级」要解决的事：
+      # 扫描那一刻父键不空，所以清单里只会有 PerfOptions；删完它父键才变空。
+      # 把父键直接标成空的桩会让这条判据测不到。
+      if ("$Path" -eq "$script:ResidueIfeoParent") {
+        return (-not $script:ResidueEmptyKeys.ContainsKey("$script:ResidueIfeoParent\PerfOptions"))
+      }
+      [bool]$script:ResidueEmptyKeys[$Path]
+    }
     # 只打桩「真正下手删的那一行」，判据留给产品代码真的执行到——
     # 连判据一起打桩就测不到「非空不删」这条守卫了。
     function Remove-RegSubKey([string]$Path) {
       $script:ResidueRemovedKeys += $Path
       [void]$script:ResidueEmptyKeys.Remove($Path)
+      if ("$Path" -eq "$script:ResidueIfeoParent") { $script:ResidueParentExists = $false }
     }
+    $script:ResidueIfeoParent = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DeltaForceClient-Win64-Shipping.exe'
+    $script:ResidueParentExists = $true
     $ifeoPerf = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DeltaForceClient-Win64-Shipping.exe\PerfOptions"
     $script:ResidueEmptyKeys[$ifeoPerf] = $true
 
@@ -1065,9 +1189,28 @@ try {
       '用户/OEM 自己的电源方案必须被身份复验拦住'
     Assert-True (@(Get-ToolResidue | Where-Object { $_.Kind -eq 'power-scheme' }).Count -eq 1) `
       '残留清单把用户自己的电源方案也算了进来'
+    # 「是我们的任务」必须**同时**满足命名空间和命令行两条，少一条就可能删掉别人的任务。
+    # 所以这里分别钉两半，各自用一个只违反其中一条的目标：
+
+    # ① 名字在别家命名空间，而命令行与我们一字不差（OEM 电源管理软件的典型形态：
+    #    动作就是 powercfg /setactive <guid>）。命令行复验会放行，只有名字挡得住。
+    $foreignNamespaceRejected = ''
+    try { [void](Remove-ToolResidue 'sched-task' $script:ResidueForeignPowerTask) }
+    catch { $foreignNamespaceRejected = $_.Exception.Message }
+    Assert-True ($foreignNamespaceRejected -like '*命名空间*') `
+      '命令行与本工具一模一样的 OEM 电源任务被删掉了——名字的命名空间校验是这里唯一的防线'
     $foreignTaskRejected = ''
     try { [void](Remove-ToolResidue 'sched-task' 'SomeOtherVendor-Task') } catch { $foreignTaskRejected = $_.Exception.Message }
-    Assert-True ($foreignTaskRejected -like '*不是本工具创建*') '删别家厂商的计划任务必须被拒绝'
+    Assert-True ($foreignTaskRejected -like '*命名空间*') '名字完全不沾边的计划任务必须被拒绝'
+
+    # ② 名字落在我们的命名空间里，但命令行不是 powercfg /setactive（别人抢注了同名，
+    #    或者是本工具旧版本留下的、动作已经不一样的任务）。此时只有命令行复验挡得住。
+    $script:ResidueInNamespaceImposter = "$($script:LockTaskPrefix)-ddeeff001122"
+    $imposterRejected = ''
+    try { [void](Remove-ToolResidue 'sched-task' $script:ResidueInNamespaceImposter) }
+    catch { $imposterRejected = $_.Exception.Message }
+    Assert-True ($imposterRejected -like '*不是本工具创建*') `
+      '名字对得上但命令行不是 powercfg /setactive 的任务被删掉了——命令行复验不能少'
     $foreignOneShotRejected = ''
     try { [void](Remove-ToolResidue 'sched-task-oneshot' 'DeltaForceBooster-Something-Else') }
     catch { $foreignOneShotRejected = $_.Exception.Message }
@@ -1100,6 +1243,10 @@ try {
     $script:ResidueEmptyKeys[$ifeoPerf] = $true
     [void](Remove-ToolResidue 'reg-empty-key' $ifeoPerf)
     Assert-True (@($script:ResidueRemovedKeys) -contains $ifeoPerf) '白名单内的空键没有被删掉'
+    # 删掉 PerfOptions 之后父键就空了，而那个以**游戏主程序**命名的键才是这个功能
+    # 自己说的「杀软和反作弊的重点扫描位」。一趟删两级，别让用户再点一次才看得到它。
+    Assert-True (@($script:ResidueRemovedKeys) -contains $script:ResidueIfeoParent) `
+      '只删了 PerfOptions，以游戏主程序命名的父键还留在注册表里，界面却已经报「清理完成」'
 
     $unknownKindRejected = ''
     try { [void](Remove-ToolResidue 'whatever' 'x') } catch { $unknownKindRejected = $_.Exception.Message }

@@ -2998,6 +2998,15 @@ function Update-SymptomRowVisibility($Rows) {
 }
 
 function Invoke-SymptomPageAction([string]$Page) {
+  # 这道闸门不能省：下面几个分支走的是 RaiseEvent，而 RaiseEvent **不看 IsEnabled**，
+  # 把控件禁用掉挡不住它。更糟的是 ReportBtn 的处理器以 finally { Set-BusyState $false }
+  # 收尾——执行优化途中点一下（哪怕在弹窗里点「取消」），全局忙碌态就被清零：
+  # 「执行优化」当场恢复可点，关窗拦截同时失效，于是可能有第二个提权引擎与第一个并发
+  # 写同一批注册表项，而第二份备份把**已经被改过的值**记成「原值」。
+  if ($script:Busy) {
+    Write-Log '正在执行优化/还原，请等本轮结束后再用这个入口。'
+    return
+  }
   # RestoreBtn / ReportBtn 的处理器是很长的行内脚本块（含忙碌闸门、实验期拦截、
   # 提权往返），复制一份必然漂移；这里走 RaiseEvent 调同一个出口。
   $clickEvent = [Windows.Controls.Primitives.ButtonBase]::ClickEvent
@@ -7183,7 +7192,8 @@ function Set-BusyState([bool]$On) {
                  'SavePresetBtn','DelPresetBtn','PresetBox','TabOptBtn','TabFrameFixBtn','TabRefBtn','UpdateBtn',
                  'FrameFixCacheBtn','FrameFixGpuPrefBtn','FrameFixVcBtn','FrameFixOptBtn','FrameFixGuideBtn',
                  'InlineRestoreSelectAllBtn','InlineRestoreClearBtn','InlineRestoreSelectedBtn',
-                 'InlineRestoreAllBtn','InlineRestoreCloseBtn',
+                 'InlineRestoreAllBtn','InlineRestoreCloseBtn','ResidueBtn',
+                 'SymptomClearBtn','SymptomPanel','SymptomAdviceActions',
                  'TuneCreateBtn','TuneNextBtn','TuneStopBtn') {
     if ($ui[$n]) { $ui[$n].IsEnabled = -not $On }
   }
@@ -8023,6 +8033,10 @@ function Invoke-InlineRestoreAction([ValidateSet('selected_items','all')][string
     # 绝对断言「全部还原成功」只有在它们全为 0 时才允许出现。
     $unreadableN = [int]$r.UnreadableBackupCount
     $unrestorableN = [int]$r.UnrestorableOpCount
+    # 第六个信号：整整一个备份目录读不出来（ACL 被改、目录被换成文件、盘掉线）。
+    # 「目录读不出来」≠「目录里没有备份」—— 那里面记录的改动一条都没被还原，
+    # 和「某一份备份读不了」是同一件事，绝不能只进还原清单页就算完。
+    $enumFailN = [int]$r.EnumerationFailureCount
     # 弹窗里直接列项目名（最多 5 个）。「明细见运行日志」是把用户支去别处，
     # 而他此刻最想知道的就是「哪几项没弄好」。
     $nameList = {
@@ -8070,19 +8084,23 @@ function Invoke-InlineRestoreAction([ValidateSet('selected_items','all')][string
       "有 $unreadableN 份备份无法读取，其中记录的改动本次没有还原，仍然留在系统里（原因见运行日志，请勿删除这些备份文件）。`n`n"
     } else { '' }) + $(if ($unrestorableN -gt 0) {
       "有 $unrestorableN 条改动的备份记录未通过校验，工具无法自动还原，需要手动改回。`n`n"
+    } else { '' }) + $(if ($enumFailN -gt 0) {
+      "有 $enumFailN 个备份目录读不出来（不是「里面没有备份」），其中记录的改动本次没有还原，仍然留在系统里（原因见运行日志）。`n`n"
     } else { '' })
     if ($Mode -eq 'selected_items') {
       $sum = $hardWarning + "$($r.RestoredItems) 个项目、$($r.RestoredOps) 个底层设置已恢复到第一次被工具修改前。" +
              $(if ($failN -gt 0) { "`n`n以下 $failN 个项目复原失败，改动仍留在系统中：`n$(& $nameList @($r.Failed))" }) +
              $(if ($skipN -gt 0) { "`n`n以下 $skipN 个项目没有复原（发生后续修改或暂不支持），已保持原状：`n$(& $nameList @($r.Skipped))" }) +
-             $(if ($failN -eq 0 -and $skipN -eq 0) { "`n`n其他未选项目保持不变。" })
+             $(if ($failN -eq 0 -and $skipN -eq 0 -and $unreadableN -eq 0 -and $unrestorableN -eq 0 -and
+                   $enumFailN -eq 0) { "`n`n其他未选项目保持不变。" })
     } else {
       # 删掉了原来那句「其余全部还原成功，各项已回到优化前的状态」——当所有 op 都进了
       # skipped 时根本没有「其余」，这句话在那种情况下是纯粹的假话。
       $sum = $hardWarning + "已按$(if ($r.MergedCount -gt 1) { "合并的 $($r.MergedCount) 份备份" } else { "备份「$bakName」" })还原 $($r.RestoredOps) 项改动。" +
              $(if ($skipN -gt 0) { "`n`n以下 $skipN 项没有回到原来的值，已按安全方案兜底或保留了你后来的修改：`n$(& $nameList @($r.Skipped))" }) +
              $(if ($failN -gt 0) { "`n`n以下 $failN 项还原失败，对应改动仍留在系统中（备份已保留，可排查后重试还原）：`n$(& $nameList @($r.Failed))" }) +
-             $(if ($failN -eq 0 -and $skipN -eq 0 -and $unreadableN -eq 0 -and $unrestorableN -eq 0) {
+             $(if ($failN -eq 0 -and $skipN -eq 0 -and $unreadableN -eq 0 -and $unrestorableN -eq 0 -and
+                   $enumFailN -eq 0) {
                  "`n`n全部还原成功，各项已回到优化前的状态。" })
     }
     if ($bookN -gt 0) {
@@ -8091,10 +8109,12 @@ function Invoke-InlineRestoreAction([ValidateSet('selected_items','all')][string
     # 三态标题。二态时「没失败」就被说成「完成」，可是「14 项全进了安全回退」
     # 同样没有失败——用户会关掉窗口以为回到优化前了。
     $restoreDialogTitle = $(if ($failN -gt 0) { '还原未完成' }
-      elseif ($skipN -gt 0 -or $bookN -gt 0 -or $unreadableN -gt 0 -or $unrestorableN -gt 0) { '还原部分完成' }
+      elseif ($skipN -gt 0 -or $bookN -gt 0 -or $unreadableN -gt 0 -or $unrestorableN -gt 0 -or
+              $enumFailN -gt 0) { '还原部分完成' }
       else { '还原完成' })
     $restoreDialogCode = $(if ($failN -gt 0) { 'RESTORE INCOMPLETE' }
-      elseif ($skipN -gt 0 -or $bookN -gt 0 -or $unreadableN -gt 0 -or $unrestorableN -gt 0) { 'RESTORE PARTIAL' }
+      elseif ($skipN -gt 0 -or $bookN -gt 0 -or $unreadableN -gt 0 -or $unrestorableN -gt 0 -or
+              $enumFailN -gt 0) { 'RESTORE PARTIAL' }
       else { 'RESTORE DONE' })
     Show-ConfirmDialog $restoreDialogTitle $restoreDialogCode $sum '知道了' -InfoOnly | Out-Null
     if (@($r.RebootItems).Count -gt 0 -and (Show-RebootDialog @($r.RebootItems))) {
@@ -9543,6 +9563,13 @@ function Show-ToolResidueDialog {
     Set-BusyState $false; $busySet = $false
     $summary = "已清理 $done 项。"
     if ($failedResidue.Count -gt 0) { $summary += "`n`n以下 $($failedResidue.Count) 项没能清理：`n$(@($failedResidue | Select-Object -First 5 | ForEach-Object { "· $_" }) -join "`n")" }
+    # 残留清理会删掉 DeltaForceBooster-PowerPlanLock，而「锁定电源计划」那一行的状态
+    # 完全来自这个任务是否存在。不刷新的话它会继续显示「锁定任务已建立 / 已就绪」，
+    # 而且行的 Tag 仍是 $true —— 用户接着套「主推全套」时这一项会因为「已就绪」被跳过，
+    # 锁定任务根本不会被重建，界面却一直告诉他已经就绪。
+    if ($done -gt 0) {
+      try { Update-ItemList } catch { Write-Log "清理残留后刷新状态失败：$($_.Exception.Message)" }
+    }
     Show-ConfirmDialog $(if ($failedResidue.Count -gt 0) { '清理未完成' } else { '清理完成' }) `
       $(if ($failedResidue.Count -gt 0) { 'CLEANUP INCOMPLETE' } else { 'CLEANUP DONE' }) $summary '知道了' -InfoOnly | Out-Null
   } catch {

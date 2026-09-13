@@ -147,6 +147,18 @@ foreach ($f in 'README.md','CONTRIBUTING.md') {
     Assert-True (-not (Get-Source $f).Contains($stale)) "$f 里还留着上游专有的说法：$stale（本分支没有服务端，也没有官网）"
   }
 }
+# 发布二进制里那几条**失败路径的恢复指引**同样不能指向「官网」——那是用户在
+# 「程序文件不完整」「更新包复验失败」时看到的唯一出路，而本分支没有官网；
+# 他照着去搜，搜到的是上游那一套（遥测、静默安装的内核驱动、上游更新源）。
+# 只禁这两个短语，不禁「官网」二字：源码里还有大量「三角洲官网视觉基准」这类
+# 指游戏官网的注释，那些是对的。
+foreach ($f in 'build\make-launcher.ps1','build\make-engine-host.ps1','build\setup-wizard.cs',
+               'build\make-installer.ps1','scripts\updater.ps1') {
+  foreach ($stale in '官网重新安装', '从官网下载') {
+    Assert-True (-not (Get-Source $f).Contains($stale)) `
+      "$f 的失败提示仍把用户指向「官网」，而本分支没有官网：$stale"
+  }
+}
 
 # ---------- 8. 已写在用户磁盘上的目录 schema ----------
 Assert-True ($engine.Contains('^\.DeltaForceBooster\.migrated-')) '旧根隔离目录名 schema 被改。读侧改了就再也认不出用户盘上已有的那些目录'
