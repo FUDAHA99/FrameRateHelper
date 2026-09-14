@@ -556,7 +556,7 @@ function Import-ProtectedLegacyState([string]$PackageJson) {
   if ([int]$package.SchemaVersion -ne 1) { throw '不支持的旧状态迁移包版本' }
   $files = @($package.Files)
   if ($files.Count -gt 140) { throw '旧状态迁移包文件数超过上限' }
-  $total = 0L; $imported = 0
+  $total = 0L; $imported = 0; $unknown = 0
   foreach ($entry in $files) {
     Assert-ExactProperties $entry @('RelativePath','Length','Sha256','ContentBase64') @() '旧状态迁移项'
     $relative = "$($entry.RelativePath)".Replace('/','\')
@@ -565,8 +565,15 @@ function Import-ProtectedLegacyState([string]$PackageJson) {
       'config\performance-sessions.json','config\power-scheme.json'
     ) -or $relative -match '^config\\experiments\\(?:active-experiment|exp_[0-9a-f]{32})\.json$' -or
       $relative -match '^profiles\\[^\\/:*?"<>|]{1,80}\.json$'
-    if (-not $allowed -or "$($entry.Sha256)" -notmatch '^[0-9a-fA-F]{64}$') {
-      throw "旧状态迁移项路径或哈希无效：$relative"
+    # 不在清单内的条目**跳过**，不是掀桌子。原来这里是 throw，而采集端送来的第一项
+    # 恰好是上游遗留的 config\telemetry.json（本分支已不再迁移它）—— 循环第一轮就抛，
+    # $imported 停在 0，用户自存的优化方案、性能历史、原始电源方案记录一项都过不来。
+    # 采集端和这里的清单**必然会再次漂移**（它们在两个进程、两个文件里），所以这条
+    # 防线要能降级而不是全丢。同一函数下面对已存在的目标文件用的也是 continue。
+    if (-not $allowed) { $unknown++; continue }
+    # 哈希格式非法是另一回事：那是篡改信号，必须抛。
+    if ("$($entry.Sha256)" -notmatch '^[0-9A-Fa-f]{64}$') {
+      throw "旧状态迁移项哈希无效：$relative"
     }
     $length = [long]$entry.Length
     if ($length -lt 2 -or $length -gt 4MB) { throw "旧状态迁移项大小无效：$relative" }
@@ -608,16 +615,22 @@ function Import-ProtectedLegacyState([string]$PackageJson) {
       $imported++
     } finally { if ($stream) { $stream.Dispose() } }
   }
-  [pscustomobject]@{ Imported = $imported; Skipped = @($package.Skipped).Count }
+  [pscustomobject]@{ Imported = $imported; Skipped = @($package.Skipped).Count; UnknownSkipped = $unknown }
 }
 
 $script:LegacyMigrationNotice = $(if ($script:NetCafeCompatibilityMode) {
   '当前为网吧兼容模式：未修改 UAC，也无需重启；用户缓存清理、显卡软件检测和外链入口已停用。'
 } else { '' })
-try { $script:LegacyMigrationResult = Import-ProtectedLegacyState (Invoke-EngineHostUserAction MigrateLegacyData) }
+try {
+  $script:LegacyMigrationResult = Import-ProtectedLegacyState (Invoke-EngineHostUserAction MigrateLegacyData)
+  if (-not $script:NetCafeCompatibilityMode -and [int]$script:LegacyMigrationResult.UnknownSkipped -gt 0) {
+    $script:LegacyMigrationNotice = ("旧版用户数据已迁移 $($script:LegacyMigrationResult.Imported) 项；" +
+      "另有 $($script:LegacyMigrationResult.UnknownSkipped) 项不在允许迁移的清单内，已跳过（原文件仍在原位置，未删除）。")
+  }
+}
 catch {
   if (-not $script:NetCafeCompatibilityMode) {
-    $script:LegacyMigrationNotice = "旧版用户数据迁移未完成：$($_.Exception.Message)"
+    $script:LegacyMigrationNotice = "旧版用户数据迁移未完成：$($_.Exception.Message)；原文件仍在原位置，未删除。"
   }
 }
 
@@ -5584,7 +5597,10 @@ function Poll-GamePerformanceCapture {
     try { $job.PowerShell.EndInvoke($job.Async) | Out-Null } catch {}
     try { $job.PowerShell.Dispose() } catch {}
     $script:PerformanceJobs.Remove($job) | Out-Null
-    Write-Log "游戏性能记录已完成（PID $($job.Pid)），汇总已保存到本地并按隐私设置匿名上报。"
+    # 这句原文是「汇总已保存到本地并按隐私设置匿名上报」—— 上游的话。本分支把整套
+    # 遥测都删了，一个字节都不往外发，设置页和安装向导也都写着「不收集、不上报」。
+    # 让日志当面告诉用户「已上报」，是这个分支最不能出的那种错。
+    Write-Log "游戏性能记录已完成（PID $($job.Pid)），汇总已保存到本机，不会上传到任何地方。"
   }
   Refresh-PerformanceComparison
   # 实验期间同一 PID 要顺序采多轮，普通“每 PID 一次”的采样必须暂停，
@@ -10081,6 +10097,11 @@ $ui.InlineRestoreAllBtn.Add_Click({ Invoke-InlineRestoreAction 'all' })
 Set-AppTheme (Get-SavedAppTheme)
 Set-SavedAppWindowHeight
 Set-SavedAppWindowWidth
+# 旧版数据迁移的结果必须说出来。$script:LegacyMigrationNotice 原来赋了值却**没有任何
+# 地方读它**：整批迁移失败时界面一声不吭，用户看到的是「一切正常」，而自存方案、
+# 性能历史、原始电源方案记录全都没过来，他也不知道东西还在 LocalAppData 里。
+if ($script:LegacyMigrationNotice) { Write-Log $script:LegacyMigrationNotice }
+
 # 免责声明门控放在主窗口之前：没同意就不该看到任何可点的优化按钮。
 # 读取/写入配置失败一律按「没同意」处理——宁可多问一次，也不能因为磁盘异常就放行
 if (-not (Test-DisclaimerAccepted)) {

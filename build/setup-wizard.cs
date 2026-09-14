@@ -470,8 +470,11 @@ static class Installer {
         public long Size;
     }
     static readonly string[] UserDataDirectories = { "profiles", "backup", "config", "logs" };
+    // 刻意不含 telemetry.json：本分支把上游那套遥测整个删了，没有任何代码会读它，
+    // 而它里面装着上游的稳定追踪标识（InstallId / DeviceToken）。把它搬进新装目录
+    // 等于让一个本该随遥测一起消失的标识永久留在用户机器上。旧文件不动，只是不再迁。
     static readonly string[] LegacyConfigFiles = {
-        "telemetry.json", "disclaimer.json", "updater.json", "performance-sessions.json", "power-scheme.json"
+        "disclaimer.json", "updater.json", "performance-sessions.json", "power-scheme.json"
     };
     const string InstallIdentityName = "install.identity";
     const string InstallProductId = "DeltaForceBooster";

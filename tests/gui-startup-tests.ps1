@@ -1652,4 +1652,127 @@ $resizeHandler = ([scriptblock]::Create($resizeHandlerAssign[0].Right.Extent.Tex
 Assert-True (-not $mainXamlWindow.FindName('ResizeGrip').IsHitTestVisible) `
   '缩放手柄吃掉了命中判定 —— 右下角那块热区会抓不到'
 
+# ---------------------------------------------------------------------------
+#  旧版用户数据迁移：一条不在清单里的记录不能掀掉整批
+# ---------------------------------------------------------------------------
+#
+# 这条路径**原来一个测试都没有**（21/21 全绿也覆盖不到），而它是升级用户的第一印象。
+# 出事的机制：采集端 scripts\user-context-worker.ps1 按固定顺序打包旧文件，而
+# Import-ProtectedLegacyState 有自己的一份允许清单 —— 两份清单在两个进程、两个文件里，
+# 必然会漂移。原来清单外的条目走的是 throw，于是**第一条**不认识的记录就让整批停摆：
+# $imported 停在 0，用户自存的优化方案、性能历史、原始电源方案记录一项都过不来，
+# 而失败只写进一个当时根本没有任何地方读的变量，界面一声不吭。
+$migrateFn = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+  $node.Name -eq 'Import-ProtectedLegacyState'
+}, $true) | Select-Object -First 1)
+Assert-True ($migrateFn.Count -eq 1) '找不到 Import-ProtectedLegacyState'
+
+& {
+  Invoke-Expression $migrateFn[0].Extent.Text
+  # 只桩掉落盘与 ACL 这几件与本条无关的事，判定逻辑用的是产品代码本身
+  $script:MigrateWritten = New-Object Collections.Generic.List[string]
+  $script:ProtectedUserStateRoot = Join-Path ([IO.Path]::GetTempPath()) ('dfb-mig-' + [guid]::NewGuid().ToString('N'))
+  [void][IO.Directory]::CreateDirectory($script:ProtectedUserStateRoot)
+  function New-ProtectedDirectory($Path, $UsersRead) { [void][IO.Directory]::CreateDirectory($Path) }
+  function Test-ProtectedDirectoryAclExact($Path, $UsersRead) { $true }
+  function Test-PathHasReparsePoint($Path) { $false }
+  function Set-ProtectedFileAcl($Path) { }
+  function Test-ProtectedFileAcl($Path) { $true }
+  function Assert-ExactProperties($Object, $Required, $Optional, $Label) {
+    foreach ($r in @($Required)) {
+      if (-not $Object.PSObject.Properties[$r]) { throw "$Label 缺少属性 $r" }
+    }
+  }
+
+  function New-MigrationEntry([string]$Relative, [string]$Content) {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Content)
+    $sha = [BitConverter]::ToString(
+      ([Security.Cryptography.SHA256]::Create()).ComputeHash($bytes)).Replace('-', '')
+    [pscustomobject]@{ RelativePath = $Relative; Length = $bytes.Length
+      Sha256 = $sha; ContentBase64 = [Convert]::ToBase64String($bytes) }
+  }
+
+  # 采集端的真实顺序：上游遗留的 telemetry.json 排在最前面
+  $migratePackage = [pscustomobject]@{
+    SchemaVersion = 1
+    Skipped = @()
+    Files = @(
+      (New-MigrationEntry 'config\telemetry.json' '{"installId":"upstream"}'),
+      (New-MigrationEntry 'config\disclaimer.json' '{"accepted":true}'),
+      (New-MigrationEntry 'config\updater.json' '{"skip":"0.1.0"}'),
+      (New-MigrationEntry 'config\performance-sessions.json' '{"sessions":[]}'),
+      (New-MigrationEntry 'config\power-scheme.json' '{"guid":"x"}'),
+      (New-MigrationEntry 'profiles\我的方案.json' '{"name":"mine"}')
+    )
+  }
+  $migrateResult = Import-ProtectedLegacyState ($migratePackage | ConvertTo-Json -Depth 5 -Compress)
+
+  # 清单外的那一条只该让**它自己**落空，不该带走其余五条
+  Assert-True ($migrateResult.Imported -eq 5) `
+    ("清单外的一条记录让整批迁移停摆了，只迁进 $($migrateResult.Imported) 项 —— " +
+     '升级用户的自存方案、性能历史、原始电源方案记录会一起丢，而他不知道东西还在原处')
+  Assert-True ($migrateResult.UnknownSkipped -eq 1) `
+    "跳过的条数记成了 $($migrateResult.UnknownSkipped)，应为 1"
+  Assert-True (-not (Test-Path (Join-Path $script:ProtectedUserStateRoot 'config\telemetry.json'))) `
+    '上游的 telemetry.json 被迁进了受保护目录 —— 它装着上游的稳定追踪标识'
+  foreach ($migrateExpect in 'config\disclaimer.json', 'config\updater.json',
+                             'config\performance-sessions.json', 'config\power-scheme.json',
+                             'profiles\我的方案.json') {
+    Assert-True (Test-Path (Join-Path $script:ProtectedUserStateRoot $migrateExpect)) `
+      "清单内的 $migrateExpect 没有被迁过来"
+  }
+
+  # 哈希格式非法是篡改信号，必须抛，不能跟「不认识的路径」一样被跳过
+  $migrateBad = [pscustomobject]@{
+    SchemaVersion = 1; Skipped = @()
+    Files = @((New-MigrationEntry 'config\updater.json' '{"a":1}'))
+  }
+  $migrateBad.Files[0].Sha256 = 'not-a-hash'
+  $migrateThrew = $false
+  try { Import-ProtectedLegacyState ($migrateBad | ConvertTo-Json -Depth 5 -Compress) }
+  catch { $migrateThrew = $true }
+  Assert-True $migrateThrew '哈希格式非法的迁移记录被放过了 —— 那是篡改信号，不是「不认识的路径」'
+
+  Remove-Item -LiteralPath $script:ProtectedUserStateRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# 采集端和这里的清单必然会漂移，但**采集端不能再送上游的遥测文件**：
+# 它装着上游的稳定追踪标识（InstallId / DeviceToken），迁过来等于让一个本该随遥测
+# 一起消失的标识永久留在新安装里。
+$workerRaw = [IO.File]::ReadAllText((Join-Path $root 'scripts\user-context-worker.ps1'), [Text.Encoding]::UTF8)
+foreach ($workerBanned in 'telemetry.json', 'tuning-telemetry-outbox.json') {
+  Assert-True (-not $workerRaw.Contains("Name='$workerBanned'")) `
+    "采集端仍在打包 $workerBanned —— 上游的追踪标识会被搬进新安装"
+}
+
+# 迁移结果必须真的说给用户听：这个变量原来赋了值却没有任何地方读
+$noticeReads = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.VariableExpressionAst] -and
+  "$($node.VariablePath)" -eq 'script:LegacyMigrationNotice'
+}, $true))
+$noticeAssigned = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+  "$($node.Left)" -eq '$script:LegacyMigrationNotice'
+}, $true))
+Assert-True ($noticeReads.Count -gt $noticeAssigned.Count) `
+  '旧版数据迁移的结果只被赋值、从来没被读出来 —— 整批迁移失败时界面一声不吭'
+
+# 这个分支一个字节都不往外发，界面不能说反话。
+# 查的是 AST 里的**字符串字面量**，不是全文 —— 全文查会把解释这次修改的注释本身
+# 也算进去（本会话已经在这个坑上栽过三次）。
+$uploadClaims = @($ast.FindAll({
+  param($node)
+  ($node -is [Management.Automation.Language.StringConstantExpressionAst] -or
+   $node -is [Management.Automation.Language.ExpandableStringExpressionAst]) -and
+  "$($node.Value)".Contains('匿名上报')
+}, $true))
+Assert-True ($uploadClaims.Count -eq 0) `
+  ("界面上还有 $($uploadClaims.Count) 处「匿名上报」的说法：" +
+   (@($uploadClaims | ForEach-Object { "$($_.Value)" }) -join '；') +
+   ' —— 本分支把上游那套遥测整个删了，设置页和安装向导都写着「不收集、不上报」，说「已上报」是在骗用户')
+
 Write-Host 'PASS: GUI UAC recovery and WinPS5.1 Generic.List result paths are regression covered'

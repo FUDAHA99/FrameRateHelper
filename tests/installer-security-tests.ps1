@@ -814,6 +814,7 @@ try {
     Convert-ToLegacyInstallFixture $legacy $matrix.Gui $matrix.Launcher
     foreach ($folder in 'config','profiles') { [void][IO.Directory]::CreateDirectory((Join-Path $legacy $folder)) }
     [IO.File]::WriteAllText((Join-Path $legacy 'config\telemetry.json'), ('{"source":' + $n + '}'))
+    [IO.File]::WriteAllText((Join-Path $legacy 'config\updater.json'), ('{"source":' + $n + '}'))
     [IO.File]::WriteAllText((Join-Path $legacy "profiles\profile$n.json"), ('{"name":"p' + $n + '"}'))
     # 最后一项不靠“不安全路径”钩子：父链位置本身可接受时，也必须根据旧版产品身份
     # 识别普通用户可写 legacy 树并迁往默认受保护目录。
@@ -831,7 +832,12 @@ try {
     }
   }
   $userRoot = Join-Path $env:DFB_TEST_LOCALAPPDATA 'DeltaForceBooster'
-  Assert-True (Test-Path (Join-Path $userRoot 'config\telemetry.json')) 'config not migrated'
+  Assert-True (Test-Path (Join-Path $userRoot 'config\updater.json')) 'config not migrated'
+  # 上游的 telemetry.json 里装着稳定追踪标识（InstallId / DeviceToken）。本分支删掉了
+  # 整套遥测，没有任何代码读它 —— 再把它搬进新装目录，等于让一个本该消失的标识
+  # 永久留在用户机器上。旧文件不动，只是不迁。
+  Assert-True (-not (Test-Path (Join-Path $userRoot 'config\telemetry.json'))) `
+    'upstream telemetry.json (carrying InstallId/DeviceToken) was migrated into the new install'
   foreach ($n in 1..$legacyMatrices.Count) {
     Assert-True (Test-Path (Join-Path $userRoot "profiles\profile$n.json")) "profile$n not migrated"
   }

@@ -86,13 +86,14 @@ function Invoke-WorkerLegacyMigration {
   # LocalAppData 是 v0.19.4-v0.20.4 的最新来源；程序目录仅用于更早版本兜底。
   foreach ($sourceRoot in $sources) {
     $configRoot = Join-Path $sourceRoot 'config'
+    # 刻意不采 telemetry.json / tuning-telemetry-outbox.json：本分支把上游那套遥测
+    # 整个删了，没有任何代码会读它们；而它们里面装着上游的稳定追踪标识
+    # （InstallId / DeviceToken），迁过来等于把一个本该消失的标识永久留在新安装里。
     foreach ($entry in @(
-      [pscustomobject]@{ Name='telemetry.json'; Max=1MB },
       [pscustomobject]@{ Name='disclaimer.json'; Max=64KB },
       [pscustomobject]@{ Name='updater.json'; Max=64KB },
       [pscustomobject]@{ Name='performance-sessions.json'; Max=2MB },
-      [pscustomobject]@{ Name='power-scheme.json'; Max=1MB },
-      [pscustomobject]@{ Name='tuning-telemetry-outbox.json'; Max=4MB }
+      [pscustomobject]@{ Name='power-scheme.json'; Max=1MB }
     )) {
       Add-LegacyJson (Join-Path $configRoot $entry.Name) ("config\" + $entry.Name) ([int]$entry.Max)
     }
