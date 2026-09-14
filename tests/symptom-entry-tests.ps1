@@ -95,6 +95,27 @@ foreach ($optItem in $optList) {
       "写入项 $($optItem.Id) 的说明必须以「执行后：」开头"
   }
 }
+# HKCU\Control Panel\Mouse 那几个值是系统在**登录时**读进驱动的：只写注册表、
+# 不广播 SystemParametersInfo(SPI_SETMOUSE)，鼠标加速根本不会关。实测过：三个值
+# 写成 0 之后 SPI_GETMOUSE 读回来还是 6, 10, 1。而界面对 Reboot=$false 的项目会写
+# 「写入后立即生效，不需要重启」—— 这一类项目必须标 Reboot，否则就是当面擒一个
+# 用户没办法分辨的假承诺（他只会觉得「这软件没用」）。这条不只钉当前那一项，
+# 以后再加同类项目也会被接住。
+$mouseLiveItems = @($optList | Where-Object {
+  $_.Kind -ne 'check' -and @($_.Ops).Count -gt 0 -and
+  @($_.Ops | Where-Object { "$($_.Path)" -like 'HKCU:\Control Panel\Mouse*' }).Count -eq @($_.Ops).Count
+})
+Assert-True ($mouseLiveItems.Count -ge 1) `
+  '找不到任何只写 HKCU:\Control Panel\Mouse 的优化项 —— 这条不变量已经盯不住东西了'
+foreach ($mouseItem in $mouseLiveItems) {
+  Assert-True ([bool]$mouseItem.Reboot) `
+    ("$($mouseItem.Id) 只写 HKCU:\Control Panel\Mouse 却没标 Reboot —— " +
+     '界面的重启列会写「写入后立即生效」，而系统要到下次登录才读这几个值')
+  Assert-True ("$($mouseItem.Effect)" -match '重新登录|重启') `
+    ("$($mouseItem.Id) 的说明没提「重新登录/重启」，" +
+     '读起来就像手感当场就变了')
+}
+
 # Reboot 是结构化字段（Note 文案会改，字段不会漂）；界面的重启列读的就是它
 Assert-True (@($optList | Where-Object { $_.Reboot }).Count -ge 5) `
   'Reboot 字段像是被清空了：一个需要重启的优化项都没有'

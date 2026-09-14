@@ -2407,14 +2407,22 @@ function Get-OptItems([string]$GamePath) {
                Effect = '执行后：视觉效果设为「最佳性能」，窗口动画和阴影全部关闭，桌面外观会明显变朴素。'
                Note = '关闭全部窗口动画和阴影，桌面观感会明显变朴素，默认不勾选。' }
 
-  $items += @{ Id = 'mouse-accel-off'; Tier = 'safe'; Name = '关闭鼠标「提高指针精确度」（电竞常规操作）'; Admin = $false; Default = $false; Kind = 'multi'
+  # Reboot = $true 不是保守，是量出来的：HKCU\Control Panel\Mouse 这几个值
+  # 是系统在登录时读进驱动的，写完注册表不广播 SystemParametersInfo(SPI_SETMOUSE)
+  # 就不会生效。实测：三个值写成 0 之后 SPI_GETMOUSE 读回来还是 6, 10, 1，
+  # 鼠标加速原封不动。而界面的重启列对 Reboot=$false 的项目直接写
+  # 「写入后立即生效，不需要重启」—— 那是当面对用户撑一个不成立的承诺。
+  # 广播 SPI_SETMOUSE 才是更好的体验，但那要同时改应用与还原两条路径（还原
+  # 写回旧值同样不广播就同样不生效），还会碰 SPIF_UPDATEINIFILE 自己写注册表
+  # 与备份记账的冲突。发布前先把话说对，广播留给下个版本。
+  $items += @{ Id = 'mouse-accel-off'; Tier = 'safe'; Name = '关闭鼠标「提高指针精确度」（电竞常规操作）'; Admin = $false; Default = $false; Kind = 'multi'; Reboot = $true
                Ops  = @(
                  @{ Kind = 'reg'; Path = 'HKCU:\Control Panel\Mouse'; Name = 'MouseSpeed';      Value = '0'; Kind2 = 'String' }
                  @{ Kind = 'reg'; Path = 'HKCU:\Control Panel\Mouse'; Name = 'MouseThreshold1'; Value = '0'; Kind2 = 'String' }
                  @{ Kind = 'reg'; Path = 'HKCU:\Control Panel\Mouse'; Name = 'MouseThreshold2'; Value = '0'; Kind2 = 'String' }
                )
-               Effect = '执行后：鼠标加速关闭，指针位移与鼠标物理位移一比一对应，手感会变化。'
-               Note = '与帧率无关但影响压枪手感，射击游戏玩家普遍关闭。会改变鼠标移动习惯，默认不勾选。' }
+               Effect = '执行后：三个鼠标加速相关的注册表值写成 0；系统只在登录时读它们，所以要重新登录或重启后手感才会变（指针位移与鼠标物理位移一比一对应）。'
+               Note = '与帧率无关但影响压枪手感，射击游戏玩家普遍关闭。会改变鼠标移动习惯，默认不勾选。注册表写完就算成功，但手感要重新登录（或重启）之后才变；还原同理。' }
 
   # ===== v0.4 新增：全套调试路线补齐 =====
 
