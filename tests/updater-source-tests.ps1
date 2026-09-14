@@ -87,10 +87,16 @@ $raw = Get-Content -LiteralPath $updaterPath -Raw -Encoding UTF8
 $codeText = (($tokens | Where-Object { $_.Kind -ne [Management.Automation.Language.TokenKind]::Comment }) |
   ForEach-Object { $_.Text }) -join ' '
 Assert-True (-not $codeText.Contains('download-queue')) 'updater 非注释代码里仍有排队端点路径'
-# 上游遥测端点的域名片段。只存片段、不写完整主机名：断言要的是「别退回旧端点」
-# 这个保护，而本仓库即将公开，没必要把第三方的生产主机名一并发出去。
-$LegacyUpstreamHostFragment = 'upstream-host'
-Assert-True (-not $codeText.Contains($LegacyUpstreamHostFragment)) 'updater 非注释代码里仍有旧服务端域名'
+# 原来这里是一条负向断言：「不得含上游旧端点的域名」。那要求把第三方的生产主机名
+# 写进一个即将公开的仓库，而且只能挡住那一个写法。改成正向断言：白名单
+# 必须**恰好**是这两项。这比原来强——任何第三方域名溢进来都会被接住，
+# 不只是那一个历史端点，而且不用在公开仓库里点名任何人。
+Assert-True (@($script:BoosterDownloadHosts).Count -eq 1 -and
+  "$(@($script:BoosterDownloadHosts)[0])" -eq 'github.com') `
+  "下载域名白名单不再是只有 github.com：$(@($script:BoosterDownloadHosts) -join ', ')"
+Assert-True (@($script:BoosterDownloadHostSuffixes).Count -eq 1 -and
+  "$(@($script:BoosterDownloadHostSuffixes)[0])" -eq '.githubusercontent.com') `
+  "白名单后缀不再是只有 .githubusercontent.com：$(@($script:BoosterDownloadHostSuffixes) -join ', ')"
 
 # ---------- 5. 重定向必须再过一次同一道闸 ----------
 
@@ -104,7 +110,13 @@ Assert-True ($raw.Contains('Test-BoosterSetupUrl "$($resp.ResponseUri.AbsoluteUr
 $mk = Get-Content -LiteralPath (Join-Path $root 'build\make-installer.ps1') -Raw -Encoding UTF8
 Assert-True ($mk.Contains('$releaseRepo') -and $mk.Contains('releases/download/v$ver/DeltaForceBooster-Setup.exe')) `
   '构建脚本生成的 setupUrl 没有指向本版 tag 的 release 资源'
-Assert-True (-not $mk.Contains($LegacyUpstreamHostFragment)) '构建脚本里仍有旧服务端域名'
+# 同理改成正向：构建脚本生成的两个 URL 必须都在 github.com 上。
+foreach ($mkUrlMatch in [regex]::Matches($mk, 'https?://[^"''\s)]+')) {
+  $mkHost = ([uri]$mkUrlMatch.Value).Host
+  if (-not $mkHost) { continue }
+  Assert-True ($mkHost -eq 'github.com' -or $mkHost.EndsWith('.githubusercontent.com')) `
+    "构建脚本里出现了非 GitHub 的地址：$($mkUrlMatch.Value)"
+}
 # setupUrl 必须带版本 tag：清单里的 sha256 是这一个文件的，指向 latest 会在发版
 # 竞态下让老清单配新安装包，校验必然失败。
 Assert-True (-not $mk.Contains('releases/latest/download/DeltaForceBooster-Setup.exe')) `
