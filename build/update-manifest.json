@@ -5,6 +5,6 @@
     "notes":  "- 修复从早期版本升级后，还原游戏进程优先级可能提示“备份注册表目标不在白名单”、导致还原列表读取失败的问题。\r\n- 历史兼容仅开放 DeltaForceClient.exe 的 CpuPriorityClass 与 IoPriority 原优化项，其他进程名和 IFEO 值继续按安全白名单拒绝。\r\n- v0.23.0.8 以前的版本仍需完成更新后继续使用。",
     "url":  "https://github.com/FUDAHA99/FrameRateHelper/releases/latest",
     "setupUrl":  "https://github.com/FUDAHA99/FrameRateHelper/releases/download/v0.23.0.13/DeltaForceBooster-Setup.exe",
-    "sha256":  "de9f7c465720a33617494bb35b429cf38d1d3612ec50cee4dea665f3bed313c8",
-    "size":  989184
+    "sha256":  "5db7e1c195f0e990c763400b99ef5ebf0fbe58447d23f8af3af4b6e7354652ef",
+    "size":  990208
 }
