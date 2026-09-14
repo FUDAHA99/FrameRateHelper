@@ -695,9 +695,11 @@ if ($TestBuild) {
 $setupOut = Join-Path $build "DeltaForceBooster-Setup-v$displayVer.exe"
 $manifestOut = Join-Path $build 'update-manifest.json'
 $manifestNotes = @'
-- 修复从早期版本升级后，还原游戏进程优先级可能提示“备份注册表目标不在白名单”、导致还原列表读取失败的问题。
-- 历史兼容仅开放 DeltaForceClient.exe 的 CpuPriorityClass 与 IoPriority 原优化项，其他进程名和 IFEO 值继续按安全白名单拒绝。
-- v0.23.0.8 以前的版本仍需完成更新后继续使用。
+- 「帧率优化助手」的第一个版本。基于 Leonard8818/-Delta-Force-Graphics-Optimizer（MIT）分支重做。
+- 默认不收集、不上报任何使用数据：上游那整套遥测与匿名上报已删除，界面上也不再有相关开关。
+- 从旧版本升级会迁移你的自存优化方案、性能历史与原始电源方案记录；不在迁移清单内的文件会跳过并在日志里说明，原文件保留在原位置。
+- 修正：关闭鼠标「提高指针精确度」要重新登录后才生效，界面此前写的是「写入后立即生效」。
+- 窗口可以拖动缩放并记住宽度；导出诊断反馈的两组选项新增全选。
 '@
 # 发布仓库。改这里等于改所有人的更新源，必须和 scripts\updater.ps1 里硬编码的
 # 域名白名单一起审查。
@@ -706,8 +708,10 @@ $manifestObj = [ordered]@{
   # 版本与显示版本逐字一致，避免更新判断、界面和安装包文件名各用一套编号。
   version  = "$ver"
   displayVersion = "$displayVer"
-  # 旧版存在必须淘汰的问题；支持该字段的客户端低于本版时不允许跳过。
-  minimumSupportedVersion = '0.23.0.8'
+  # 低于这个版本的客户端不允许跳过更新。本分支的第一个版本就是 1.0.0.0，
+  # 所以这等于说「1.0.0.0 之前的任何构建都不受支持」—— 今天没有这样的客户端，
+  # 它现在是个空语句，但把话说清楚了：上游的编号与本分支不共一条时间线。
+  minimumSupportedVersion = '1.0.0.0'
   notes    = $manifestNotes
   # 下载页：内置下载失败时界面会引导用户来这里手动下载。GitHub 在国内可能很慢，
   # 这条退路必须一直有效。

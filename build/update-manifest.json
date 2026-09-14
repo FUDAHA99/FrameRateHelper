@@ -1,10 +1,10 @@
 {
-    "version":  "0.23.0.13",
-    "displayVersion":  "0.23.0.13",
-    "minimumSupportedVersion":  "0.23.0.8",
-    "notes":  "- 修复从早期版本升级后，还原游戏进程优先级可能提示“备份注册表目标不在白名单”、导致还原列表读取失败的问题。\r\n- 历史兼容仅开放 DeltaForceClient.exe 的 CpuPriorityClass 与 IoPriority 原优化项，其他进程名和 IFEO 值继续按安全白名单拒绝。\r\n- v0.23.0.8 以前的版本仍需完成更新后继续使用。",
+    "version":  "1.0.0.0",
+    "displayVersion":  "1.0.0.0",
+    "minimumSupportedVersion":  "1.0.0.0",
+    "notes":  "- 「帧率优化助手」的第一个版本。基于 Leonard8818/-Delta-Force-Graphics-Optimizer（MIT）分支重做。\r\n- 默认不收集、不上报任何使用数据：上游那整套遥测与匿名上报已删除，界面上也不再有相关开关。\r\n- 从旧版本升级会迁移你的自存优化方案、性能历史与原始电源方案记录；不在迁移清单内的文件会跳过并在日志里说明，原文件保留在原位置。\r\n- 修正：关闭鼠标「提高指针精确度」要重新登录后才生效，界面此前写的是「写入后立即生效」。\r\n- 窗口可以拖动缩放并记住宽度；导出诊断反馈的两组选项新增全选。",
     "url":  "https://github.com/FUDAHA99/FrameRateHelper/releases/latest",
-    "setupUrl":  "https://github.com/FUDAHA99/FrameRateHelper/releases/download/v0.23.0.13/DeltaForceBooster-Setup.exe",
-    "sha256":  "2866eaf81b1b20b7a0783aa2ff43217118b8581ed9ba4d186ba46a057d9c8433",
-    "size":  990720
+    "setupUrl":  "https://github.com/FUDAHA99/FrameRateHelper/releases/download/v1.0.0.0/DeltaForceBooster-Setup.exe",
+    "sha256":  "1abe4bb5326449a0729d4a50830e0d32151c45c4c5b4c731e838b1d2a192f691",
+    "size":  991232
 }

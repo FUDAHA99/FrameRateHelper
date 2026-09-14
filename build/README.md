@@ -143,12 +143,12 @@ SHA256 与文件大小 → 提权 helper 复验并复制到受保护 staging →
 
 ```json
 {
-  "version": "0.23.0.13",
-  "displayVersion": "0.23.0.13",
-  "minimumSupportedVersion": "0.23.0.8",
+  "version": "1.0.0.0",
+  "displayVersion": "1.0.0.0",
+  "minimumSupportedVersion": "1.0.0.0",
   "notes": "- 本版本包含关键还原修复，旧版本需完成更新后继续使用。",
   "url": "https://github.com/FUDAHA99/FrameRateHelper/releases/latest",
-  "setupUrl": "https://github.com/FUDAHA99/FrameRateHelper/releases/download/v0.23.0.13/DeltaForceBooster-Setup.exe",
+  "setupUrl": "https://github.com/FUDAHA99/FrameRateHelper/releases/download/v1.0.0.0/DeltaForceBooster-Setup.exe",
   "sha256": "（安装包的 SHA256，小写十六进制，构建脚本自动填）",
   "size": 942080
 }

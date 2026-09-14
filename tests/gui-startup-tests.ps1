@@ -29,10 +29,10 @@ $referenceData = $referenceRaw | ConvertFrom-Json
 
 Assert-True ($raw -match '(?s)\$window\.ShowDialog\(\)\s*\|\s*Out-Null\s*#.*?Invoke-AppExit') `
   'normal main-window close does not terminate background runspaces and release the launcher session'
-Assert-True ($raw.Contains("`$script:GuiVersion = '0.23.0.13'") -and
-    $raw.Contains("`$script:DisplayVersion = '0.23.0.13'") -and
-    $raw.Contains('Text="[ v0.23.0.13 ]"')) `
-  'the unified v0.23.0.13 version is missing or inconsistent'
+Assert-True ($raw.Contains("`$script:GuiVersion = '1.0.0.0'") -and
+    $raw.Contains("`$script:DisplayVersion = '1.0.0.0'") -and
+    $raw.Contains('Text="[ v1.0.0.0 ]"')) `
+  'the unified v1.0.0.0 version is missing or inconsistent'
 # 本分支删掉了服务器下载排队，界面只剩下载相位。这里改成守「排队 UI 确实已经拿掉」，
 # 以及下载相位的取消文案仍在。
 Assert-True ($raw.Contains("`$script:UpdUi.CancelDlTxt.Text = '取消下载'") -and

@@ -27,18 +27,20 @@ Assert-True ($stagingAclFunction -match 'GetAccessControl' -and
   'secure update staging does not re-read and verify the file ACL after writing it'
 $releaseManifest = Get-Content -LiteralPath (Join-Path $root 'build\update-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $currentVersion = [regex]::Match($guiText, "(?m)^\`$script:GuiVersion\s*=\s*'([0-9.]+)'\s*$").Groups[1].Value
-Assert-True ($installerBuildSource -match "minimumSupportedVersion\s*=\s*'0\.23\.0\.8'" -and
+Assert-True ($installerBuildSource -match "minimumSupportedVersion\s*=\s*'1\.0\.0\.0'" -and
   "$($releaseManifest.version)" -eq $currentVersion -and "$($releaseManifest.displayVersion)" -eq $currentVersion -and
-  "$($releaseManifest.minimumSupportedVersion)" -eq '0.23.0.8') `
+  "$($releaseManifest.minimumSupportedVersion)" -eq '1.0.0.0') `
   'release manifest version or mandatory-upgrade floor is stale'
 $expectedReleaseNotes = @'
-- 修复从早期版本升级后，还原游戏进程优先级可能提示“备份注册表目标不在白名单”、导致还原列表读取失败的问题。
-- 历史兼容仅开放 DeltaForceClient.exe 的 CpuPriorityClass 与 IoPriority 原优化项，其他进程名和 IFEO 值继续按安全白名单拒绝。
-- v0.23.0.8 以前的版本仍需完成更新后继续使用。
+- 「帧率优化助手」的第一个版本。基于 Leonard8818/-Delta-Force-Graphics-Optimizer（MIT）分支重做。
+- 默认不收集、不上报任何使用数据：上游那整套遥测与匿名上报已删除，界面上也不再有相关开关。
+- 从旧版本升级会迁移你的自存优化方案、性能历史与原始电源方案记录；不在迁移清单内的文件会跳过并在日志里说明，原文件保留在原位置。
+- 修正：关闭鼠标「提高指针精确度」要重新登录后才生效，界面此前写的是「写入后立即生效」。
+- 窗口可以拖动缩放并记住宽度；导出诊断反馈的两组选项新增全选。
 '@
 Assert-True (("$($releaseManifest.notes)" -replace "`r`n", "`n") -eq ($expectedReleaseNotes -replace "`r`n", "`n") -and
   $installerBuildSource.Contains("`$manifestNotes = @'")) `
-  'v0.23.0.13 release notes are missing or inconsistent'
+  'v1.0.0.0 release notes are missing or inconsistent'
 Assert-True ($launcherBuildSource.Contains('const string ActiveMarkerName = @"Global\DeltaForceBooster.LaunchSession";') -and
   $launcherBuildSource.Contains('const string InstanceMarkerName = @"Local\DeltaForceBooster.LaunchInstance";') -and
   $launcherBuildSource.Contains('activeMarker = CreateSessionMarker(ActiveMarkerName') -and
