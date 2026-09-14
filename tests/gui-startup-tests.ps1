@@ -1053,6 +1053,14 @@ Assert-True ($raw.Contains('if ($_.ClickCount -eq 2)')) '双击标题栏不能�
 # （实测 CharacterToGlyphMap 里两个码位都不存在），靠字体回退两态很可能落到同一个方框上，
 # 用户看不出自己在哪个状态。这条不查源码里有没有那两个 Path，而是把 StateChanged
 # 处理器**真的跑一遍**再读渲染出来的可见性 —— 写了却 FindName 打错名字，查源码看不出来。
+# StateChanged 处理器会调 Set-ResizeAffordanceVisible，两段测试都要跑它，先在脚本作用域导入
+$affordanceFn = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Set-ResizeAffordanceVisible'
+}, $true) | Select-Object -First 1)
+Assert-True ($affordanceFn.Count -eq 1) '找不到 Set-ResizeAffordanceVisible'
+Invoke-Expression $affordanceFn[0].Extent.Text
+
 $stateChangedCall = @($ast.FindAll({
   param($node)
   $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
@@ -1456,5 +1464,192 @@ foreach ($idListField in 'feedback_issue_ids', 'feedback_benefit_ids', 'optimiza
   Assert-True ($idListLine[0].Contains('ConvertTo-DiagnosticIdListValue')) `
     "$idListField 仍按字符硬切 —— 超长时会切出半个 Id"
 }
+
+# ---------------------------------------------------------------------------
+#  窗口缩放：热区不能压住任何可点控件
+# ---------------------------------------------------------------------------
+#
+# 无边框窗口默认那条可抓带只有 11 物理像素（200% 缩放折合 5.5 逻辑像素），屏幕上
+# 又没有任何提示，实际表现就是「这窗口不能改大小」。加宽它本来该用 WM_NCHITTEST，
+# 但 PowerShell 脚本块转成委托之后 ref 参数 $handled 到手是个普通 [bool]，赋值直接
+# 抛「找不到属性 Value」—— PowerShell 挂的钩子永远接管不了消息。所以改用 WPF 元素
+# 占位，按下时把窗口交给系统的缩放拖拽循环。
+#
+# 代价是这五块透明矩形**盖在真实控件上面**：位置算错一点，边上的按钮就点不动了，
+# 而这正是这个项目最高频的故障描述。所以这条在真控件上逐个量。
+$resizeZoneNames = @('ResizeLeft', 'ResizeRight', 'ResizeBottom', 'ResizeCornerBL', 'ResizeCornerBR')
+function Get-VisualDescendants($Root) {
+  $stack = New-Object Collections.Generic.Stack[object]
+  $stack.Push($Root)
+  while ($stack.Count -gt 0) {
+    $node = $stack.Pop()
+    $node
+    $childCount = [Windows.Media.VisualTreeHelper]::GetChildrenCount($node)
+    for ($ci = 0; $ci -lt $childCount; $ci++) {
+      $stack.Push([Windows.Media.VisualTreeHelper]::GetChild($node, $ci))
+    }
+  }
+}
+# 780 是窗口的 MinWidth，也是最危险的一档：再窄主操作那行就会顶出去
+foreach ($resizeWidth in 780, 1100, 1900) {
+  $zoneWindow = [Windows.Markup.XamlReader]::Parse($mainXamlMatch.Groups[1].Value)
+  $zoneContent = $zoneWindow.Content
+  $zoneWindow.Content = $null
+  $zoneContent.Measure((New-Object Windows.Size ([double]$resizeWidth), 1000.0))
+  $zoneContent.Arrange((New-Object Windows.Rect 0, 0, ([double]$resizeWidth), 1000.0))
+  $zoneContent.UpdateLayout()
+
+  $zoneRects = @()
+  foreach ($zoneName in $resizeZoneNames) {
+    $zoneEl = $zoneWindow.FindName($zoneName)
+    Assert-True ($null -ne $zoneEl) "找不到缩放热区 $zoneName"
+    Assert-True ($zoneEl.ActualWidth -gt 0 -and $zoneEl.ActualHeight -gt 0) `
+      "缩放热区 $zoneName 在 $($resizeWidth)px 下没有被布局出来 —— 抓不到就等于没做"
+    $zoneTopLeft = $zoneEl.TransformToAncestor($zoneContent).Transform((New-Object Windows.Point 0, 0))
+    $zoneRects += [pscustomobject]@{ Name = $zoneName
+      Rect = New-Object Windows.Rect $zoneTopLeft.X, $zoneTopLeft.Y, $zoneEl.ActualWidth, $zoneEl.ActualHeight }
+  }
+  # 上边缘归系统默认那条窄带：最小化/最大化/关闭三个按钮贴着右边缘（CloseBtn 宽 34、
+  # 没有右边距），热区一旦盖到 Row 0 就会把关闭按钮压掉一条。
+  foreach ($zoneRect in $zoneRects) {
+    Assert-True ($zoneRect.Rect.Y -gt 8) `
+      "缩放热区 $($zoneRect.Name) 顶到了标题栏（Y=$([math]::Round($zoneRect.Rect.Y,1))）—— 会把关闭按钮压掉一条"
+  }
+
+  $zoneCollisions = New-Object Collections.Generic.List[string]
+  foreach ($zoneCandidate in (Get-VisualDescendants $zoneContent)) {
+    if ($zoneCandidate -isnot [Windows.Controls.Control]) { continue }
+    $zoneClickable = ($zoneCandidate -is [Windows.Controls.Primitives.ButtonBase]) -or
+                     ($zoneCandidate -is [Windows.Controls.ComboBox]) -or
+                     ($zoneCandidate -is [Windows.Controls.TextBox])
+    if (-not $zoneClickable) { continue }
+    if (-not $zoneCandidate.IsHitTestVisible) { continue }
+    if ($zoneCandidate.ActualWidth -le 0 -or $zoneCandidate.ActualHeight -le 0) { continue }
+    $zoneVisible = $true
+    $zoneParent = $zoneCandidate
+    while ($zoneParent) {
+      if (($zoneParent -is [Windows.UIElement]) -and $zoneParent.Visibility -ne 'Visible') { $zoneVisible = $false; break }
+      $zoneParent = [Windows.Media.VisualTreeHelper]::GetParent($zoneParent)
+    }
+    if (-not $zoneVisible) { continue }
+    $zoneCandTopLeft = $zoneCandidate.TransformToAncestor($zoneContent).Transform((New-Object Windows.Point 0, 0))
+    $zoneCandRect = New-Object Windows.Rect $zoneCandTopLeft.X, $zoneCandTopLeft.Y,
+      $zoneCandidate.ActualWidth, $zoneCandidate.ActualHeight
+    foreach ($zoneRect in $zoneRects) {
+      $zoneHit = [Windows.Rect]::Intersect($zoneCandRect, $zoneRect.Rect)
+      if (-not $zoneHit.IsEmpty -and $zoneHit.Width -gt 0.5 -and $zoneHit.Height -gt 0.5) {
+        $zoneWho = $(if ($zoneCandidate.Name) { $zoneCandidate.Name } else { $zoneCandidate.GetType().Name })
+        [void]$zoneCollisions.Add("$zoneWho 被 $($zoneRect.Name) 压住 $([math]::Round($zoneHit.Width,1))x$([math]::Round($zoneHit.Height,1))px")
+      }
+    }
+  }
+  Assert-True ($zoneCollisions.Count -eq 0) `
+    ("$($resizeWidth)px 下缩放热区压住了可点控件，这些按钮会点不动：" + ($zoneCollisions -join '；'))
+}
+
+# MinWidth 不是随手定的：主操作那行是固定宽度的水平 StackPanel（230+118+132+104+104
+# 加四个 9px 间距 = 724），而水平 StackPanel 从不压缩子元素 —— 窗口再窄，「显卡指引」
+# 就会被推出去，且 Grid 不裁剪子元素，它会画在窗口外面。
+# 这里钉的是「在 MinWidth 下，这一行整个还在窗口里」，不是去对那 29px 边距的账
+# （设计宽度 780 比这行需要的 782 少 2px，显卡指引一直吃掉 2px 右边距，是观感问题）。
+$mainMinWidth = [double][regex]::Match($mainXamlMatch.Groups[1].Value, 'MinWidth="(\d+)"').Groups[1].Value
+Assert-True ($mainMinWidth -gt 0) '主窗口没有设 MinWidth —— 能一直拖到几十像素，整个布局塌掉'
+$actionRowWindow = [Windows.Markup.XamlReader]::Parse($mainXamlMatch.Groups[1].Value)
+$actionRowContent = $actionRowWindow.Content
+$actionRowWindow.Content = $null
+$actionRowContent.Measure((New-Object Windows.Size $mainMinWidth, 1000.0))
+$actionRowContent.Arrange((New-Object Windows.Rect 0, 0, $mainMinWidth, 1000.0))
+$actionRowContent.UpdateLayout()
+$guideBtn = $actionRowWindow.FindName('GuideBtn')
+Assert-True ($null -ne $guideBtn) '找不到主操作那行最右边的「显卡指引」'
+$guideRight = $guideBtn.TransformToAncestor($actionRowContent).Transform(
+  (New-Object Windows.Point $guideBtn.ActualWidth, 0)).X
+Assert-True ($guideRight -le $mainMinWidth) `
+  ("MinWidth=$mainMinWidth 下「显卡指引」的右沿在 $([math]::Round($guideRight,0))，已经在窗口外面 —— " +
+   'Grid 不裁剪子元素，这个按钮会被画到窗口之外')
+
+# ---------------------------------------------------------------------------
+#  缩放热区的接线
+# ---------------------------------------------------------------------------
+#
+# 五块热区共用一个处理器，边缘代号放在 Tag 上（循环里挂的处理器不能闭包引用循环变量）。
+# 代号错了的表现是「往左拖窗口往右长」，比不能拖更让人摸不着头脑。
+$resizeEdgeExpect = @{ ResizeLeft = 1; ResizeRight = 2; ResizeBottom = 6; ResizeCornerBL = 7; ResizeCornerBR = 8 }
+foreach ($resizeZoneName in $resizeZoneNames) {
+  $wantedZone = $resizeZoneName
+  $tagAssign = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+    "$($node.Left)" -eq "`$ui.$wantedZone.Tag"
+  }, $true) | Select-Object -First 1)
+  Assert-True ($tagAssign.Count -eq 1) "缩放热区 $resizeZoneName 没有设置边缘代号"
+  Assert-True ([int]$tagAssign[0].Right.Extent.Text.Trim() -eq $resizeEdgeExpect[$resizeZoneName]) `
+    ("$resizeZoneName 的边缘代号是 $($tagAssign[0].Right.Extent.Text.Trim())，应为 " +
+     "$($resizeEdgeExpect[$resizeZoneName]) —— 代号错了会变成「往左拖窗口往右长」")
+}
+
+# 处理器真的跑一遍：窗口没 Show 过，Handle 是 IntPtr.Zero，SendMessage 到空句柄直接返回，
+# 不会进系统的模态缩放循环把测试挂住。
+# 五块必须**逐个显式**接线：写成 foreach $ui.$name 的话，上面那条「每个 $ui.X 都在
+# 真控件上执行一次」的自检只能看到字面量 "$resizeZoneName"，这五处等于没被验过。
+foreach ($resizeZoneName in $resizeZoneNames) {
+  $wantedZoneWire = $resizeZoneName
+  $zoneWire = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+    "$($node.Member)" -eq 'Add_MouseLeftButtonDown' -and "$($node.Expression)" -eq "`$ui.$wantedZoneWire"
+  }, $true) | Select-Object -First 1)
+  Assert-True ($zoneWire.Count -eq 1) `
+    "缩放热区 $resizeZoneName 没有接线 —— 光标会变成缩放箭头而按下去毫无反应"
+}
+$resizeHandlerAssign = @($ast.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+  "$($node.Left)" -eq '$script:ResizeZoneHandler'
+}, $true) | Select-Object -First 1)
+Assert-True ($resizeHandlerAssign.Count -eq 1) '找不到缩放热区共用的那个处理器'
+$resizeHandler = ([scriptblock]::Create($resizeHandlerAssign[0].Right.Extent.Text)).Invoke()[0]
+& {
+  $window = [Windows.Markup.XamlReader]::Parse($mainXamlMatch.Groups[1].Value)
+  function Write-Log([string]$Message) {}
+  $resizeProbeZone = $window.FindName('ResizeCornerBR')
+  $resizeProbeZone.Tag = 8
+  $resizeProbeZone.Add_MouseLeftButtonDown($resizeHandler)
+  foreach ($resizeCase in @(
+    @{ State = 'Maximized'; Expect = $false; Why = '最大化时窗口不该被拖动缩放，事件必须原样放过' },
+    @{ State = 'Normal'; Expect = $true; Why = '普通状态下按住热区没有接管事件 —— 拖不动' })) {
+    $window.WindowState = $resizeCase.State
+    $resizeArgs = New-Object Windows.Input.MouseButtonEventArgs(
+      [Windows.Input.Mouse]::PrimaryDevice, 0, [Windows.Input.MouseButton]::Left)
+    $resizeArgs.RoutedEvent = [Windows.UIElement]::MouseLeftButtonDownEvent
+    $resizeProbeZone.RaiseEvent($resizeArgs)
+    Assert-True ($resizeArgs.Handled -eq $resizeCase.Expect) $resizeCase.Why
+  }
+  $window.WindowState = 'Normal'
+}
+
+# 最大化之后热区和那个手柄要一起收起来：留着的话光标变成缩放箭头而按下去毫无反应
+& {
+  $window = $mainXamlWindow
+  $ui = @{ MaxBtn = $mainXamlWindow.FindName('MaxBtn') }
+  foreach ($resizeVisualName in $resizeZoneNames + @('ResizeGrip')) {
+    $ui[$resizeVisualName] = $mainXamlWindow.FindName($resizeVisualName)
+  }
+  foreach ($affordanceCase in @(
+    @{ State = 'Maximized'; Expect = 'Collapsed' }, @{ State = 'Normal'; Expect = 'Visible' })) {
+    $window.WindowState = $affordanceCase.State
+    & $stateChangedBody
+    foreach ($resizeVisualName in $resizeZoneNames + @('ResizeGrip')) {
+      Assert-True ("$($ui[$resizeVisualName].Visibility)" -eq $affordanceCase.Expect) `
+        ("窗口切到 $($affordanceCase.State) 之后 $resizeVisualName 仍是 $($ui[$resizeVisualName].Visibility) —— " +
+         '最大化时留着热区，光标会变成缩放箭头而按下去毫无反应')
+    }
+  }
+  $window.WindowState = 'Normal'
+}
+
+# 手柄纯粹是画给人看的：它要是吃掉命中判定，底下那块角落热区就抓不到了
+Assert-True (-not $mainXamlWindow.FindName('ResizeGrip').IsHitTestVisible) `
+  '缩放手柄吃掉了命中判定 —— 右下角那块热区会抓不到'
 
 Write-Host 'PASS: GUI UAC recovery and WinPS5.1 Generic.List result paths are regression covered'

@@ -642,7 +642,7 @@ $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:sys="clr-namespace:System;assembly=mscorlib"
-        Title="帧率优化助手" Width="780" Height="1200" MinHeight="640"
+        Title="帧率优化助手" Width="780" Height="1200" MinHeight="640" MinWidth="780"
         WindowStartupLocation="CenterScreen" WindowStyle="None" ResizeMode="CanResize"
         BorderBrush="{DynamicResource Line}" BorderThickness="1"
         FontFamily="Microsoft YaHei UI" FontSize="12">
@@ -1684,12 +1684,36 @@ $xaml = @'
                 Margin="10,0,0,0" Content="免责声明"/>
       </StackPanel>
     </Grid>
+
+    <!-- 缩放热区：无边框窗口默认那条可抓带只有 11 物理像素（200% 缩放折合 5.5 逻辑像素），
+         细到摸不着；而 PowerShell 挂的窗口钩子没法接管 WM_NCHITTEST（ref 参数回写不了），
+         所以改用 WPF 元素占位，按下时把窗口交给系统的缩放拖拽循环。
+         **一律从 Row 1 开始**：Row 0 是标题栏，最小化/最大化/关闭三个按钮贴着右边缘，
+         热区盖上去就会把关闭按钮压掉一条。上边和上面两个角因此不做。 -->
+    <Rectangle x:Name="ResizeLeft" Grid.Row="1" Grid.RowSpan="4" Width="6" HorizontalAlignment="Left"
+               Fill="Transparent" Cursor="SizeWE" Panel.ZIndex="40"/>
+    <Rectangle x:Name="ResizeRight" Grid.Row="1" Grid.RowSpan="4" Width="6" HorizontalAlignment="Right"
+               Fill="Transparent" Cursor="SizeWE" Panel.ZIndex="40"/>
+    <Rectangle x:Name="ResizeBottom" Grid.Row="4" Height="6" VerticalAlignment="Bottom"
+               Fill="Transparent" Cursor="SizeNS" Panel.ZIndex="40"/>
+    <Rectangle x:Name="ResizeCornerBL" Grid.Row="4" Width="16" Height="16" HorizontalAlignment="Left"
+               VerticalAlignment="Bottom" Fill="Transparent" Cursor="SizeNESW" Panel.ZIndex="41"/>
+    <Rectangle x:Name="ResizeCornerBR" Grid.Row="4" Width="16" Height="16" HorizontalAlignment="Right"
+               VerticalAlignment="Bottom" Fill="Transparent" Cursor="SizeNWSE" Panel.ZIndex="41"/>
+
+    <!-- 能拖动缩放这件事，屏幕上还得说出来：三条递减的斜线是 Windows 通用的缩放记号。
+         IsHitTestVisible=False —— 命中判定归上面那块 ResizeCornerBR，这里纯粹是画给人看的。 -->
+    <Path x:Name="ResizeGrip" Grid.Row="4" Data="M 1,13 L 13,1 M 5,13 L 13,5 M 9,13 L 13,9"
+          Stroke="{DynamicResource LineHi}" StrokeThickness="1"
+          HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,4,4"
+          IsHitTestVisible="False" Panel.ZIndex="50"/>
   </Grid>
 </Window>
 '@
 
 $window = [Windows.Markup.XamlReader]::Parse($xaml)
 $script:DefaultAppWindowHeight = 1200.0
+$script:DefaultAppWindowWidth = 780.0
 # 默认高度拉长到用户实机调整后的高度；小屏机器仍按工作区留出边缘。
 $workAreaHeight = [double][Windows.SystemParameters]::WorkArea.Height
 if ($workAreaHeight -gt 0) {
@@ -1929,6 +1953,7 @@ foreach ($n in 'TitleBar','MinBtn','MaxBtn','CloseBtn','UpdateBtn','ThemeBtn','S
                'InlineRestoreLegacyNotice','InlineRestoreLegacyText','InlineRestoreSelectedText','InlineRestoreAllSummary',
                'InlineRestoreSelectAllBtn','InlineRestoreClearBtn','InlineRestoreSelectedBtn','InlineRestoreAllBtn','InlineRestoreCloseBtn',
                'ReportBtn','ResidueBtn','DisclaimerBtn','LogBox',
+               'ResizeLeft','ResizeRight','ResizeBottom','ResizeCornerBL','ResizeCornerBR','ResizeGrip',
                'PresetBox','SavePresetBtn','DelPresetBtn','PresetNote',
                'TabOptBtn','TabTuneBtn','TabFrameFixBtn','TabRefBtn','TabLogBtn','LogBadge','LogBadgeTxt',
                'OptPage','TunePage','FrameFixPage','RefPage','LogPage','RefPanel','ActionRow',
@@ -2024,6 +2049,40 @@ function Get-SavedAppTheme {
   'dark'
 }
 
+function Get-SavedAppWindowWidth {
+  $value = Get-SavedUiPreferences
+  try {
+    if ($value -and $value.PSObject.Properties['windowWidth']) {
+      $width = [double]$value.windowWidth
+      if (-not [double]::IsNaN($width) -and -not [double]::IsInfinity($width) -and $width -ge 780 -and $width -le 10000) {
+        return $width
+      }
+    }
+  } catch {}
+  [double]$script:DefaultAppWindowWidth
+}
+
+function Get-PersistableAppWindowWidth {
+  $width = $(if ($window.WindowState -eq [Windows.WindowState]::Normal) { [double]$window.Width } else { [double]$window.RestoreBounds.Width })
+  if ([double]::IsNaN($width) -or [double]::IsInfinity($width) -or $width -lt 780) {
+    $width = [double]$script:DefaultAppWindowWidth
+  }
+  [math]::Round($width,0)
+}
+
+# 最小宽度 780 不是拍脑袋：主操作那一行（执行优化 230 + 还原 118 + 残留 132 +
+# 重新检测 104 + 显卡指引 104，四个 9px 间距，左右各 29px 边距）需要 782px，
+# 而水平 StackPanel 从不压缩子元素 —— 再窄一点「显卡指引」就会被推出窗口右沿，
+# 且 Grid 不裁剪子元素，它会画在窗口外面。所以这个窗口只能加宽，不能收窄。
+#
+# 宽度和高度一样要夹在当前工作区以内：换了台小屏幕、或者上次是在副屏上拉宽的，
+# 直接套用旧值会让窗口有一半在屏幕外，而标题栏可能整个够不着。
+function Set-SavedAppWindowWidth {
+  $workWidth = [double][Windows.SystemParameters]::WorkArea.Width
+  $maximum = $(if ($workWidth -gt 0) { [math]::Max(780.0,$workWidth) } else { [double]$script:DefaultAppWindowWidth })
+  $window.Width = [math]::Min($maximum,[math]::Max(780.0,(Get-SavedAppWindowWidth)))
+}
+
 function Get-SavedAppWindowHeight {
   $value = Get-SavedUiPreferences
   try {
@@ -2051,16 +2110,23 @@ function Set-SavedAppWindowHeight {
   $window.Height = [math]::Min($maximum,[math]::Max(640.0,(Get-SavedAppWindowHeight)))
 }
 
-function Save-AppUiPreferences([string]$Theme, [double]$WindowHeight) {
+# $WindowWidth 省略时读回磁盘上的旧值，而不是写死默认宽度 —— 只改主题的那条路径
+# （Save-AppTheme）并不知道当前窗口多宽，不读回来的话切一次主题就会把用户拉好的
+# 宽度悄悄抹回 780。
+function Save-AppUiPreferences([string]$Theme, [double]$WindowHeight, [double]$WindowWidth = 0) {
   if (-not $script:LightThemeEnabled) { $Theme = 'dark' }
   if ($Theme -notin 'dark','light') { $Theme = 'dark' }
   if ([double]::IsNaN($WindowHeight) -or [double]::IsInfinity($WindowHeight) -or $WindowHeight -lt 640) {
     $WindowHeight = [double]$script:DefaultAppWindowHeight
   }
+  if ([double]::IsNaN($WindowWidth) -or [double]::IsInfinity($WindowWidth) -or $WindowWidth -lt 780) {
+    $WindowWidth = [double](Get-SavedAppWindowWidth)
+  }
   $payload = [pscustomobject][ordered]@{
     schemaVersion=1
     theme=$Theme
     windowHeight=[math]::Round($WindowHeight,0)
+    windowWidth=[math]::Round($WindowWidth,0)
   }
   $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($payload | ConvertTo-Json -Compress))
   Write-BytesAtomic $script:UiPreferencesPath $bytes
@@ -9298,6 +9364,8 @@ public static class DfbWindowChrome {
     public int cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags;
   }
   [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+  [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+  [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
   [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO info);
   // 把 WM_GETMINMAXINFO 里的最大尺寸/位置改写成当前显示器的工作区。
   // MONITOR_DEFAULTTONEAREST = 2：窗口跨屏时取重叠最多的那台。
@@ -9322,10 +9390,24 @@ public static class DfbWindowChrome {
     if (mmi.ptMinTrackSize.y > workH) { mmi.ptMinTrackSize.y = workH; }
     Marshal.StructureToPtr(mmi, lParam, true);
   }
+
+  // 把窗口交给系统自己的缩放拖拽循环。比在 WPF 里手算鼠标位移可靠得多：
+  // 贴边吸附、最小尺寸、跨屏 DPI 变化全都由系统处理，我们一行都不用写。
+  // WMSZ_*：左 1 右 2 下 6 左下 7 右下 8（刻意不做上边和上面两个角 ——
+  // 那条带子正好压在最小化/最大化/关闭三个按钮上）。
+  public static void StartResize(IntPtr hwnd, int edge) {
+    if (edge <= 0) { return; }
+    ReleaseCapture();
+    SendMessage(hwnd, 0x0112 /* WM_SYSCOMMAND */, (IntPtr)(0xF000 /* SC_SIZE */ + edge), IntPtr.Zero);
+  }
 }
 '@
   }
   $windowHandle = (New-Object Windows.Interop.WindowInteropHelper($window)).EnsureHandle()
+  # 只处理 WM_GETMINMAXINFO，而且刻意不依赖 $handled：PowerShell 脚本块转成委托之后，
+  # ref 参数到手是个普通 [bool]，赋值会抛「找不到属性 Value」，返回值也会被丢掉 ——
+  # 也就是说 PowerShell 挂的钩子**永远无法接管消息**。这里能生效是因为它改的是
+  # lParam 指向的非托管内存，不需要接管。缩放热区因此走 WPF 元素那条路，见下方 Resize*。
   [Windows.Interop.HwndSource]::FromHwnd($windowHandle).AddHook({
     param($hwnd, $msg, $wParam, $lParam, $handled)
     if ($msg -eq 0x0024) {   # WM_GETMINMAXINFO
@@ -9369,6 +9451,46 @@ $ui.TitleBar.Add_MouseLeftButtonDown({
   }
   $window.DragMove()
 })
+# 缩放热区：边缘代号放在 Tag 上，处理器一律从 $this.Tag 取 —— 循环里挂的处理器
+# 不能闭包引用循环变量（这个文件别处也是这么规避的）。
+$ui.ResizeLeft.Tag = 1        # WMSZ_LEFT
+$ui.ResizeRight.Tag = 2       # WMSZ_RIGHT
+$ui.ResizeBottom.Tag = 6      # WMSZ_BOTTOM
+$ui.ResizeCornerBL.Tag = 7    # WMSZ_BOTTOMLEFT
+$ui.ResizeCornerBR.Tag = 8    # WMSZ_BOTTOMRIGHT
+# 五块热区共用同一个处理器，但**逐个显式挂**，不用动态成员名（点号后面跟变量）：
+# 那样写在源码里只是个变量，接线自检那条测试（注册的每个控件都要能在真控件上执行一次）
+# 就只能看到字面量 "$resizeZoneName"，等于这五处接线完全没被验过。
+$script:ResizeZoneHandler = {
+  if ($window.WindowState -ne [Windows.WindowState]::Normal) { return }
+  $_.Handled = $true
+  try {
+    $resizeHwnd = (New-Object Windows.Interop.WindowInteropHelper($window)).Handle
+    [DfbWindowChrome]::StartResize($resizeHwnd, [int]$this.Tag)
+  } catch {
+    # interop 类没能编出来时不拦：系统默认那条 11 物理像素的窄带子仍然能用
+    Write-Log "窗口缩放热区不可用：$($_.Exception.Message)"
+  }
+}
+$ui.ResizeLeft.Add_MouseLeftButtonDown($script:ResizeZoneHandler)
+$ui.ResizeRight.Add_MouseLeftButtonDown($script:ResizeZoneHandler)
+$ui.ResizeBottom.Add_MouseLeftButtonDown($script:ResizeZoneHandler)
+$ui.ResizeCornerBL.Add_MouseLeftButtonDown($script:ResizeZoneHandler)
+$ui.ResizeCornerBR.Add_MouseLeftButtonDown($script:ResizeZoneHandler)
+
+# 最大化时窗口不该被拖动缩放，热区和那个手柄一起收起来 —— 留着的话光标会变成
+# 缩放箭头而按下去毫无反应，又是一次「点了没用」。
+# 同样逐个写出来，不用动态成员名：那样会让「用到的每个控件都要在注册
+# 清单里」那条自检看到的是字面量 "$resizeVisualName"，漏注册一个就查不出来 ——
+# 而漏注册正是之前软件整个打不开的那次事故（$ui.ResidueBtn 是 $null）。
+function Set-ResizeAffordanceVisible([bool]$On) {
+  $resizeVisibility = $(if ($On) { 'Visible' } else { 'Collapsed' })
+  foreach ($resizeVisual in @($ui.ResizeLeft, $ui.ResizeRight, $ui.ResizeBottom,
+                              $ui.ResizeCornerBL, $ui.ResizeCornerBR, $ui.ResizeGrip)) {
+    if ($resizeVisual) { $resizeVisual.Visibility = $resizeVisibility }
+  }
+}
+
 $ui.MinBtn.Add_Click({ $window.WindowState = 'Minimized' })
 $ui.MaxBtn.Add_Click({ Switch-AppWindowMaximized })
 # 按钮图标跟着状态走：最大化后它是「还原」，图标和提示都要变，否则用户不知道怎么退出来
@@ -9381,6 +9503,7 @@ $window.Add_StateChanged({
   if ($maximizeGlyph) { $maximizeGlyph.Visibility = $(if ($maximized) { 'Collapsed' } else { 'Visible' }) }
   if ($restoreGlyph) { $restoreGlyph.Visibility = $(if ($maximized) { 'Visible' } else { 'Collapsed' }) }
   $ui.MaxBtn.ToolTip = $(if ($maximized) { '向下还原' } else { '最大化' })
+  Set-ResizeAffordanceVisible (-not $maximized)
 })
 if ($script:LightThemeEnabled) {
   $ui.ThemeBtn.Add_Click({ Set-AppTheme $(if ($script:CurrentTheme -eq 'dark') { 'light' } else { 'dark' }) -Persist })
@@ -9402,7 +9525,7 @@ $window.Add_Closing({
     $_.Cancel = $true
     Write-Log '正在执行优化/还原，请等本轮结束后再关闭。'
   } else {
-    try { Save-AppUiPreferences $script:CurrentTheme (Get-PersistableAppWindowHeight) } catch {}
+    try { Save-AppUiPreferences $script:CurrentTheme (Get-PersistableAppWindowHeight) (Get-PersistableAppWindowWidth) } catch {}
     Stop-LiveMetricsMonitor
     if ($script:PerformanceTimer) { $script:PerformanceTimer.Stop() }
   }
@@ -9954,9 +10077,10 @@ $ui.InlineRestoreClearBtn.Add_Click({
 })
 $ui.InlineRestoreSelectedBtn.Add_Click({ Invoke-InlineRestoreAction 'selected_items' })
 $ui.InlineRestoreAllBtn.Add_Click({ Invoke-InlineRestoreAction 'all' })
-# 在任何窗口出现前恢复用户上次的主题与窗口高度；旧版偏好没有高度时默认使用 1200。
+# 在任何窗口出现前恢复用户上次的主题与窗口尺寸；旧版偏好没有记宽高时用默认值。
 Set-AppTheme (Get-SavedAppTheme)
 Set-SavedAppWindowHeight
+Set-SavedAppWindowWidth
 # 免责声明门控放在主窗口之前：没同意就不该看到任何可点的优化按钮。
 # 读取/写入配置失败一律按「没同意」处理——宁可多问一次，也不能因为磁盘异常就放行
 if (-not (Test-DisclaimerAccepted)) {

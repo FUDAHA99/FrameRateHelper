@@ -22,7 +22,7 @@ function Get-GuiFunctionText([string]$Name) {
   $node[0].Extent.Text
 }
 
-foreach ($name in 'Get-SavedUiPreferences','Get-SavedAppTheme','Get-SavedAppWindowHeight','Save-AppUiPreferences') {
+foreach ($name in 'Get-SavedUiPreferences','Get-SavedAppTheme','Get-SavedAppWindowHeight','Get-SavedAppWindowWidth','Save-AppUiPreferences') {
   Invoke-Expression (Get-GuiFunctionText $name)
 }
 
@@ -30,6 +30,7 @@ $case = Join-Path ([IO.Path]::GetTempPath()) ('dfb-ui-prefs-' + [guid]::NewGuid(
 [void][IO.Directory]::CreateDirectory($case)
 $script:UiPreferencesPath = Join-Path $case 'ui-preferences.json'
 $script:DefaultAppWindowHeight = 1200.0
+$script:DefaultAppWindowWidth = 780.0
 $script:LightThemeEnabled = $true
 function Write-BytesAtomic([string]$Path,[byte[]]$Bytes) { [IO.File]::WriteAllBytes($Path,$Bytes) }
 
@@ -55,6 +56,29 @@ try {
 
   [IO.File]::WriteAllText($script:UiPreferencesPath,'{"schemaVersion":1,"theme":"dark","windowHeight":400}',[Text.UTF8Encoding]::new($false))
   Assert-True ((Get-SavedAppWindowHeight) -eq 1200) 'unsafe short window height was not rejected'
+
+  # --- window width is remembered too (NOTE: ASCII-only messages, this file has no BOM) ---
+  # Only the height used to be persisted, so any width the user dragged was reset to 780
+  # on the next launch -- which reads as "the window size cannot be changed at all".
+  [IO.File]::WriteAllText($script:UiPreferencesPath,'{"schemaVersion":1,"theme":"dark","windowHeight":1188}',[Text.UTF8Encoding]::new($false))
+  Assert-True ((Get-SavedAppWindowWidth) -eq 780) 'a preference file without a width did not fall back to the default width'
+
+  Save-AppUiPreferences 'dark' 1188.4 1240.6
+  $saved = Get-Content -LiteralPath $script:UiPreferencesPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  Assert-True ([int]$saved.windowWidth -eq 1241) 'window width was not saved'
+  Assert-True ((Get-SavedAppWindowWidth) -eq 1241) 'saved window width was not restored'
+
+  # Save-AppTheme only knows the theme and the height. If the omitted width fell back to the
+  # default instead of reading the stored one back, switching the theme once would silently
+  # snap the user's window back to 780.
+  Save-AppUiPreferences 'dark' 1188.4
+  $saved = Get-Content -LiteralPath $script:UiPreferencesPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  Assert-True ([int]$saved.windowWidth -eq 1241) 'saving without a width discarded the stored window width'
+
+  # Below the minimum the action row (a fixed-width horizontal StackPanel) no longer fits,
+  # so a too-small stored width must be rejected rather than applied.
+  [IO.File]::WriteAllText($script:UiPreferencesPath,'{"schemaVersion":1,"theme":"dark","windowHeight":1188,"windowWidth":400}',[Text.UTF8Encoding]::new($false))
+  Assert-True ((Get-SavedAppWindowWidth) -eq 780) 'unsafe narrow window width was not rejected'
 
   # --- no telemetry opt-in exists on this fork ---
   # NOTE: this file has no UTF-8 BOM, so every message here must stay ASCII.
