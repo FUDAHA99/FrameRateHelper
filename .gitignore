@@ -37,5 +37,7 @@ __pycache__/
 /tests/website-responsive-tests.ps1
 /tests/website-stats-highlight-tests.js
 
-# workflow/agent 的临时 git worktree，不是项目内容
-.claude/worktrees/
+# 本机的 agent 工作区：不只是临时 worktree。settings.local.json 里是本机权限白名单
+# （常带绝对路径，有时带环境变量）。本仓库已经发生过一次 git add -A 把
+# .claude/worktrees/ 当 gitlink 误提交，所以这里整个目录都挡掉。
+.claude/

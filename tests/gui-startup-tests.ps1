@@ -225,6 +225,45 @@ Assert-True ($raw.Contains("`$lines.Add('== 用户反馈选择 ==')") -and
   $raw.Contains('New-DiagnosticReport -Feedback $feedback') -and
   $raw.Contains("if ((`$issueChoices.Count + `$benefitChoices.Count) -eq 0)")) `
   'diagnostic feedback selection is not required and embedded in the uploaded report'
+# ---------------------------------------------------------------------------
+#  随包分发的参考数据里不得再出现第三方个人条目
+# ---------------------------------------------------------------------------
+#
+# 这个文件在发布白名单里（build\make-installer.ps1），会装到每一台用户机器上。
+# 上游版本在这里收录过多位实名主播的姓名、硬件、「他们的设置」与指向其视频的
+# 链接，界面上以其名义署名展示、还带一个「查看来源」按钮把用户导过去。
+# 那些参数是短视频平台自动摘要的二手转述（数据自己标的 confidence 最低一条
+# 连档位数值都没有），未经当事人授权。公开发布前已全部移除。
+#
+# 这条钉的是不变量而不是具体那几个名字：随包发出去的条目只能是本项目自己的
+# 推荐方案（featured）。以后再加回任何带 name / url / platform 的人物条目都会被接住。
+foreach ($refEntry in @($referenceData.streamers)) {
+  if ($refEntry.featured -eq $true) { continue }
+  Assert-True $false `
+    ("参考数据里出现了非推荐方案的条目（ThirdPartyPersonEntry）：$($refEntry.name) —— " +
+     '这个文件会装到每台用户机器上，不能再带第三方个人资料')
+}
+Assert-True ($null -eq $referenceData.not_found) `
+  ('参考数据里又出现了 not_found 名单 —— ' +
+   '那是点名真人并附上「查不到 / 无法确认归属」的内部工作笔记，界面从不渲染它，却会随安装包发出去')
+foreach ($refField in 'url', 'platform') {
+  Assert-True (-not @($referenceData.streamers | Where-Object { "$($_.$refField)" -ne '' }).Count) `
+    "参考数据的 $refField 字段又有值了 —— 那意味着又在指向某个第三方的个人作品"
+}
+
+# 运行时外链白名单：只应该含厨商官方支持页与本项目自己的发布页。
+# 白名单里留一个没人用的口子，下一个人就会把它当成「既然开着那就用吧」。
+$launcherSrc = [IO.File]::ReadAllText((Join-Path $root 'build\make-launcher.ps1'), [Text.Encoding]::UTF8)
+$allowedMatch = [regex]::Match($launcherSrc, 'string\[\]\s+allowed\s*=\s*new\s+string\[\]\s*\{([^}]*)\}')
+Assert-True $allowedMatch.Success '找不到启动器的外链白名单'
+$allowedHosts = @([regex]::Matches($allowedMatch.Groups[1].Value, '"([^"]+)"') |
+  ForEach-Object { $_.Groups[1].Value })
+foreach ($allowedHost in $allowedHosts) {
+  Assert-True ($allowedHost -in @('aka.ms', 'github.com', 'www.nvidia.cn', 'www.amd.com', 'www.intel.cn')) `
+    ("外链白名单里多了一个域名：$allowedHost —— " +
+     '只应该放行厨商官方支持页与本项目的发布页')
+}
+
 $recommended = @($referenceData.streamers | Where-Object { $_.featured -eq $true })
 Assert-True ($recommended.Count -eq 1 -and $referenceData.streamers[0].featured -eq $true) `
   'game settings reference does not expose exactly one featured recommendation as the first column'

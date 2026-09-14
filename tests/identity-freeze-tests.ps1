@@ -143,7 +143,10 @@ foreach ($needle in '这是一个分支（fork）', '上游作者不对本分支
 }
 # 上游的服务端布局与官网不属于本分支：这几句留着就是在说假话
 foreach ($f in 'README.md','CONTRIBUTING.md') {
-  foreach ($stale in '数据接收服务', '运营看板', 'upstream-site.invalid') {
+  # 上游官网只写域名主体片段（不带 .com）：断言照样生效，而公开后的仓库
+  # 不必带着第三方的完整商业站点域名。「官网」二字不能禁：源码里还有大量
+  # 「三角洲官网视觉基准」这类指游戏官网的正当说法。
+  foreach ($stale in '数据接收服务', '运营看板', 'upstream-site') {
     Assert-True (-not (Get-Source $f).Contains($stale)) "$f 里还留着上游专有的说法：$stale（本分支没有服务端，也没有官网）"
   }
 }

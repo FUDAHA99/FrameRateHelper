@@ -517,7 +517,10 @@ $hashRowsText
             !String.IsNullOrEmpty(uri.UserInfo) || !uri.IsDefaultPort)
             throw new InvalidOperationException("外部链接不是允许的 HTTPS 地址");
         string host = uri.IdnHost.ToLowerInvariant();
-        string[] allowed = new string[] { "aka.ms", "github.com", "www.nvidia.cn", "www.amd.com", "www.intel.cn", "redacted.invalid" };
+        // 曾为「主播设置参考」那一页的「查看来源」按钮放行过一个短视频平台域名。那些条目
+        // （实名主播的二手转述设置）已在公开发布前移除，白名单里不能留一个没人用的口子：
+        // 外链白名单只应该含厨商官方支持页与本项目自己的发布页。
+        string[] allowed = new string[] { "aka.ms", "github.com", "www.nvidia.cn", "www.amd.com", "www.intel.cn" };
         if (Array.IndexOf(allowed, host) < 0) throw new InvalidOperationException("外部链接域名不在白名单");
         var psi = new ProcessStartInfo(uri.AbsoluteUri);
         psi.UseShellExecute = true;

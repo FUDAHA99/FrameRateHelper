@@ -41,7 +41,7 @@ try {
   # evilgithubusercontent.com 就能冒充资源 CDN。
   foreach ($bad in 'evilgithubusercontent.com', 'notgithubusercontent.com', 'githubusercontent.com',
                    'github.com.evil.cn', 'release-assets.githubusercontent.com.evil.cn',
-                   'upstream-host.invalid', 'localhost', '', '   ') {
+                   'not-our-host.example', 'localhost', '', '   ') {
     Assert-True (-not (Test-BoosterAllowedDownloadHost $bad)) "应拒绝的下载域名被放行：[$bad]"
   }
 
@@ -87,7 +87,10 @@ $raw = Get-Content -LiteralPath $updaterPath -Raw -Encoding UTF8
 $codeText = (($tokens | Where-Object { $_.Kind -ne [Management.Automation.Language.TokenKind]::Comment }) |
   ForEach-Object { $_.Text }) -join ' '
 Assert-True (-not $codeText.Contains('download-queue')) 'updater 非注释代码里仍有排队端点路径'
-Assert-True (-not $codeText.Contains('upstream-host')) 'updater 非注释代码里仍有旧服务端域名'
+# 上游遥测端点的域名片段。只存片段、不写完整主机名：断言要的是「别退回旧端点」
+# 这个保护，而本仓库即将公开，没必要把第三方的生产主机名一并发出去。
+$LegacyUpstreamHostFragment = 'upstream-host'
+Assert-True (-not $codeText.Contains($LegacyUpstreamHostFragment)) 'updater 非注释代码里仍有旧服务端域名'
 
 # ---------- 5. 重定向必须再过一次同一道闸 ----------
 
@@ -101,7 +104,7 @@ Assert-True ($raw.Contains('Test-BoosterSetupUrl "$($resp.ResponseUri.AbsoluteUr
 $mk = Get-Content -LiteralPath (Join-Path $root 'build\make-installer.ps1') -Raw -Encoding UTF8
 Assert-True ($mk.Contains('$releaseRepo') -and $mk.Contains('releases/download/v$ver/DeltaForceBooster-Setup.exe')) `
   '构建脚本生成的 setupUrl 没有指向本版 tag 的 release 资源'
-Assert-True (-not $mk.Contains('upstream-host')) '构建脚本里仍有旧服务端域名'
+Assert-True (-not $mk.Contains($LegacyUpstreamHostFragment)) '构建脚本里仍有旧服务端域名'
 # setupUrl 必须带版本 tag：清单里的 sha256 是这一个文件的，指向 latest 会在发版
 # 竞态下让老清单配新安装包，校验必然失败。
 Assert-True (-not $mk.Contains('releases/latest/download/DeltaForceBooster-Setup.exe')) `

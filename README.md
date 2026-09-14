@@ -1,4 +1,4 @@
-﻿# 帧率优化助手
+# 帧率优化助手
 
 > 面向《三角洲行动》的 Windows 帧率优化工具。**非官方**，与腾讯公司及《三角洲行动》官方没有任何关系。
 
@@ -37,7 +37,7 @@
 | 🧭 品牌与 BIOS | 自动识别电脑/主板品牌、CPU 平台、DDR 代际与笔记本类型，按实际平台提示 XMP / A-XMP / EXPO / DOCP 菜单；厂商未开放时明确说明无需继续寻找 |
 | 🧠 内存与系统 | 内存压缩、休眠、系统服务及视觉效果设置；旧版页面文件改动支持历史备份复原 |
 | 🔍 硬件体检 | 只读检查 PCIe 链路、VC++ v14 运行库与内存当前/标称频率；达到标称频率时不再误报性能档位未开启 |
-| 📟 实时监控 | 内置硬件传感器读取 CPU/GPU 温度与占用；按所选游戏进程通过 PresentMon 显示实时 FPS |
+| 📟 实时监控 | 读取系统/驱动已提供的 CPU/GPU 温度与占用（需 nvidia-smi 或用户自行安装的 LibreHardwareMonitor 等提供 WMI 数据源，读不到时如实提示）；按所选游戏进程通过 PresentMon 显示实时 FPS |
 | 📈 性能记录 | 游戏启动后采样 120 秒平均帧率、1% 低帧率、GPU 占用率、温度与功耗汇总 |
 | 🧪 自动调优 Beta | 三次基线加低风险候选组对比；按采样质量、性能、温度与功耗规则决定保留或定向回滚 |
 | 🩹 掉帧修复 | 按主力显卡厂商生成着色器缓存、驱动、运行组件和游戏设置的分步排查方案 |
@@ -59,7 +59,7 @@
 
 ### 快速开始（图形界面）
 
-1. 从 [Releases 页](https://github.com/FUDAHA99/FrameRateHelper/releases/latest) 获取 `DeltaForceBooster-Setup-vX.Y.exe`
+1. 从 [Releases 页](https://github.com/FUDAHA99/FrameRateHelper/releases/latest) 获取 `DeltaForceBooster-Setup.exe`（发布页同时附有 `update-manifest.json`，里面的 `sha256` 就是该安装包的校验值，建议下载后核对）
 2. 运行安装向导；程序文件默认安装到 `%ProgramFiles%\DeltaForceBooster`
 3. 打开工具，等待硬件、游戏路径和系统设置检测完成
 4. 选择预设方案或逐项勾选，点击「执行优化」
@@ -143,7 +143,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\delta-booster.ps1 -R
 
 工具启动时检查一次新版本，运行期间每 30 分钟静默复查。自动检查只负责提醒，不会自行下载或安装。
 
-发布清单可声明最低支持版本。支持该字段的 v0.19.0 及以后客户端低于该值时，更新窗口不提供跳过或稍后选项，必须升级后才能继续使用；最低支持版本保持 v0.20.4，因此 v0.20.4 不会被强制升级到 v0.21.3。更早客户端仍会收到普通更新提示，官网同时保留最新版与多个历史版本安装包。
+发布清单可声明最低支持版本：低于该值的客户端在更新窗口里没有跳过或稍后选项，必须升级后才能继续使用。本分支的最低支持版本为 1.0.0.0（即首个版本，当前为空语句）。所有版本只在 GitHub Releases 发布，历史版本也在 Releases 页获取——**本分支没有官网**，任何自称提供本工具下载的第三方站点都不是我的。
 
 用户点击「立即更新」后，工具会在本次 `EngineHost` 管理员会话内下载、校验并封存更新包到受保护的暂存目录；安装器启动后还会再次校验，再完整解压、核对发布清单并事务切换版本。下载源限制为官方域名白名单，任一校验失败都不会安装。
 更新安装前会等待发起更新的旧进程退出。旧版若仍装在下载文件夹等普通程序可写的位置，会自动迁移到默认受保护目录，同时保留自存方案、备份和运行配置；切换失败会回滚旧版本。全新安装默认使用 `%ProgramFiles%\DeltaForceBooster`，也可选择其他本地固定 NTFS 盘的卷根一级目录；该目录会成为永久受保护 anchor，实际程序位于其 `app` 子目录。
@@ -204,7 +204,6 @@ SHA256 和启动器内置的发布文件哈希可以发现传输后或安装后�
 上游项目 [-Delta-Force-Graphics-Optimizer](https://github.com/Leonard8818/-Delta-Force-Graphics-Optimizer)：
 
 - [@Leonard8818](https://github.com/Leonard8818) — 上游项目作者与维护者
-- [@codex](https://github.com/codex) — OpenAI 编程协作助手
 
 ## 许可证
 

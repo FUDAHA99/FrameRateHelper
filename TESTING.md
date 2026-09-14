@@ -97,7 +97,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build\make-installer.ps1
 
 1. **抓包（最关键）**：装好后全程操作 —— 检测、执行优化、还原、导出诊断报告、
    开关自动调优 —— 全程抓包。**除了 `github.com` 与 `*.githubusercontent.com`
-   之外不应有任何出站请求**；尤其不得出现 `upstream-host.invalid`
+   之外不应有任何出站请求**；尤其不得出现上游的遥测端点
+   （域名片段见 `tests/updater-source-tests.ps1` 里的 `$LegacyUpstreamHostFragment`，本文不复述）
 2. 界面上「运行日志」页底部应是一句**说明文字**（本软件不收集、不上报任何使用数据…），
    不再是复选框
 3. `%ProgramData%\DeltaForceBooster\users\<SID>\config\` 下：
@@ -439,7 +440,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\delta-booster.ps1 -L
 
 **文档侧**（`tests/identity-freeze-tests.ps1` 已经断言，这里只是说明为什么）：
 `README.md` 和 `CONTRIBUTING.md` 里不允许再出现 `数据接收服务`、`运营看板`、
-`upstream-site.invalid` —— 那是上游的服务端布局和官网，本分支一个服务端都没有，留着就是在说假话。
+以及上游官网的域名片段（具体字符串见 `tests/identity-freeze-tests.ps1`，本文不复述） —— 那是上游的服务端布局和官网，本分支一个服务端都没有，留着就是在说假话。
 
 ---
 
