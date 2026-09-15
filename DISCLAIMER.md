@@ -77,6 +77,17 @@
 
 **使用前请自行备份重要数据。** 如果你不接受上述任何一条，请关闭本工具，不要使用。
 
+## 开源许可与署名
+
+本工具是 **MIT** 许可的开源软件，免费，源码公开。
+
+- 它是 [Leonard8818/-Delta-Force-Graphics-Optimizer](https://github.com/Leonard8818/-Delta-Force-Graphics-Optimizer)（MIT）的**分支**，绝大部分代码出自上游。
+- Copyright (c) 2026 Leonard8818（上游项目）、FUDAHA99（本分支的修改）。
+- **上游作者不对本分支负责。** 本分支删了上游的遥测与上报、内置传感器组件与内核驱动，遇到问题请提到本仓库。
+- 帧率采样用的 `PresentMon.exe` 来自 Intel / GameTechDev（MIT），许可证原文随附在安装目录的 `tools\PresentMon-LICENSE.txt`。
+
+完整许可文本见安装目录的 `LICENSE`，改动清单与第三方内容说明见 `NOTICE.md`。
+
 ---
 
 点击「同意并继续」即表示你已阅读、理解并接受以上全部内容。

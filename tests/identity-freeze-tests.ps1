@@ -137,6 +137,14 @@ foreach ($f in 'build\make-launcher.ps1','build\make-engine-host.ps1','build\mak
   Assert-Frozen '[assembly: AssemblyCopyright("MIT License · Copyright (c) 2026 Leonard8818, FUDAHA99")]' `
     '发布二进制的版权字段必须同时写明上游与本分支' @($f)
 }
+# SKILL.md 被设计成可以脱离仓库被 Agent 远程单独读取（README 里就给了 raw 地址）。
+# 那种场景下读者拿不到 README、NOTICE 或免责声明，所以「非官方」必须写在它自己里。
+$skill = Get-Source 'SKILL.md'
+foreach ($skillNeedle in '非官方', '腾讯') {
+  Assert-True ($skill.Contains($skillNeedle)) `
+    "SKILL.md 缺少非官方声明：$skillNeedle（它会被远程单独读取，拿不到其他文件）"
+}
+
 $notice = Get-Source 'NOTICE.md'
 foreach ($needle in '这是一个分支（fork）', '上游作者不对本分支负责', 'Leonard8818/-Delta-Force-Graphics-Optimizer') {
   Assert-True ($notice.Contains($needle)) "NOTICE.md 缺少分支归属说明：$needle"

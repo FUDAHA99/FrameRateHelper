@@ -50,8 +50,22 @@ Assert-True ($launcherBuildSource.Contains('const string ActiveMarkerName = @"Gl
 $disclaimerText = [IO.File]::ReadAllText((Join-Path $root 'DISCLAIMER.md'))
 Assert-True ($disclaimerText -notmatch '自动寻找最佳配置|自动调优|experiments') `
   'usage notice still exposes automatic best-configuration Beta information'
-Assert-True ($guiText -match "\`$script:DisclaimerVersion\s*=\s*'8'") `
+Assert-True ($guiText -match "\`$script:DisclaimerVersion\s*=\s*'9'") `
   'usage notice changed without advancing the acceptance version'
+# 界面里原来 MIT / 许可证 / 版权 出现 0 次：用户装完软件看不到任何许可信息，
+# 而这是一个 MIT 分支，署名义务是实打实的。声明正文是人人都会看到的地方。
+#
+# 这里故意**不**用 Contains('Leonard8818') 这种写法：那个名字在上方的项目链接里
+# 也出现，把版权行整行删掉断言照样是绿的（实测过，它真的漏了）。
+# PresentMon 同理：“数据与隐私”那节也提到它。所以钉的是只在许可那一段里
+# 才会出现的串，以及版权行本身的**形状**（两个署名方必须同时在场）。
+Assert-True ($disclaimerText -match 'Copyright \(c\) 2026 Leonard8818[^\r\n]*FUDAHA99') `
+  '声明里的版权行没有同时署上上游与本分支 —— MIT 要求保留上游版权声明'
+foreach ($licenseNeedle in 'GameTechDev', 'PresentMon-LICENSE.txt', '开源许可与署名',
+                           '上游作者不对本分支负责') {
+  Assert-True ($disclaimerText.Contains($licenseNeedle)) `
+    "声明正文里没有「$licenseNeedle」—— 用户唯一会看到许可与署名的地方就是这里"
+}
 Assert-True ($disclaimerText.Contains('### 电源计划优化的兼容性风险') -and
   $disclaimerText.Contains('游戏无法启动或进入') -and
   $disclaimerText.Contains('通过二次确认并继续执行') -and

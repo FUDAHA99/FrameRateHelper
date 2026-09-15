@@ -3873,7 +3873,7 @@ function Update-StreamerPage {
 
 # 声明内容有实质修改时把这个数字 +1：配置里记的版本与此不符即重新弹一次，
 # 老用户不会因为条款改了还停留在旧版本的「已同意」上
-$script:DisclaimerVersion = '8'
+$script:DisclaimerVersion = '9'
 $script:DisclaimerFile = Join-Path $script:RootDir 'DISCLAIMER.md'
 
 # 同意状态与 updater 的配置同目录：profiles\ 下的 *.json 会被引擎当预设方案扫出来
@@ -3920,6 +3920,7 @@ function Get-DisclaimerText {
     # 用户点「同意」时看到的全部正文。在同意门控里描述一个不存在的数据处理行为，
     # 比漏写更糟：它当场推翻了本分支「不收集、不上报」这个最核心的承诺。
     '- **本工具不收集、不上报任何使用数据**；唯一的联网行为是向 GitHub 检查更新。诊断报告只写到你自己的桌面，不会上传。'
+    '- 本工具是 MIT 许可的开源软件，是上游项目 -Delta-Force-Graphics-Optimizer 的分支；Copyright (c) 2026 Leonard8818、FUDAHA99。上游作者不对本分支负责。'
     '- 作者不对使用本工具导致的任何损失负责，使用前请自行备份重要数据。'
     ''
     '完整声明见项目根目录的 DISCLAIMER.md（若该文件缺失，请到项目仓库查看）。'

@@ -90,7 +90,7 @@ Agent 不会直接开始修改系统。它会先检测硬件和当前设置，�
 将下面的指令发送给 Agent：
 
 ```text
-读取 https://raw.githubusercontent.com/FUDAHA99/FrameRateHelper/fork/main/SKILL.md
+读取 https://raw.githubusercontent.com/FUDAHA99/FrameRateHelper/HEAD/SKILL.md
 并按其中的流程帮我优化《三角洲行动》的帧率
 ```
 
