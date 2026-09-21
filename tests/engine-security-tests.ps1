@@ -432,18 +432,145 @@ try {
     $engineText.Contains('$taskRoot.DeleteTask($taskName, 0)')) `
     'SYSTEM 电源清理必须固定 SYSTEM 主体/System32 reg.exe，并在运行前校验、运行后删除任务'
 
+  # ---- 缓存扫描：reparse point 必须被拒绝，且必须真的停止下探 ----------------
+  #
+  # 旧写法把「创建 junction / 调用产品 / 断言」三件事一起包进 try-catch，
+  # Assert-True 抛出的 ASSERT 被 catch 打成 SKIP，产品放行 junction 时测试照样
+  # PASS 退出 0。现在拆成两段：A 纯桁单元测（不依赖任何文件系统特性，永远执行，
+  # 是本条的主力覆盖）；B 真实 junction 端到端（只有「创建」一步允许被 catch）。
+  #
+  # 夹具的形状是被攻击驱动的：最初的方案用一个**扁平且全是目录型**的夹具，
+  # 实测下两种真实破坏能完整绕过：
+  #   ① 把判断加个 `-and ($dir -ieq $rootFull)`（伪装成「只查根的直接子项」的优化）
+  #     —— 第二层的 junction 就会被放行，根外文件混进 Files。
+  #   ② 加个 `-and $entry.PSIsContainer`（伪装成「文件链接没危险」）
+  #     —— 文件型 reparse point 直接进 Files。
+  # 所以夹具必须**嵌套**（junction 放在第二层）且**含文件型 reparse point**。
+  # 改这个夹具前先想清楚：你是不是又把某一维度折成了常量。
+
+  # ---- Lane A：直接跑真函数 Get-SafeFilesUnderRoot，只桁掉目录枚举与根判定 ----
+  # 夹具树（路径不需要真实存在，产品在这条路径上只做字符串运算 + Get-ChildItem）：
+  #   root\plain.bin        普通文件        → 应进 Files
+  #   root\filelink.bin     文件型 reparse    → 应进 Rejected（堵②）
+  #   root\linked\         目录型 reparse    → 应进 Rejected，且不得枚举
+  #   root\sub\deep.bin    第二层普通文件  → 应进 Files（证明确实会下探普通目录）
+  #   root\sub\deeplink\  第二层目录型 reparse → 应进 Rejected，且不得枚举（堵①）
+  $fakeRoot  = Join-Path $temp 'scan-unit'
+  $fakeSub   = Join-Path $fakeRoot 'sub'
+  $fakeLink  = Join-Path $fakeRoot 'linked'
+  $fakeDeep  = Join-Path $fakeSub 'deeplink'
+  $fakePlain = Join-Path $fakeRoot 'plain.bin'
+  $fakeFileLink = Join-Path $fakeRoot 'filelink.bin'
+  $fakeDeepFile = Join-Path $fakeSub 'deep.bin'
+  $dirReparse  = [IO.FileAttributes]'Directory, ReparsePoint'
+  $fileReparse = [IO.FileAttributes]::ReparsePoint
+  function New-ScanEntry($Path, $IsDir, $Attrs) {
+    [pscustomobject]@{ FullName = $Path; PSIsContainer = $IsDir; Length = 4L; Attributes = $Attrs }
+  }
+  function Get-ScanKey($Path) { ([IO.Path]::GetFullPath($Path)).TrimEnd('\') }
+  $script:ScanVisited = New-Object System.Collections.Generic.List[string]
+  $script:ScanTree = @{}
+  $script:ScanTree[(Get-ScanKey $fakeRoot)] = @(
+    (New-ScanEntry $fakePlain    $false ([IO.FileAttributes]::Normal)),
+    (New-ScanEntry $fakeFileLink $false $fileReparse),
+    (New-ScanEntry $fakeLink     $true  $dirReparse),
+    (New-ScanEntry $fakeSub      $true  ([IO.FileAttributes]::Directory))
+  )
+  # junction 之下的文件用字符串路径看仍然「在根之内」，前缀校验挡不住它，
+  # 只有 ReparsePoint 判定 + 停止下探能挡住 —— 这正是本条要守的东西。
+  $script:ScanTree[(Get-ScanKey $fakeLink)] = @(
+    (New-ScanEntry (Join-Path $fakeLink 'across1.bin') $false ([IO.FileAttributes]::Normal)))
+  $script:ScanTree[(Get-ScanKey $fakeSub)] = @(
+    (New-ScanEntry $fakeDeepFile $false ([IO.FileAttributes]::Normal)),
+    (New-ScanEntry $fakeDeep     $true  $dirReparse))
+  $script:ScanTree[(Get-ScanKey $fakeDeep)] = @(
+    (New-ScanEntry (Join-Path $fakeDeep 'across2.bin') $false ([IO.FileAttributes]::Normal)))
+
+  $originalTestReparse = ${function:Test-PathHasReparsePoint}
+  try {
+    function Get-ChildItem {
+      [CmdletBinding()]param([string]$LiteralPath, [switch]$Force, [switch]$Recurse, [string]$Filter)
+      $key = Get-ScanKey $LiteralPath
+      [void]$script:ScanVisited.Add($key)
+      if ($script:ScanTree.ContainsKey($key)) { foreach ($e in $script:ScanTree[$key]) { $e } }
+    }
+    # A1：根不是 reparse point 时，每一层的 reparse 项都必须被拒绝且不得下探
+    function Test-PathHasReparsePoint([string]$Path) { $false }
+    $script:ScanVisited.Clear()
+    $unit = Get-SafeFilesUnderRoot $fakeRoot
+    $unitRejected = @(@($unit.Rejected) | ForEach-Object { (Get-ScanKey $_) } | Sort-Object)
+    $unitFiles = @(@($unit.Files) | ForEach-Object { (Get-ScanKey $_.FullName) } | Sort-Object)
+    $expectRejected = @((Get-ScanKey $fakeFileLink), (Get-ScanKey $fakeLink), (Get-ScanKey $fakeDeep)) | Sort-Object
+    $expectFiles = @((Get-ScanKey $fakePlain), (Get-ScanKey $fakeDeepFile)) | Sort-Object
+    Assert-True (($unitRejected -join '|') -ieq (($expectRejected) -join '|')) `
+      ("拒绝集不对：每一层的 reparse point（含文件型、含第二层）都必须进 Rejected。实际=" +
+       ($unitRejected -join '；'))
+    Assert-True (($unitFiles -join '|') -ieq (($expectFiles) -join '|')) `
+      ("Files 不对：跨越 reparse point 的文件一个都不许进，普通目录里的文件一个都不许漏。实际=" +
+       ($unitFiles -join '；'))
+    foreach ($mustNot in $fakeLink, $fakeDeep) {
+      Assert-True (-not (@($script:ScanVisited) -contains (Get-ScanKey $mustNot))) `
+        "拒绝 reparse point 之后必须真的停止下探：产品对 $mustNot 发起了目录枚举"
+    }
+    Assert-True (@($script:ScanVisited) -contains (Get-ScanKey $fakeSub)) `
+      '普通子目录必须照常下探 —— 拒绝 reparse point 不得退化成「整棵树都不进」'
+    # A2：根本身是 reparse point 时，必须「立即返回」，而不只是「做过判断」
+    function Test-PathHasReparsePoint([string]$Path) { $true }
+    $script:ScanVisited.Clear()
+    $unitRoot = Get-SafeFilesUnderRoot $fakeRoot
+    Assert-True (@($unitRoot.Files).Count -eq 0 -and @($unitRoot.Rejected).Count -eq 1 -and
+      ((Get-ScanKey @($unitRoot.Rejected)[0]) -ieq (Get-ScanKey $fakeRoot))) `
+      '扫描根是 reparse point 时必须整根拒绝且不返回任何文件'
+    Assert-True ($script:ScanVisited.Count -eq 0) `
+      '扫描根被判定为 reparse point 后必须立即返回，一次目录枚举都不得发生'
+  } finally {
+    Remove-Item -Path Function:\Get-ChildItem -Force -ErrorAction SilentlyContinue
+    Set-Item -Path Function:\Test-PathHasReparsePoint -Value $originalTestReparse
+  }
+
+  # ---- Lane B：真实 junction 端到端（加强，不是主力） --------------------
   $cacheRoot = Join-Path $temp 'cache'
   $outside = Join-Path $temp 'outside'
   [void][IO.Directory]::CreateDirectory($cacheRoot); [void][IO.Directory]::CreateDirectory($outside)
   [IO.File]::WriteAllText((Join-Path $outside 'keep.bin'), 'keep')
+  [IO.File]::WriteAllText((Join-Path $cacheRoot 'plain.bin'), 'plain')
+  $nestDir = Join-Path $cacheRoot 'nest'
+  [void][IO.Directory]::CreateDirectory($nestDir)
+  $linkPath = Join-Path $nestDir 'deeplink'   # 故意放在第二层
+  $junctionReady = $false
+  $junctionSkipReason = ''
   try {
-    New-Item -ItemType Junction -Path (Join-Path $cacheRoot 'linked') -Target $outside -ErrorAction Stop | Out-Null
-    $scan = Get-SafeFilesUnderRoot $cacheRoot
-    Assert-True (@($scan.Rejected).Count -eq 1) '缓存扫描必须拒绝 junction'
-    Assert-True ((Get-Content -LiteralPath (Join-Path $outside 'keep.bin') -Raw) -eq 'keep') '越界文件不得被修改'
+    New-Item -ItemType Junction -Path $linkPath -Target $outside -ErrorAction Stop | Out-Null
+    # 用 .NET 原生属性判定环境是否真的造出了 reparse point，不借产品函数做这个判断
+    $junctionReady = ((([IO.File]::GetAttributes($linkPath)) -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+    if (-not $junctionReady) { $junctionSkipReason = '目录联接创建成功但文件系统未生成 reparse point' }
   } catch {
-    Write-Output "SKIP junction：$($_.Exception.Message)"
+    # 安全网：本 catch 只允许吞「创建失败」。若日后有人把断言挪进来，立刻原样抛出。
+    if ("$($_.Exception.Message)" -like 'ASSERT:*') { throw }
+    $junctionSkipReason = $_.Exception.Message
   }
+  if ($junctionReady) {
+    # 下面全部在 catch 之外：产品放行 junction 必须直接让测试红
+    Assert-True (Test-PathHasReparsePoint $linkPath) '真实 junction 必须被 reparse point 检测识别'
+    Assert-True (-not (Test-PathHasReparsePoint $cacheRoot)) '普通目录不得被判为 reparse point：检测不得退化为恒真'
+    $scan = Get-SafeFilesUnderRoot $cacheRoot
+    Assert-True (@($scan.Rejected).Count -eq 1 -and
+      ([IO.Path]::GetFullPath(@($scan.Rejected)[0]) -ieq [IO.Path]::GetFullPath($linkPath))) `
+      '缓存扫描必须把第二层的 junction 列为唯一拒绝项'
+    Assert-True (@($scan.Files).Count -eq 1 -and
+      ([IO.Path]::GetFullPath(@($scan.Files)[0].FullName) -ieq [IO.Path]::GetFullPath((Join-Path $cacheRoot 'plain.bin')))) `
+      '缓存扫描只能收集 junction 之外的本地文件，越界文件一个都不许进 Files'
+    $scanLink = Get-SafeFilesUnderRoot $linkPath
+    Assert-True (@($scanLink.Files).Count -eq 0 -and @($scanLink.Rejected).Count -eq 1) `
+      '直接以 junction 作为扫描根时必须整根拒绝且不返回任何文件'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $outside 'keep.bin') -Raw) -eq 'keep') '越界文件不得被修改'
+    # 只删 junction 本身、不跟随到目标；这里只能用 finally 之外的收尾，出现 catch 就是回到旧 bug
+    [IO.Directory]::Delete($linkPath)
+  } else {
+    # 注意措辞：Lane A 已经覆盖了行为，这里缺的只是真实文件系统那一层
+    Write-Output "SKIP junction(环境造不出 reparse point，Lane A 已覆盖行为)：$junctionSkipReason"
+  }
+  Remove-Item -Path Function:\New-ScanEntry, Function:\Get-ScanKey -Force -ErrorAction SilentlyContinue
 
   $invalidIdRejected = $false
   try { Write-IpcResult '..\bad' 'Detect' $null 1 'x' } catch { $invalidIdRejected = $true }
