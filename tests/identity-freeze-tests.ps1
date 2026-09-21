@@ -60,6 +60,94 @@ function Assert-Frozen([string]$Literal, [string]$Reason, [string[]]$Files) {
 # 独立运行，user-context-worker 跑在另一个完整性级别，C# 侧是另外三个编译产物。
 # 收敛会制造耦合，所以改用这条测试保证它们始终一致。
 
+# ---------- 1a. 状态根：不能只查「文件里出现过这个词」 ----------
+#
+# 独立复核实测：只把 scripts\delta-booster.ps1 里**真正那一条** ProgramData 根赋值
+# 的 'DeltaForceBooster' 改成别的名字，下面的 Assert-Frozen 全部照常通过 —— 因为它是
+# 全文搜字面量，而这个词在同一份文件里还有十几处（旧数据根、互斥体名、路径派生）。
+# 改了这一条，已安装用户的备份、backup.key、per-SID 配置全部找不到。
+#
+# 两道防线：
+#   A. 逐条赋值（AST）—— 每一处对状态根的赋值，其右侧的**引号字面量**都必须是
+#      冻结值。注意裸命令名（Join-Path 这种）在 AST 里也是 StringConstantExpressionAst，
+#      所以必须按 StringConstantType 排掉 BareWord，否则这条断言自己就是假的。
+#      赋值数量也钉死：新增一处根赋值必须有人看过。
+#   B. 出现次数钉死 —— 每个组件里该字串在**字面量内**出现的总次数。
+#      注释不进 AST，所以天然免疫「匹配到自己注释」那个坑；
+#      算的是**出现次数**而不是**节点个数**，因为 make-installer.ps1 把整个卸载脚本
+#      嵌在一个 here-string 里，按节点数算的话在里面改名计数不变。
+
+function Get-FrozenRootOccurrences([string]$Rel) {
+  $raw = [IO.File]::ReadAllText((Join-Path $root $Rel), [Text.Encoding]::UTF8)
+  if ($Rel -like '*.cs') {
+    # C# 没有 PS AST；至少把行注释去掉，避免注释里的词被计入
+    $stripped = (($raw -split "`n") | ForEach-Object { $_ -replace '//.*$', '' }) -join "`n"
+    return ([regex]::Matches($stripped, 'DeltaForceBooster')).Count
+  }
+  $t = $null; $e = $null
+  $ast = [Management.Automation.Language.Parser]::ParseInput($raw, [ref]$t, [ref]$e)
+  Assert-True ($e.Count -eq 0) "$Rel 解析失败，无法做冻结核对"
+  $n = 0
+  foreach ($lit in @($ast.FindAll({
+      param($x) $x -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                $x.StringConstantType -ne 'BareWord' }, $true))) {
+    $n += ([regex]::Matches($lit.Value, 'DeltaForceBooster')).Count
+  }
+  foreach ($lit in @($ast.FindAll({
+      param($x) $x -is [Management.Automation.Language.ExpandableStringExpressionAst] }, $true))) {
+    $n += ([regex]::Matches($lit.Value, 'DeltaForceBooster')).Count
+  }
+  $n
+}
+
+# A. 逐条赋值：delta-booster.ps1 里对两个状态根的**每一处**赋值
+#    （包括嵌在 Set-TargetUserContext 函数里的那一处 —— 只取顶层赋值会漏掉它）
+$engineRaw = [IO.File]::ReadAllText((Join-Path $root 'scripts\delta-booster.ps1'), [Text.Encoding]::UTF8)
+$engineTokens = $null; $engineErrors = $null
+$engineAst = [Management.Automation.Language.Parser]::ParseInput($engineRaw, [ref]$engineTokens, [ref]$engineErrors)
+Assert-True ($engineErrors.Count -eq 0) '引擎解析失败，无法做状态根冻结核对'
+$rootAssignments = @($engineAst.FindAll({
+  param($n)
+  $n -is [Management.Automation.Language.AssignmentStatementAst] -and
+  "$($n.Left)" -in '$script:ProgramDataRoot', '$script:UserDataRoot'
+}, $true))
+Assert-True ($rootAssignments.Count -eq 3) `
+  ("状态根赋值个数变了（实际 $($rootAssignments.Count)，预期 3）—— " +
+   '新增或删减一处根赋值必须有人看过，不能静默滑过去')
+foreach ($assign in $rootAssignments) {
+  $quoted = @($assign.Right.FindAll({
+    param($n)
+    $n -is [Management.Automation.Language.StringConstantExpressionAst] -and
+    $n.StringConstantType -ne 'BareWord'
+  }, $true))
+  Assert-True ($quoted.Count -ge 1) `
+    ("第 $($assign.Extent.StartLineNumber) 行的状态根赋值里一个引号字面量都没有 —— " +
+     '根名被改成变量或计算值了，冻结核对就失效了')
+  foreach ($lit in $quoted) {
+    Assert-True ($lit.Value -ceq 'DeltaForceBooster') `
+      ("第 $($assign.Extent.StartLineNumber) 行的状态根赋值用了非冻结字面量：[$($lit.Value)] —— " +
+       '改了这里，已安装用户的备份、backup.key、per-SID 配置全部找不到')
+  }
+}
+
+# B. 出现次数钉死：任何一处改名都会让对应文件的计数对不上。
+#    数字变了不一定是 bug，但必须有人看一眼再改这里。
+foreach ($frozenFile in @(
+    @{ Rel = 'scripts\delta-booster.ps1';        Count = 12 },
+    @{ Rel = 'scripts\user-context-worker.ps1';  Count = 2  },
+    @{ Rel = 'scripts\export-diagnostics.ps1';   Count = 4  },
+    @{ Rel = 'scripts\tuning-experiment.ps1';    Count = 1  },
+    @{ Rel = 'gui\DeltaForceBooster-GUI.ps1';    Count = 12 },
+    @{ Rel = 'build\make-installer.ps1';         Count = 27 },
+    @{ Rel = 'build\make-engine-host.ps1';       Count = 11 },
+    @{ Rel = 'build\setup-wizard.cs';            Count = 28 },
+    @{ Rel = 'build\uninstall-host.cs';          Count = 5  })) {
+  $actual = Get-FrozenRootOccurrences $frozenFile.Rel
+  Assert-True ($actual -eq $frozenFile.Count) `
+    ("$($frozenFile.Rel) 里冻结根名的出现次数变了：实际 $actual，预期 $($frozenFile.Count)。" +
+     '改名会让已安装用户的状态目录全部失联；确实是正当新增/删减就把这个数字改掉')
+}
+
 Assert-Frozen "'DeltaForceBooster'" '受保护状态根：备份、backup.key、legacy-roots、per-SID 配置全在这下面' @('scripts\delta-booster.ps1','scripts\user-context-worker.ps1','build\make-installer.ps1')
 Assert-Frozen '"DeltaForceBooster"' '同上，C# 侧' @('build\setup-wizard.cs','build\uninstall-host.cs','build\make-engine-host.ps1')
 foreach ($f in 'scripts\export-diagnostics.ps1', 'scripts\tuning-experiment.ps1', 'gui\DeltaForceBooster-GUI.ps1') {
