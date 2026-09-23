@@ -256,8 +256,14 @@ try {
 } finally { $presentSampler.Dispose() }
 $cpuSampler = New-Object DfbProcessorUtilitySampler
 try {
-  Start-Sleep -Milliseconds 1000
-  $cpuUtility = $cpuSampler.Read()
+  # 单次 NaN 是 PDH 的正常瞬态（该次采样数据无效，产品按「未知」显示），整套测试并行、CPU 满载时
+  # 偶尔出现。连读三次只要有一次合法就算采样器可用；若它每次都拿不到值，这里照样会失败。
+  $cpuUtility = [double]::NaN
+  foreach ($attempt in 1..3) {
+    Start-Sleep -Milliseconds 1000
+    $cpuUtility = $cpuSampler.Read()
+    if (-not [double]::IsNaN($cpuUtility)) { break }
+  }
   Assert-True (-not [double]::IsNaN($cpuUtility) -and $cpuUtility -ge 0 -and $cpuUtility -le 100) 'processor utility counter returned an invalid value'
 } finally { $cpuSampler.Dispose() }
 $memory = [DfbLiveSystemMetrics]::ReadMemoryUsage()
