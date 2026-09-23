@@ -35,7 +35,7 @@ $guiAst = Parse-PowerShell $guiPath
 $engineAst = Parse-PowerShell $enginePath
 $null = Parse-PowerShell $updaterPath
 $null = Parse-PowerShell $workerPath
-$null = Parse-PowerShell $hostBuildPath
+$hostBuildAst = Parse-PowerShell $hostBuildPath
 $null = Parse-PowerShell $launcherBuildPath
 $null = Parse-PowerShell $installerBuildPath
 $null = Parse-PowerShell $uninstallBuildPath
@@ -53,6 +53,65 @@ $tokenValidation = Read-Utf8 $tokenValidationPath
 $uninstallHostSource = Read-Utf8 $uninstallHostSourcePath
 $uninstallLauncherSource = Read-Utf8 $uninstallLauncherSourcePath
 $bat = Read-Utf8 $batPath
+
+# C# 词法骨架：注释与字符串/字符字面量整段换成空格（换行保留，长度不变），于是
+# 花括号配平、标识符提取都不会被注释或字面量骗到；同一偏移处可回到原文取字面量。
+function ConvertTo-CSharpSkeleton([string]$Text, [bool]$KeepLiterals) {
+  $out = $Text.ToCharArray()
+  $i = 0; $n = $Text.Length
+  while ($i -lt $n) {
+    $c = $Text[$i]
+    $next = if ($i + 1 -lt $n) { $Text[$i + 1] } else { [char]0 }
+    $start = $i; $literal = $false
+    if ($c -eq [char]'/' -and $next -eq [char]'/') {
+      while ($i -lt $n -and $Text[$i] -ne [char]10) { $i++ }
+    } elseif ($c -eq [char]'/' -and $next -eq [char]'*') {
+      $end = $Text.IndexOf('*/', $i + 2, [StringComparison]::Ordinal)
+      Assert-True ($end -ge 0) 'C# skeleton: unterminated block comment'
+      $i = $end + 2
+    } elseif ($c -eq [char]'@' -and $next -eq [char]'"') {
+      $literal = $true; $i += 2
+      while ($true) {
+        Assert-True ($i -lt $n) 'C# skeleton: unterminated verbatim string'
+        if ($Text[$i] -eq [char]'"') {
+          if ($i + 1 -lt $n -and $Text[$i + 1] -eq [char]'"') { $i += 2; continue }
+          $i++; break
+        }
+        $i++
+      }
+    } elseif ($c -eq [char]'"' -or $c -eq [char]"'") {
+      $literal = $true; $i++
+      while ($true) {
+        Assert-True ($i -lt $n -and $Text[$i] -ne [char]10) "C# skeleton: unterminated literal near offset $i"
+        if ($Text[$i] -eq [char]'\') { $i += 2; continue }
+        if ($Text[$i] -eq $c) { $i++; break }
+        $i++
+      }
+    } else { $i++; continue }
+    if ($literal -and $KeepLiterals) { continue }
+    for ($k = $start; $k -lt $i; $k++) { if ($out[$k] -ne [char]10) { $out[$k] = [char]' ' } }
+  }
+  New-Object string (,$out)
+}
+
+# 按花括号配平取出函数体的偏移区间；签名必须在骨架里恰好出现一次。
+function Get-CSharpBodySpan([string]$Skeleton, [string]$Signature) {
+  $start = $Skeleton.IndexOf($Signature, [StringComparison]::Ordinal)
+  Assert-True ($start -ge 0 -and $Skeleton.IndexOf($Signature, $start + 1, [StringComparison]::Ordinal) -lt 0) `
+    "C# signature is missing or not unique: $Signature"
+  $open = $Skeleton.IndexOf('{', $start)
+  $depth = 0
+  for ($i = $open; $i -lt $Skeleton.Length; $i++) {
+    if ($Skeleton[$i] -eq [char]'{') { $depth++ }
+    elseif ($Skeleton[$i] -eq [char]'}') {
+      $depth--
+      if ($depth -eq 0) { return [pscustomobject]@{ Start = $open; Length = $i - $open + 1 } }
+    }
+  }
+  Assert-True $false "C# body is not brace-balanced: $Signature"
+}
+
+function Get-NormalizedCode([string]$Text) { ([regex]::Replace($Text, '\s+', ' ')).Trim() }
 
 function Find-EngineFunction([string]$Name) {
   $matches = @($engineAst.FindAll({
@@ -117,14 +176,89 @@ $pathOffset = $gui.IndexOf('$env:PATH =', [StringComparison]::Ordinal)
 $cimOffset = $gui.IndexOf('Get-CimInstance Win32_Process', [StringComparison]::Ordinal)
 Assert-True ($moduleOffset -ge 0 -and $pathOffset -ge 0 -and $cimOffset -gt $moduleOffset -and $cimOffset -gt $pathOffset) `
   'GUI bootstrap can auto-load a user module before environment hardening'
-Assert-True ($hostBuild -match 'EnvironmentVariables\.Clear\(\)' -and
-  $hostBuild -match 'EnvironmentVariables\["TEMP"\] = sessionTemp' -and
-  $hostBuild -match 'EnvironmentVariables\["PATH"\]' -and $hostBuild -match 'EnvironmentVariables\["COMSPEC"\]') `
-  'EngineHost does not provide a protected temp/trusted native environment'
 Assert-True ($launcherBuild -match 'EnterTrustedElevationEnvironment' -and
-  $launcherBuild -match 'Environment\.SetEnvironmentVariable\(name, null' -and
-  $hostBuild -notmatch 'EnvironmentVariables\["COR_|EnvironmentVariables\["COMPlus_|EnvironmentVariables\["DOTNET_') `
-  'managed RunAs/high GUI environment can inherit CLR profiler or COMPlus injection variables'
+  $launcherBuild -match 'Environment\.SetEnvironmentVariable\(name, null') `
+  'managed RunAs environment can inherit CLR profiler or COMPlus injection variables'
+
+# EngineHost -> 高权限 GUI 的环境边界（结构部分）。旧写法对整份文件 -match 'EnvironmentVariables\.Clear\(\)'，
+# 把那行注释掉照样匹配到注释里的字面量（独立复核 09-host-env-comment）。这里只看去掉注释的 C# 骨架，
+# 并且只在函数体范围内判定；行为边界由文件末尾「真实子进程环境块」那段守。结构部分补的是反射
+# 调 StartGui 看不到的三件事：Main 里填的静态状态、StartGui 之外另起进程、传给 StartGui 的值被换源。
+$hostCsAssign = @($hostBuildAst.FindAll({ param($n)
+  $n -is [Management.Automation.Language.AssignmentStatementAst] -and "$($n.Left)" -eq '$cs' }, $true))
+Assert-True ($hostCsAssign.Count -eq 1) 'EngineHost C# source here-string ($cs) is missing or ambiguous'
+$hostCsText = $hostCsAssign[0].Right.Expression.Value
+$hostSkel = ConvertTo-CSharpSkeleton $hostCsText $false
+$hostCode = ConvertTo-CSharpSkeleton $hostCsText $true
+$startGuiSpan = Get-CSharpBodySpan $hostSkel 'static Process StartGui('
+$runGuiSpan = Get-CSharpBodySpan $hostSkel 'static int RunGuiAndServe('
+$hostMainSpan = Get-CSharpBodySpan $hostSkel 'static int Main('
+$startGuiSkel = $hostSkel.Substring($startGuiSpan.Start, $startGuiSpan.Length)
+$startGuiCode = $hostCode.Substring($startGuiSpan.Start, $startGuiSpan.Length)
+$runGuiSkel = $hostSkel.Substring($runGuiSpan.Start, $runGuiSpan.Length)
+$runGuiCode = $hostCode.Substring($runGuiSpan.Start, $runGuiSpan.Length)
+$hostMainCode = $hostCode.Substring($hostMainSpan.Start, $hostMainSpan.Length)
+
+# (1) StartGui 的词表是封闭的：它只能读自己的参数、GetFolderPath 和当前进程 PID。多出任何标识符
+#     （静态字段、辅助方法、GetEnvironmentVariables、foreach、IsInRole……）都要先改这里并说明理由。
+$startGuiVocabulary = @('Arguments','Clear','Combine','CommonApplicationData','controlPipe','CreateNoWindow',
+  'CultureInfo','Environment','EnvironmentVariables','false','FileName','GetCurrentProcess','GetDirectoryName',
+  'GetFolderPath','GetPathRoot','Globalization','gui','guiProcess','Hidden','Id','if','InvalidOperationException',
+  'InvariantCulture','IsNullOrEmpty','launcherPid','localAppData','machineModules','new','null','Path',
+  'PathSeparator','powershell','Process','ProcessStartInfo','ProcessWindowStyle','programData','programFiles',
+  'ProgramFiles','programFilesX86','ProgramFilesX86','psi','Quote','repairOnly','return','root','session',
+  'sessionTemp','sid','SpecialFolder','Start','string','String','system','System','systemModules','throw',
+  'ToString','TrimEnd','true','UseShellExecute','var','windows','Windows','WindowStyle','WorkingDirectory')
+$startGuiIds = @([regex]::Matches($startGuiSkel, '\b[A-Za-z_][A-Za-z0-9_]*\b') | ForEach-Object { $_.Value } |
+  Sort-Object -Unique -CaseSensitive)
+$vocabAdded = @($startGuiIds | Where-Object { $startGuiVocabulary -cnotcontains $_ })
+$vocabDropped = @($startGuiVocabulary | Where-Object { $startGuiIds -cnotcontains $_ })
+Assert-True ($vocabAdded.Count -eq 0 -and $vocabDropped.Count -eq 0) `
+  ('EngineHost StartGui vocabulary changed; review the child environment boundary. added: ' +
+   ($vocabAdded -join ', ') + ' / dropped: ' + ($vocabDropped -join ', '))
+
+# (2) 子进程环境块只由字面量键写入，键集合恰好是白名单；EngineHost 里别处不碰任何环境块。
+$envWrites = @([regex]::Matches($startGuiCode, 'EnvironmentVariables\s*\[([^\]]*)\]') |
+  ForEach-Object { $_.Groups[1].Value.Trim() })
+$computedKeys = @($envWrites | Where-Object { $_ -cnotmatch '^"[A-Za-z0-9_()]+"$' })
+Assert-True ($envWrites.Count -gt 0 -and $computedKeys.Count -eq 0) `
+  ('StartGui writes child environment variables with computed keys: ' + ($computedKeys -join ', '))
+$envKeys = @($envWrites | ForEach-Object { $_.Trim('"') } | Sort-Object -Unique -CaseSensitive)
+$expectedEnvKeys = @('ALLUSERSPROFILE','COMSPEC','DFB_ENGINE_CONTROL_PIPE','DFB_ENGINE_HOST_PID',
+  'DFB_ENGINE_HOST_SESSION','DFB_LAUNCHER_PID','DFB_ORIGINAL_LOCALAPPDATA','DFB_ORIGINAL_USER_SID',
+  'DFB_REPAIR_ONLY','PATH','PATHEXT','PSModulePath','ProgramData','ProgramFiles','ProgramFiles(x86)',
+  'SystemDrive','SystemRoot','TEMP','TMP','WINDIR') | Sort-Object -CaseSensitive
+Assert-True (($envKeys -join '|') -ceq ($expectedEnvKeys -join '|')) `
+  ('StartGui child environment whitelist is not the exact expected set: ' + ($envKeys -join ', '))
+Assert-True ([regex]::Matches($hostSkel, 'EnvironmentVariables').Count -eq
+  [regex]::Matches($startGuiSkel, 'EnvironmentVariables').Count -and
+  $startGuiSkel -notmatch '\bpsi\s*\.\s*Environment\b') `
+  'EngineHost touches a child environment block outside the StartGui whitelist'
+$hostEnvMembers = @([regex]::Matches($hostSkel, '\bEnvironment\s*\.\s*([A-Za-z_]\w*)') |
+  ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+Assert-True (@($hostEnvMembers | Where-Object { @('GetFolderPath','SpecialFolder') -cnotcontains $_ }).Count -eq 0) `
+  ('EngineHost reads or writes its own process environment: Environment.' + ($hostEnvMembers -join ', Environment.'))
+
+# (3) 全 EngineHost 只有 StartGui 里那一处起进程。
+Assert-True ([regex]::Matches($hostSkel, '\bProcess\s*\.\s*Start\s*\(').Count -eq 1 -and
+  $startGuiSkel -match '\bProcess\s*\.\s*Start\s*\(\s*psi\s*\)' -and
+  [regex]::Matches($hostSkel, '\bProcessStartInfo\b').Count -eq 1 -and
+  $hostSkel -notmatch '\bnew\s+(System\s*\.\s*Diagnostics\s*\.\s*)?Process\s*\(' -and
+  $hostSkel -notmatch '\.\s*Start\s*\(\s*\)' -and
+  $hostCode -notmatch '(?i)CreateProcess|(?<![A-Za-z])ShellExecute|WinExec') `
+  'EngineHost starts a child process outside the sanitized StartGui path'
+
+# (4) 调用链钉死：Main -> RunGuiAndServe -> StartGui 各只有一处，值来自令牌验证与宿主自建目录。
+Assert-True ([regex]::Matches($hostSkel, '\bStartGui\s*\(').Count -eq 2 -and
+  [regex]::Matches($runGuiSkel, '\bStartGui\s*\(').Count -eq 1 -and
+  (Get-NormalizedCode $runGuiCode).Contains('using (Process guiProcess = StartGui(root, sid, localAppData, session, controlPipeName, sessionTemp, launcherPid, launcher.RepairOnly))') -and
+  (Get-NormalizedCode $runGuiCode).Contains('string sessionTemp = CreateSessionTemp(session);') -and
+  [regex]::Matches($runGuiSkel, '\bsessionTemp\s*=(?!=)').Count -eq 1 -and
+  $runGuiSkel -notmatch '\b(ref|out)\s+sessionTemp\b') `
+  'RunGuiAndServe does not hand StartGui the host-created session temp through the single sanitized call'
+Assert-True ([regex]::Matches($hostSkel, '\bRunGuiAndServe\s*\(').Count -eq 2 -and
+  (Get-NormalizedCode $hostMainCode).Contains('return RunGuiAndServe(root, launcher.OriginalSid, launcher.OriginalLocalAppData, session, launcherPid, launcher);')) `
+  'EngineHost Main does not hand RunGuiAndServe the launcher-token-verified identity'
 Assert-True (-not ($gui -match 'Start-Process\s+[''"]?explorer\.exe') -and -not ($gui -match '-Verb\s+RunAs')) `
   'high GUI still launches explorer or creates a second UAC boundary'
 Assert-True (-not ($updater -match '-Verb\s+RunAs')) 'updater still creates a PowerShell UAC prompt'
@@ -330,6 +464,104 @@ try {
 } finally {
   if ($savedEnvironment) { $restoreEnv.Invoke($null, [object[]]@(,$savedEnvironment)) | Out-Null }
   foreach ($name in $poison.Keys) { [Environment]::SetEnvironmentVariable($name, $savedPoison[$name], 'Process') }
+}
+
+# Behavior regression for the EngineHost -> GUI boundary: the child PowerShell must start from an
+# environment EngineHost built from scratch. We call the real StartGui out of the freshly built
+# production EngineHost.exe against a throwaway root whose gui\DeltaForceBooster-GUI.ps1 only dumps
+# its own environment. CreateSessionTemp (the only elevated dependency) is replaced by passing a plain
+# directory. Every argument is distinct so a swapped value cannot pass. The injected probe variable
+# guarantees a missing Clear() is visible even on a machine whose environment happens to be tiny.
+$hostAssembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Join-Path $root 'EngineHost.exe')))
+$startGui = $hostAssembly.GetType('EngineHost', $true).GetMethod('StartGui', [Reflection.BindingFlags]'Static,NonPublic')
+Assert-True ($null -ne $startGui) 'EngineHost.StartGui is not reachable for the child-environment regression'
+$envProbeTemplate = @'
+$rows = foreach ($entry in ([Environment]::GetEnvironmentVariables()).GetEnumerator()) {
+  [string]$entry.Key + '=' + ([string]$entry.Value -replace '\r?\n', ' ')
+}
+[IO.File]::WriteAllLines('__DUMP__', [string[]]@($rows), (New-Object Text.UTF8Encoding($false)))
+'@
+$hostSession = 'abcdef0123456789abcdef0123456789'
+$hostPipe = 'DeltaForceBooster.Engine.0123456789abcdef0123456789abcdef'
+$hostSid = 'S-1-5-21-1111111111-2222222222-3333333333-1001'
+$hostLocalAppData = 'C:\DfbTest\OriginalUser\AppData\Local'
+$sysDir = [Environment]::GetFolderPath('System')
+$winDir = [Environment]::GetFolderPath('Windows')
+$commonData = [Environment]::GetFolderPath('CommonApplicationData')
+$progFiles = [Environment]::GetFolderPath('ProgramFiles')
+$progFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
+foreach ($repairOnly in @($false, $true)) {
+  $envCase = [string](Join-Path ([IO.Path]::GetTempPath()) ('dfb-hostenv-' + [guid]::NewGuid().ToString('N')))
+  $envSessionTemp = [string](Join-Path $envCase 'session-temp')
+  $envDump = [string](Join-Path $envCase 'child-env.txt')
+  [void][IO.Directory]::CreateDirectory((Join-Path $envCase 'gui'))
+  [void][IO.Directory]::CreateDirectory($envSessionTemp)
+  [IO.File]::WriteAllText((Join-Path $envCase 'gui\DeltaForceBooster-GUI.ps1'),
+    $envProbeTemplate.Replace('__DUMP__', $envDump.Replace("'", "''")), (New-Object Text.UTF8Encoding($true)))
+  $hostPoison = [ordered]@{
+    DFB_ENV_INHERIT_PROBE = 'leaked'; COR_ENABLE_PROFILING = '1'; COR_PROFILER_PATH = 'C:\untrusted\profiler.dll'
+    COMPlus_ReadyToRun = '0'; DOTNET_STARTUP_HOOKS = 'C:\untrusted\hook.dll'; PSModulePath = 'C:\untrusted\Modules'
+    TEMP = 'C:\untrusted\temp'; TMP = 'C:\untrusted\temp'
+  }
+  $hostSaved = @{}
+  $hostChild = $null
+  try {
+    try {
+      foreach ($name in $hostPoison.Keys) {
+        $hostSaved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        [Environment]::SetEnvironmentVariable($name, $hostPoison[$name], 'Process')
+      }
+      # PS 5.1: MethodInfo.Invoke rejects PSObject-wrapped values, every argument must be cast.
+      $hostChild = $startGui.Invoke($null, [object[]]@([string]$envCase, [string]$hostSid, [string]$hostLocalAppData,
+        [string]$hostSession, [string]$hostPipe, [string]$envSessionTemp, [uint32]4321, [bool]$repairOnly))
+      Assert-True ($hostChild.WaitForExit(60000)) 'EngineHost child GUI probe did not exit'
+    } finally {
+      foreach ($name in $hostPoison.Keys) { [Environment]::SetEnvironmentVariable($name, $hostSaved[$name], 'Process') }
+      if ($hostChild -and -not $hostChild.HasExited) { $hostChild.Kill(); $hostChild.WaitForExit() }
+      if ($hostChild) { $hostChild.Dispose() }
+    }
+    Assert-True (Test-Path -LiteralPath $envDump -PathType Leaf) 'EngineHost child GUI never reported its own environment'
+    $childEnv = @{}   # case-insensitive, like the Win32 environment block
+    foreach ($line in [IO.File]::ReadAllLines($envDump, [Text.Encoding]::UTF8)) {
+      $split = $line.IndexOf('=')
+      if ($split -gt 0) { $childEnv[$line.Substring(0, $split)] = $line.Substring($split + 1) }
+    }
+    $expected = [ordered]@{
+      SystemRoot = $winDir; WINDIR = $winDir; SystemDrive = ([IO.Path]::GetPathRoot($winDir)).TrimEnd('\')
+      COMSPEC = (Join-Path $sysDir 'cmd.exe')
+      PATH = ($sysDir + ';' + $winDir + ';' + (Join-Path $sysDir 'Wbem') + ';' + (Join-Path $sysDir 'WindowsPowerShell\v1.0'))
+      ProgramData = $commonData; ALLUSERSPROFILE = $commonData; ProgramFiles = $progFiles
+      TEMP = $envSessionTemp; TMP = $envSessionTemp
+      DFB_ENGINE_HOST_PID = [string]$PID; DFB_LAUNCHER_PID = '4321'
+      DFB_ENGINE_HOST_SESSION = $hostSession; DFB_ORIGINAL_USER_SID = $hostSid
+      DFB_ORIGINAL_LOCALAPPDATA = $hostLocalAppData; DFB_ENGINE_CONTROL_PIPE = $hostPipe
+      DFB_REPAIR_ONLY = $(if ($repairOnly) { '1' } else { '0' })
+    }
+    if (-not [string]::IsNullOrEmpty($progFilesX86)) { $expected['ProgramFiles(x86)'] = $progFilesX86 }
+    foreach ($name in $expected.Keys) {
+      Assert-True ($childEnv.ContainsKey($name) -and
+        [string]::Equals([string]$childEnv[$name], [string]$expected[$name], [StringComparison]::Ordinal)) `
+        ("EngineHost child GUI variable is not the host-built value: $name -> " + $childEnv[$name])
+    }
+    # WinPS 5.1 appends .CPL to PATHEXT at startup, so only the fixed prefix is exact.
+    Assert-True ($childEnv.ContainsKey('PATHEXT') -and
+      $childEnv['PATHEXT'].StartsWith('.COM;.EXE;.BAT;.CMD', [StringComparison]::Ordinal)) `
+      'EngineHost child GUI PATHEXT is not the fixed trusted list'
+    # PSModulePath: exactly the two machine module roots, no user-writable segment.
+    $moduleSegments = @(([string]$childEnv['PSModulePath']).Split(';') | Where-Object { $_ } |
+      ForEach-Object { $_.TrimEnd('\') } | Sort-Object -Unique)
+    $expectedModules = @((Join-Path $sysDir 'WindowsPowerShell\v1.0\Modules'),
+      (Join-Path $progFiles 'WindowsPowerShell\Modules')) | Sort-Object -Unique
+    Assert-True (($moduleSegments -join '|') -eq ($expectedModules -join '|')) `
+      ('EngineHost child GUI PSModulePath is not the machine-only module path: ' + $childEnv['PSModulePath'])
+    # The whole point: nothing beyond the whitelist and what WinPS 5.1 itself adds for -ExecutionPolicy.
+    $allowedNames = @($expected.Keys) + @('PATHEXT', 'PSModulePath', 'PSExecutionPolicyPreference')
+    $leaked = @($childEnv.Keys | Where-Object { $allowedNames -notcontains $_ } | Sort-Object)
+    Assert-True ($leaked.Count -eq 0) `
+      ('EngineHost child GUI inherited environment variables it must not see: ' + ($leaked -join ', '))
+  } finally {
+    if (Test-Path -LiteralPath $envCase) { Remove-Item -LiteralPath $envCase -Recurse -Force }
+  }
 }
 
 Write-Host 'PASS: EngineHost one-UAC lifetime session, OTS broker, protected state, update handoff and profiles'
