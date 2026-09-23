@@ -100,10 +100,53 @@ Assert-True (@($script:BoosterDownloadHostSuffixes).Count -eq 1 -and
 
 # ---------- 5. 重定向必须再过一次同一道闸 ----------
 
-# 这一条是整个内置下载最关键的不变式：GitHub 会 302 到 CDN，
-# 只查初始 URL 等于白名单形同虚设。
-Assert-True ($raw.Contains('Test-BoosterSetupUrl "$($resp.ResponseUri.AbsoluteUri)"')) `
-  '下载没有对重定向后的最终地址复查白名单'
+# 这一条是整个内置下载最关键的不变式：GitHub 会 302 到 CDN，只查初始 URL 等于白名单形同虚设。
+# 行为层在 tests/updater-download-tests.ps1（真 302、被拒 origin、续传那一跳才重定向）。
+# 这里用 AST 守结构，注释进不了 AST：原来的 $raw.Contains 会被
+# 「$redirectVerdict = @{ Allowed = $true } # Test-BoosterSetupUrl "$($resp.ResponseUri...)"」骗过（复核变异 13）。
+# 结构要求：复查紧跟 GetResponse、在同一个语句块里（不嵌在条件里，每次尝试都做）、下一条语句就是
+# 「不 Allowed 就 throw」，而且都在 GetResponseStream 之前（先拒绝，再读字节）。
+$updaterAst = [Management.Automation.Language.Parser]::ParseInput($raw, [ref]$null, [ref]$null)
+$downloadFn = @($updaterAst.FindAll({ param($n)
+  $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-BoosterSetupDownload' }, $true))
+Assert-True ($downloadFn.Count -eq 1) "AST 里没有唯一的 Invoke-BoosterSetupDownload（$($downloadFn.Count) 个）"
+$redirectChecks = @($downloadFn[0].FindAll({ param($n)
+  $n -is [Management.Automation.Language.CommandAst] -and "$($n.GetCommandName())" -eq 'Test-BoosterSetupUrl' -and
+  @($n.CommandElements | Select-Object -Skip 1 | Where-Object { $_.Extent.Text -match '\$resp\.ResponseUri\.AbsoluteUri' }).Count -eq 1
+}, $true))
+Assert-True ($redirectChecks.Count -eq 1) '下载没有对重定向后的最终地址（$resp.ResponseUri）复查白名单'
+$checkStmt = $redirectChecks[0]
+while ($checkStmt -and -not ($checkStmt.Parent -is [Management.Automation.Language.StatementBlockAst])) { $checkStmt = $checkStmt.Parent }
+Assert-True ($checkStmt -is [Management.Automation.Language.AssignmentStatementAst] -and
+  $checkStmt.Parent.Parent -is [Management.Automation.Language.TryStatementAst] -and
+  [object]::ReferenceEquals($checkStmt.Parent.Parent.Body, $checkStmt.Parent)) `
+  '最终地址复查没有直接写在下载 try 块里（被包进条件就不是每次尝试都复查）'
+$block = @($checkStmt.Parent.Statements)
+$checkIndex = [array]::IndexOf($block, $checkStmt)
+function Get-StatementIndexCalling([object[]]$Statements, [string]$Member) {
+  for ($k = 0; $k -lt $Statements.Count; $k++) {
+    $hit = $Statements[$k].Find({ param($n)
+      $n -is [Management.Automation.Language.InvokeMemberExpressionAst] -and "$($n.Member)" -eq $Member }, $true)
+    if ($hit) { return $k }
+  }
+  -1
+}
+$responseIndex = Get-StatementIndexCalling $block 'GetResponse'
+$streamIndex = Get-StatementIndexCalling $block 'GetResponseStream'
+Assert-True ($responseIndex -ge 0 -and $responseIndex -lt $checkIndex -and $streamIndex -gt $checkIndex + 1) `
+  "最终地址复查不在 GetResponse 与 GetResponseStream 之间（GetResponse=$responseIndex 复查=$checkIndex 读流=$streamIndex）"
+$verdictVar = "$($checkStmt.Left.Extent.Text)"
+$denyIf = $block[$checkIndex + 1]
+$denyThrows = @()
+if ($denyIf -is [Management.Automation.Language.IfStatementAst] -and $denyIf.Clauses.Count -eq 1 -and -not $denyIf.ElseClause) {
+  $denyCond = ([regex]::Replace("$($denyIf.Clauses[0].Item1.Extent.Text)", '\s+', ' ')).Trim()
+  if ($denyCond -ieq "-not $verdictVar.Allowed") {
+    $denyThrows = @($denyIf.Clauses[0].Item2.Statements | Select-Object -First 1 |
+      Where-Object { $_ -is [Management.Automation.Language.ThrowStatementAst] })
+  }
+}
+Assert-True ($denyThrows.Count -eq 1) `
+  "最终地址复查的下一条语句不是「if (-not $verdictVar.Allowed) { throw … }」，拒绝没有真正中止下载"
 
 # ---------- 6. 构建出的清单也必须指向 GitHub ----------
 
