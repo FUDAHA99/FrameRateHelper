@@ -98,13 +98,130 @@ Assert-True ($bootBlock.Contains('Substring(0, 8)')) `
 Assert-True (-not ($bootBlock -match 'SESSION=\{\d\}" -f[^)]*DFB_ENGINE_HOST_SESSION')) `
   'the full session marker is written to the boot log'
 
-# startup-logs 必须对普通用户可读，否则「打不开」时无法以普通权限导出诊断
-$initText = Get-GuiFunctionText 'Initialize-ProtectedUserStateStore'
-Assert-True ($initText -match "New-ProtectedDirectory\s*\(Join-Path[^)]*'startup-logs'\)\s*\`$true") `
-  'startup-logs is not provisioned as user-readable; an unelevated recovery tool cannot read it'
-# 纯诊断设施不得影响启动
-Assert-True ($initText -match '(?s)try\s*\{[^}]*startup-logs[^}]*\}\s*catch') `
-  'startup-logs provisioning is not wrapped in try/catch; a diagnostics failure would block startup'
+# ---- startup-logs：唯一一个对普通用户可读（UsersRead = $true）的受保护子目录 ----
+# 必须可读：「软件打不开」时要能以普通权限导出诊断包，要求提权才能诊断提权失败是死锁；但不能写。
+# 旧版两条正则匹配的是源码文本，把那行 New-ProtectedDirectory 整行注释掉照样绿（独立复核变异 08）。
+$initFn = @($ast.FindAll({
+  param($candidate)
+  $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and
+  $candidate.Name -eq 'Initialize-ProtectedUserStateStore'
+}, $true))
+Assert-True ($initFn.Count -eq 1) 'Initialize-ProtectedUserStateStore not found or duplicated'
+
+# 结构：那条 UsersRead=$true 的调用只允许被 try 的主体包着，不许挂在任何条件、循环、catch 或内嵌脚本块下。
+# 「目录已存在就跳过」「看某个 $script:/$env: 状态」这类门卫在测试环境与生产环境里取值正好相反，
+# 行为测试只能覆盖其中一边，这条把整族挡在结构上。
+$readableCalls = @($initFn[0].FindAll({
+  param($c)
+  $c -is [Management.Automation.Language.CommandAst] -and "$($c.GetCommandName())" -eq 'New-ProtectedDirectory' -and
+  $c.CommandElements.Count -eq 3 -and "$($c.CommandElements[2].Extent.Text)" -eq '$true'
+}, $true))
+Assert-True ($readableCalls.Count -eq 1) `
+  "Initialize-ProtectedUserStateStore must contain exactly one user-readable New-ProtectedDirectory call (found $($readableCalls.Count))"
+$ancestor = $readableCalls[0]; $previous = $null; $unconditional = $true
+while ($ancestor -and -not [object]::ReferenceEquals($ancestor, $initFn[0])) {
+  $allowed = $ancestor -is [Management.Automation.Language.CommandAst] -or
+    $ancestor -is [Management.Automation.Language.PipelineAst] -or
+    $ancestor -is [Management.Automation.Language.StatementBlockAst] -or
+    $ancestor -is [Management.Automation.Language.NamedBlockAst] -or
+    ($ancestor -is [Management.Automation.Language.ScriptBlockAst] -and [object]::ReferenceEquals($ancestor.Parent, $initFn[0])) -or
+    ($ancestor -is [Management.Automation.Language.TryStatementAst] -and [object]::ReferenceEquals($ancestor.Body, $previous))
+  if (-not $allowed) { $unconditional = $false; break }
+  $previous = $ancestor; $ancestor = $ancestor.Parent
+}
+Assert-True $unconditional `
+  ('the user-readable startup-logs provisioning sits under a ' + $ancestor.GetType().Name + '; it must run on every start')
+
+# 行为：真的执行 Initialize-ProtectedUserStateStore，只替换真正落盘/改 ACL 的 New-ProtectedDirectory
+# （记录每次调用的路径与 UsersRead，可按路径注入失败）和落盘的 Write-BootLog。
+$aclSavedVars = @{}
+foreach ($name in 'ProgramDataRoot','OriginalUserSid','BootLogPath','ProtectedUserStateRoot','UserDataRoot',
+                  'ConfigDir','ProfileDir','UserConfigDir','BoosterUserConfigDir') {
+  $aclSavedVars[$name] = @(Get-Variable -Name $name -Scope Script -ErrorAction SilentlyContinue)
+}
+$aclLiveRoot = Join-Path ([IO.Path]::GetTempPath()) ('dfb-acl-live-' + [guid]::NewGuid().ToString('N'))
+# 生产里 GUI 由 EngineHost 启动，这组环境变量一定有值；测试里默认是空的。照生产设上再跑，
+# 以它们为条件的分支（例如 if (-not $env:DFB_ENGINE_HOST_PID) { ... }）才会走生产那一边。
+$aclProdEnv = [ordered]@{
+  DFB_ENGINE_HOST_PID = '4242'; DFB_LAUNCHER_PID = '4343'; DFB_ENGINE_HOST_SESSION = 'abcdef0123456789abcdef0123456789'
+  DFB_ORIGINAL_USER_SID = 'S-1-5-21-1111111111-2222222222-3333333333-1001'
+  DFB_ORIGINAL_LOCALAPPDATA = 'C:\DfbTest\OriginalUser\AppData\Local'
+  DFB_ENGINE_CONTROL_PIPE = 'DeltaForceBooster.Engine.0123456789abcdef0123456789abcdef'; DFB_REPAIR_ONLY = '0'
+}
+$aclSavedEnv = @{}
+try {
+  foreach ($name in $aclProdEnv.Keys) {
+    $aclSavedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    [Environment]::SetEnvironmentVariable($name, $aclProdEnv[$name], 'Process')
+  }
+  & {
+    param([string]$FunctionText, [string]$LiveRoot)
+    Invoke-Expression $FunctionText
+    $script:AclCalls = New-Object 'Collections.Generic.List[object]'
+    $script:AclFailPath = ''
+    $script:AclBootLog = New-Object 'Collections.Generic.List[string]'
+    function New-ProtectedDirectory([string]$Path, [bool]$UsersRead) {
+      [void]$script:AclCalls.Add([pscustomobject]@{ Path = $Path; UsersRead = $UsersRead })
+      if ($script:AclFailPath -and $Path -eq $script:AclFailPath) { throw "stubbed ACL failure at $Path" }
+    }
+    function Write-BootLog([string]$Line) { [void]$script:AclBootLog.Add("$Line") }
+
+    # 生产里本函数运行时引导日志早已就绪、会话 SID 已验证。先把这些「生产里有值」的状态设上，
+    # 以「尚未设置」为条件的分支才不会只在测试里成立。合成 SID 只当目录名用，要能过 IsAccountSid。
+    $script:OriginalUserSid = 'S-1-5-21-1111111111-2222222222-3333333333-1001'
+    $script:BootLogPath = 'C:\ProgramData\DeltaForceBooster\startup-logs\startup-probe.log'
+    $script:ProgramDataRoot = Join-Path ([IO.Path]::GetTempPath()) ('dfb-acl-' + [guid]::NewGuid().ToString('N'))
+    $startupLogs = Join-Path $script:ProgramDataRoot 'startup-logs'
+    $configDir = Join-Path (Join-Path (Join-Path $script:ProgramDataRoot 'users') $script:OriginalUserSid) 'config'
+
+    # 1) 正常路径：startup-logs 恰好一次、UsersRead=$true，且是唯一一个可读目录
+    Initialize-ProtectedUserStateStore
+    $hits = @($script:AclCalls | Where-Object { $_.Path -eq $startupLogs })
+    Assert-True ($hits.Count -eq 1 -and $hits[0].UsersRead -eq $true) `
+      ("startup-logs was not provisioned exactly once as user-readable at $startupLogs; provisioned: " +
+       (@($script:AclCalls | ForEach-Object { "$($_.Path)=$($_.UsersRead)" }) -join ' | '))
+    $readable = @($script:AclCalls | Where-Object { $_.UsersRead })
+    Assert-True ($readable.Count -eq 1) `
+      ('more than one protected directory is user-readable: ' + (@($readable | ForEach-Object { $_.Path }) -join ' | '))
+
+    # 2) 诊断目录失败不得影响启动，但这次失败本身必须留痕（注入的失败原文出现在日志里）
+    $script:AclCalls.Clear(); $script:AclBootLog.Clear(); $script:ConfigDir = ''
+    $script:AclFailPath = $startupLogs
+    $diagThrew = $false
+    try { Initialize-ProtectedUserStateStore } catch { $diagThrew = $true }
+    Assert-True (-not $diagThrew) 'a startup-logs provisioning failure aborts startup; diagnostics must never block the app'
+    Assert-True ($script:ConfigDir -eq $configDir) 'the protected config dir was not established although only the diagnostics dir failed'
+    Assert-True (($script:AclBootLog -join "`n").Contains("stubbed ACL failure at $startupLogs")) `
+      'the startup-logs provisioning failure left no trace of itself in the boot log'
+
+    # 3) 核心状态目录失败必须继续中止启动（挡住「整个函数体包 try/catch」让上一条恒真）
+    $script:AclCalls.Clear()
+    $script:AclFailPath = $configDir
+    $coreThrew = $false
+    try { Initialize-ProtectedUserStateStore } catch { $coreThrew = $true }
+    Assert-True $coreThrew 'a protected state directory failure no longer aborts startup; the GUI would run on unprotected state'
+
+    # 4) 目录已存在时同样必须重新加固。生产里这才是常态：引导块在本函数之前就用不带 ACL 的
+    #    CreateDirectory 建出了 startup-logs。真建几个普通目录（不设 ACL，不需要管理员）。
+    [void][IO.Directory]::CreateDirectory((Join-Path $LiveRoot 'startup-logs'))
+    $liveUser = Join-Path (Join-Path $LiveRoot 'users') $script:OriginalUserSid
+    [void][IO.Directory]::CreateDirectory((Join-Path $liveUser 'config'))
+    [void][IO.Directory]::CreateDirectory((Join-Path $liveUser 'profiles'))
+    $script:ProgramDataRoot = $LiveRoot
+    $script:AclCalls.Clear(); $script:AclFailPath = ''
+    Initialize-ProtectedUserStateStore
+    $reHardened = @($script:AclCalls | Where-Object { $_.Path -eq (Join-Path $LiveRoot 'startup-logs') -and $_.UsersRead })
+    Assert-True ($reHardened.Count -eq 1) `
+      'startup-logs is not re-hardened when it already exists; the boot block pre-creates it with an admin-only ACL'
+  } $initFn[0].Extent.Text $aclLiveRoot
+} finally {
+  foreach ($name in $aclSavedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $aclSavedEnv[$name], 'Process') }
+  foreach ($name in $aclSavedVars.Keys) {
+    if ($aclSavedVars[$name].Count -gt 0) { Set-Variable -Name $name -Value $aclSavedVars[$name][0].Value -Scope Script }
+    else { Remove-Variable -Name $name -Scope Script -ErrorAction SilentlyContinue }
+  }
+  if (Test-Path -LiteralPath $aclLiveRoot) { Remove-Item -LiteralPath $aclLiveRoot -Recurse -Force }
+}
 
 # ---- 兜底陷阱：必须存在、必须先记日志、必须以 break 无条件终止 ----
 # 不用正则：原来的 '(?s)trap\s*\{.*?Write-BootLog.*?break' 里 .*? 不受 trap 范围约束，会一路
