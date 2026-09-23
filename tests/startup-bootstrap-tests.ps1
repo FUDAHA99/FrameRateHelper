@@ -106,9 +106,96 @@ Assert-True ($initText -match "New-ProtectedDirectory\s*\(Join-Path[^)]*'startup
 Assert-True ($initText -match '(?s)try\s*\{[^}]*startup-logs[^}]*\}\s*catch') `
   'startup-logs provisioning is not wrapped in try/catch; a diagnostics failure would block startup'
 
-# 兜底陷阱必须存在，且保持「出错即终止」语义
-Assert-True ($raw -match '(?s)trap\s*\{.*?Write-BootLog.*?break') `
-  'script-scope trap is missing, or it does not log before terminating'
+# ---- 兜底陷阱：必须存在、必须先记日志、必须以 break 无条件终止 ----
+# 不用正则：原来的 '(?s)trap\s*\{.*?Write-BootLog.*?break' 里 .*? 不受 trap 范围约束，会一路
+# 匹配到文件后面别处某个 if 里的 break——把 trap 里的 break 改成 continue 照样绿（独立复核变异 07）。
+# 这里全走 AST（注释不是节点），并且只在这一个 trap 的子树里判定。
+$topTraps = @($ast.FindAll({
+  param($candidate)
+  $candidate -is [Management.Automation.Language.TrapStatementAst] -and
+  $candidate.Parent -is [Management.Automation.Language.NamedBlockAst] -and
+  $candidate.Parent.Parent -eq $ast
+}, $true))
+Assert-True ($topTraps.Count -eq 1) 'expected exactly one script-scope trap; startup fail-fast depends on it'
+$topTrap = $topTraps[0]
+Assert-True ($null -eq $topTrap.TrapType) 'script-scope trap is narrowed to one exception type; other terminating errors bypass it'
+
+# TrapStatementAst.Body 是 StatementBlockAst（没有 EndBlock），直接取 .Statements。
+# break 必须是 body 的最后一条直属语句（包在 if/catch 里的不算），而且是整个 trap 子树里唯一的
+# 控制转移语句：末尾仍是裸 break、前面却插一句 if ($script:GuiReady) { continue } 的写法，
+# 在测试里那个变量恒为空、上线后恒为真——只有「唯一」这条能挡住。throw 不计入：它本身也终止并传播。
+$trapStatements = @($topTrap.Body.Statements)
+$trapLast = $trapStatements[$trapStatements.Count - 1]
+$trapLastIsBreak = $trapLast -is [Management.Automation.Language.BreakStatementAst] -and $null -eq $trapLast.Label
+Assert-True $trapLastIsBreak 'script-scope trap does not end in an unconditional, unlabeled break'
+$trapFlow = @($topTrap.FindAll({
+  param($candidate)
+  $candidate -is [Management.Automation.Language.BreakStatementAst] -or
+  $candidate -is [Management.Automation.Language.ContinueStatementAst] -or
+  $candidate -is [Management.Automation.Language.ReturnStatementAst] -or
+  $candidate -is [Management.Automation.Language.ExitStatementAst]
+}, $true))
+Assert-True ($trapFlow.Count -eq 1 -and [object]::ReferenceEquals($trapFlow[0], $trapLast)) `
+  'script-scope trap holds a control-transfer statement besides its final break; the break can be skipped at runtime'
+$trapLogCalls = @($topTrap.FindAll({
+  param($candidate)
+  $candidate -is [Management.Automation.Language.CommandAst] -and "$($candidate.GetCommandName())" -eq 'Write-BootLog'
+}, $true) | Sort-Object { $_.Extent.StartOffset })
+Assert-True ($trapLogCalls.Count -ge 1 -and $trapLogCalls[0].Extent.StartOffset -lt $trapLast.Extent.StartOffset) `
+  'script-scope trap no longer writes a boot log before it terminates'
+
+# 行为：把产品 trap 原文取出来真跑一遍，只桩掉落盘的 Write-BootLog。
+# 探针里 ErrorActionPreference 必须是 Continue：否则「删掉 break」退回 trap 默认的「记录并继续」时，
+# 外层的 Stop 会把它伪装成终止。trap 体里若将来调用别的产品函数，要在探针里补同名桩，
+# 否则那次调用会被 trap 自己的内层 catch 吞掉、表现为「什么都没记」。
+$script:TrapProbeLog = New-Object System.Collections.ArrayList
+$script:TrapProbeSentinel = 'NOT-REACHED'
+$trapProbeSource = @"
+`$ErrorActionPreference = 'Continue'
+function Write-BootLog([string]`$Line) { [void]`$script:TrapProbeLog.Add(`$Line) }
+$($topTrap.Extent.Text)
+throw 'trap probe: uncaught terminating error'
+`$script:TrapProbeSentinel = 'REACHED'
+"@
+$trapProbeThrew = $false
+try { & ([scriptblock]::Create($trapProbeSource)) 2>$null } catch { $trapProbeThrew = $true }
+Assert-True (($script:TrapProbeLog -join "`n").Contains('trap probe: uncaught terminating error')) `
+  'the real trap body did not log the uncaught terminating error that was actually raised'
+Assert-True ($script:TrapProbeSentinel -eq 'NOT-REACHED' -and $trapProbeThrew) `
+  'execution continued past an uncaught terminating error, or the error did not propagate; fail-fast is gone'
+
+# 第二遍：trap 体里引用的变量在测试里通常是空的（窗口没起来、环境变量没设），上线后却可能是真值。
+# 全部强制成真值再跑一遍，两种取值方向都覆盖：任何「看运行时状态决定要不要终止」的写法在这里现形。
+$trapVarPaths = @($topTrap.FindAll({ param($c) $c -is [Management.Automation.Language.VariableExpressionAst] }, $true) |
+  ForEach-Object { "$($_.VariablePath.UserPath)" } | Sort-Object -Unique |
+  Where-Object { @('_', 'PSItem', 'null', 'true', 'false', 'args', 'input', 'this') -notcontains $_ })
+$trapSavedEnv = @{}; $trapSavedVars = @{}
+try {
+  foreach ($path in $trapVarPaths) {
+    if ($path -like 'env:*') {
+      $envName = $path.Substring(4)
+      $trapSavedEnv[$envName] = [Environment]::GetEnvironmentVariable($envName, 'Process')
+      [Environment]::SetEnvironmentVariable($envName, '1', 'Process')
+    } else {
+      $varName = $path -replace '^(?i)(script|global|local|private):', ''
+      $trapSavedVars[$varName] = @(Get-Variable -Name $varName -Scope Script -ErrorAction SilentlyContinue)
+      Set-Variable -Name $varName -Value $true -Scope Script
+    }
+  }
+  $script:TrapProbeLog.Clear()
+  $script:TrapProbeSentinel = 'NOT-REACHED'
+  $trapProbeThrew = $false
+  try { & ([scriptblock]::Create($trapProbeSource)) 2>$null } catch { $trapProbeThrew = $true }
+} finally {
+  foreach ($envName in $trapSavedEnv.Keys) { [Environment]::SetEnvironmentVariable($envName, $trapSavedEnv[$envName], 'Process') }
+  foreach ($varName in $trapSavedVars.Keys) {
+    if ($trapSavedVars[$varName].Count -gt 0) { Set-Variable -Name $varName -Value $trapSavedVars[$varName][0].Value -Scope Script }
+    else { Remove-Variable -Name $varName -Scope Script -ErrorAction SilentlyContinue }
+  }
+}
+Assert-True ($script:TrapProbeSentinel -eq 'NOT-REACHED' -and $trapProbeThrew) `
+  ('with every variable the trap reads forced truthy (' + ($trapVarPaths -join ', ') +
+   '), execution continued past an uncaught terminating error; fail-fast depends on runtime state')
 
 # 失败必须先落盘再弹窗：弹窗本身也可能失败，那时日志是唯一线索。
 # 用 AST 节点比位置，不做文本匹配 —— 注释里提到 Add-Type 不等于调用了它。
