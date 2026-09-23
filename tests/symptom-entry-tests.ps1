@@ -3,8 +3,8 @@ param()
 
 # 按症状入口（P0-3）的回归网。
 #
-# 这一整块是**纯呈现层**：不写系统、不碰备份、不经过提权。所以这里守的不是安全边界，
-# 而是三件会让用户被误导的事：
+# 按症状入口这一功能是**纯呈现层**：不写系统、不碰备份、不经过提权。所以这里守的不是安全边界，
+# 而是三件会让用户被误导的事（测试本身会点源真引擎、调真 Get-OptItems，因此会读本机硬件）：
 #   1. 症状指向一个不存在的优化项 —— 那条症状会静默地筛不出东西，看起来像「本工具
 #      治不了」，实际只是拼错了一个字。
 #   2. 某个优化项没有被任何症状覆盖 —— 它在按症状找功能的人眼里等于不存在。
@@ -15,6 +15,10 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $guiPath = Join-Path $root 'gui\DeltaForceBooster-GUI.ps1'
 . (Join-Path $root 'scripts\delta-booster.ps1')
+# Get-OptItems 每次都现场做一遍硬件 CIM 探测（单次 1.5~3 秒，整套测试并行时 WMI 争用会慢得多），
+# 本文件要调十几次。硬件在一次测试里不会变，而 Get-OptItems 对结果只读：真探测一次，之后复用。
+$script:TestHardwareInfo = Get-HardwareInfo
+function Get-HardwareInfo { $script:TestHardwareInfo }
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
