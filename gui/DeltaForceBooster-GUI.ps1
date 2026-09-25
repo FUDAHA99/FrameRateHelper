@@ -65,6 +65,10 @@ try {
 
 function Write-BootLog([string]$Line) {
   if (-not $script:BootLogPath) { return }
+  # 这份日志对普通用户可读。EngineHost 会话标记（32 位十六进制，GUI 与 EngineHost 管道握手的
+  # 密钥）会经由 TEMP 路径、异常消息、拒绝原因等各种途径进入日志行，所以在唯一的出口统一
+  # 只留前 8 位：前缀足够把日志和本次会话对上。恰好 32 位才处理，更长的哈希不受影响。
+  $Line = [regex]::Replace("$Line", '(?<![0-9A-Fa-f])([0-9A-Fa-f]{8})[0-9A-Fa-f]{24}(?![0-9A-Fa-f])', '$1…')
   try {
     [IO.File]::AppendAllText($script:BootLogPath,
       ('[{0:HH:mm:ss.fff}] {1}{2}' -f [DateTime]::Now, $Line, [Environment]::NewLine),
@@ -81,8 +85,8 @@ try {
   Write-BootLog ("系统 {0}  区域 {1}" -f
     [Environment]::OSVersion.VersionString, [Globalization.CultureInfo]::CurrentCulture.Name)
   Write-BootLog ("脚本 {0}" -f $PSCommandPath)
-  # 会话标记只记前 8 位：它是命名管道名 DeltaForceBooster.Engine.<32hex> 的组成部分，
-  # 而这份日志对普通用户可读。前缀足够把日志和本次会话对上，又不是完整的管道名。
+  # 会话标记只记前 8 位：它是 GUI 与 EngineHost 管道握手的密钥，而这份日志对普通用户可读。
+  # 前缀足够把日志和本次会话对上（Write-BootLog 在出口还会再统一脱敏一次）。
   $sessionText = "$env:DFB_ENGINE_HOST_SESSION"
   $sessionShort = $(if ($sessionText.Length -ge 8) { $sessionText.Substring(0, 8) + '…' } else { '(空或过短)' })
   Write-BootLog ("父进程环境 HOSTPID={0} LAUNCHERPID={1} SESSION={2} REPAIR={3}" -f
