@@ -110,17 +110,54 @@ $updaterAst = [Management.Automation.Language.Parser]::ParseInput($raw, [ref]$nu
 $downloadFn = @($updaterAst.FindAll({ param($n)
   $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-BoosterSetupDownload' }, $true))
 Assert-True ($downloadFn.Count -eq 1) "AST 里没有唯一的 Invoke-BoosterSetupDownload（$($downloadFn.Count) 个）"
+# 先按 AST 变量节点选出「实参用到 $resp」的那次策略调用（不按源码文本），再逐节点核对实参形状。
 $redirectChecks = @($downloadFn[0].FindAll({ param($n)
   $n -is [Management.Automation.Language.CommandAst] -and "$($n.GetCommandName())" -eq 'Test-BoosterSetupUrl' -and
-  @($n.CommandElements | Select-Object -Skip 1 | Where-Object { $_.Extent.Text -match '\$resp\.ResponseUri\.AbsoluteUri' }).Count -eq 1
+  $null -ne $n.Find({ param($v)
+    $v -is [Management.Automation.Language.VariableExpressionAst] -and $v.VariablePath.UserPath -eq 'resp' }, $true)
 }, $true))
-Assert-True ($redirectChecks.Count -eq 1) '下载没有对重定向后的最终地址（$resp.ResponseUri）复查白名单'
+Assert-True ($redirectChecks.Count -eq 1) "下载没有对重定向后的最终地址（`$resp.ResponseUri）复查白名单（找到 $($redirectChecks.Count) 处用到 `$resp 的策略调用）"
+# 最终地址必须原样交给策略（复核 R5）：原来只要求实参文本里含 $resp.ResponseUri.AbsoluteUri，
+# "$($resp.ResponseUri.AbsoluteUri -replace '^http:', 'https:')" 照样过——http 最终地址先被改写成 https 再判，
+# 生产策略就放行了明文下载。现在按 AST 前序逐节点比对实参，只接受两种等价写法：
+# "$($resp.ResponseUri.AbsoluteUri)" 与裸 $resp.ResponseUri.AbsoluteUri。任何运算符（-replace）、方法（.Replace()）、
+# 类型转换、管道、子表达式里的第二条语句都会多出或换掉节点；双引号串里在 $() 之外加字面量前后缀由 Value 与嵌套表达式原文不等接住。
+function Get-AstShape([Management.Automation.Language.Ast]$Node) {
+  @($Node.FindAll({ $true }, $true) | ForEach-Object {
+    $label = $_.GetType().Name
+    if ($_ -is [Management.Automation.Language.VariableExpressionAst]) { $label += ':$' + $_.VariablePath.UserPath.ToLowerInvariant() }
+    elseif ($_ -is [Management.Automation.Language.StringConstantExpressionAst]) { $label += ':' + $_.Value.ToLowerInvariant() }
+    elseif ($_ -is [Management.Automation.Language.MemberExpressionAst] -and $_.Static) { $label += ':static' }
+    $label
+  }) -join ' > '
+}
+$redirectArgs = @($redirectChecks[0].CommandElements | Select-Object -Skip 1)
+$bareUriShape = 'MemberExpressionAst > MemberExpressionAst > VariableExpressionAst:$resp > ' +
+  'StringConstantExpressionAst:responseuri > StringConstantExpressionAst:absoluteuri'
+$quotedUriShape = 'ExpandableStringExpressionAst > SubExpressionAst > StatementBlockAst > PipelineAst > CommandExpressionAst > ' + $bareUriShape
+$redirectArgShape = $(if ($redirectArgs.Count -eq 1) { Get-AstShape $redirectArgs[0] } else { "<$($redirectArgs.Count) arguments>" })
+$redirectArgNoLiteral = ($redirectArgs.Count -eq 1) -and (
+  -not ($redirectArgs[0] -is [Management.Automation.Language.ExpandableStringExpressionAst]) -or
+  ($redirectArgs[0].NestedExpressions.Count -eq 1 -and
+   [string]::Equals($redirectArgs[0].Value, $redirectArgs[0].NestedExpressions[0].Extent.Text, [StringComparison]::Ordinal)))
+Assert-True ($redirectChecks[0].Redirections.Count -eq 0 -and $redirectArgNoLiteral -and
+  ([string]::Equals($redirectArgShape, $bareUriShape, [StringComparison]::Ordinal) -or
+   [string]::Equals($redirectArgShape, $quotedUriShape, [StringComparison]::Ordinal))) `
+  "final-URL verdict argument is not exactly `$resp.ResponseUri.AbsoluteUri: [$($redirectArgs.Extent.Text)] AST: $redirectArgShape"
 $checkStmt = $redirectChecks[0]
 while ($checkStmt -and -not ($checkStmt.Parent -is [Management.Automation.Language.StatementBlockAst])) { $checkStmt = $checkStmt.Parent }
 Assert-True ($checkStmt -is [Management.Automation.Language.AssignmentStatementAst] -and
   $checkStmt.Parent.Parent -is [Management.Automation.Language.TryStatementAst] -and
   [object]::ReferenceEquals($checkStmt.Parent.Parent.Body, $checkStmt.Parent)) `
   '最终地址复查没有直接写在下载 try 块里（被包进条件就不是每次尝试都复查）'
+# 判定变量必须就是策略调用本身的返回值：`= Test-BoosterSetupUrl <实参>`，管道里没有第二段、没有类型约束、不是 +=。
+# 否则 `... | ForEach-Object { $_.Allowed = $true; $_ }` 这类写法实参原样、调用也在，结果却被丢掉换成放行。
+$verdictPipe = $checkStmt.Right
+Assert-True ($checkStmt.Operator -eq [Management.Automation.Language.TokenKind]::Equals -and
+  $checkStmt.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+  $verdictPipe -is [Management.Automation.Language.PipelineAst] -and $verdictPipe.PipelineElements.Count -eq 1 -and
+  [object]::ReferenceEquals($verdictPipe.PipelineElements[0], $redirectChecks[0])) `
+  "final-URL verdict variable is not assigned straight from the policy call: $($checkStmt.Extent.Text)"
 $block = @($checkStmt.Parent.Statements)
 $checkIndex = [array]::IndexOf($block, $checkStmt)
 function Get-StatementIndexCalling([object[]]$Statements, [string]$Member) {
@@ -135,6 +172,21 @@ $responseIndex = Get-StatementIndexCalling $block 'GetResponse'
 $streamIndex = Get-StatementIndexCalling $block 'GetResponseStream'
 Assert-True ($responseIndex -ge 0 -and $responseIndex -lt $checkIndex -and $streamIndex -gt $checkIndex + 1) `
   "最终地址复查不在 GetResponse 与 GetResponseStream 之间（GetResponse=$responseIndex 复查=$checkIndex 读流=$streamIndex）"
+# 实参形状对了还不够：$resp 必须就是紧挨着的上一条语句里 $req.GetResponse() 的返回值——那个 try 体只有这一条赋值，
+# 两条语句之间不插任何东西。否则 `$resp | Add-Member ResponseUri ... -Force` 换掉最终地址，上面的实参形状原样不动。
+$getResponseCall = $block[$responseIndex].Find({ param($n)
+  $n -is [Management.Automation.Language.InvokeMemberExpressionAst] -and "$($n.Member)" -eq 'GetResponse' }, $true)
+$respAssign = $getResponseCall
+while ($respAssign -and -not ($respAssign -is [Management.Automation.Language.AssignmentStatementAst])) { $respAssign = $respAssign.Parent }
+$respWrites = @($block[$responseIndex].FindAll({ param($n)
+  $n -is [Management.Automation.Language.AssignmentStatementAst] -and
+  $n.Left -is [Management.Automation.Language.VariableExpressionAst] -and $n.Left.VariablePath.UserPath -eq 'resp' }, $true))
+Assert-True ($responseIndex -eq $checkIndex - 1 -and $null -ne $respAssign -and $respWrites.Count -eq 1 -and
+  [object]::ReferenceEquals($respWrites[0], $respAssign) -and
+  $respAssign.Right -is [Management.Automation.Language.CommandExpressionAst] -and
+  [object]::ReferenceEquals($respAssign.Right.Expression, $getResponseCall) -and
+  @($respAssign.Parent.Statements).Count -eq 1) `
+  "final-URL verdict does not read `$resp straight from the preceding `$req.GetResponse() (GetResponse=$responseIndex verdict=$checkIndex resp-writes=$($respWrites.Count))"
 $verdictVar = "$($checkStmt.Left.Extent.Text)"
 $denyIf = $block[$checkIndex + 1]
 $denyThrows = @()
