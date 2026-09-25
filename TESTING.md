@@ -47,8 +47,10 @@ foreach ($n in 'Local\DeltaForceBooster.LaunchInstance', 'Global\DeltaForceBoost
 
 ```powershell
 Get-ChildItem tests\*.ps1 | Sort-Object Name | ForEach-Object {
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $_.FullName 2>&1 | Out-Null
-  '{0,-34} {1}' -f $_.Name, $(if ($LASTEXITCODE -eq 0) { 'PASS' } else { 'FAIL' })
+  $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $_.FullName 2>&1 | Out-String
+  $skips = @($out -split "`r?`n" | Where-Object { $_ -match '^SKIP' }).Count
+  '{0,-34} {1}{2}' -f $_.Name, $(if ($LASTEXITCODE -eq 0) { 'PASS' } else { 'FAIL' }),
+    $(if ($skips) { "  （$skips 条 SKIP：这些用例在本机没有被验证）" })
 }
 ```
 
@@ -71,6 +73,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build\make-installer.ps1 -Te
 我已经在这上面栽过两次：一次把「测试包是旧的」读成了真回归，一次差点把它当成环境问题放过去。
 另外：**子进程里的注册表写入会被沙箱静默重定向**，读回来还是原值——要验真实注册表行为
 得在当前会话里直接跑，别用 `& powershell.exe -File` 另起一个。
+
+**全绿不等于全都验证过。** `engine-security-tests` 在建不出 junction、映射不了 subst 盘符、
+或设不了第三方 reparse 标记的机器上，会对相应用例打印 `SKIP junction-ancestor / junction-top /
+reparse-kind …` 然后继续，文件照样退出 0 —— 这些用例在这台机器上**没有被验证**。上面的循环会把
+SKIP 条数标出来；给别人复核或在 CI 里跑时，出现 SKIP 要按「未验证」处理，不能算通过。
+
+另外：从 PowerShell 7（或经 Python 等工具）间接起 `powershell.exe` 时，要把 `PSModulePath` 设成
+WinPS 的系统模块目录（`C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules;C:\Program Files\WindowsPowerShell\Modules`），
+否则子进程继承 7 的模块路径，`Get-FileHash` 之类会自动加载失败，正常代码也会红（独立复核时踩过）。
 
 新增的 `startup-bootstrap-tests.ps1` 必须通过。
 
