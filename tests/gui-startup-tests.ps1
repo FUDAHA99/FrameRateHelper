@@ -173,7 +173,9 @@ Assert-True ($powerNoticeFn.Count -eq 1) 'Show-PowerRecoveryVersionNotice not fo
 $powerNoticeText = $powerNoticeFn[0].Extent.Text
 Assert-True ($raw.Contains("Show-ConfirmDialog '重要提醒' 'POWER RECOVERY NOTICE'") -and
   $raw.Contains('优化后出现异常：先恢复电源选项并重启电脑') -and
-  $powerNoticeText.Contains('点击面板下方的「全部复原」') -and
+  # 按字符串常量节点比对，注释里写同一句话满足不了它。按钮上的字是「确认全部复原」，确认框里才是「全部复原」
+  @($powerNoticeFn[0].FindAll({ param($n) $n -is [Management.Automation.Language.StringConstantExpressionAst] -and
+    $n.Value -ceq '2. 点击面板下方的「确认全部复原」，在弹出的确认框里点「全部复原」。' }, $true)).Count -eq 1 -and
   -not $powerNoticeText.Contains('勾选你执行过的电源项') -and
   -not $powerNoticeText.Contains('点击「复原所选项目」') -and
   $raw -match '(?s)\$window\.Add_ContentRendered\(\{\s*Show-PowerRecoveryVersionNotice\s*Initialize-LiveMetricsDashboard') `

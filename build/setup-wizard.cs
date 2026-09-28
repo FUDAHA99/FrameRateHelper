@@ -3720,7 +3720,7 @@ class SetupWindow : Window {
         };
         sp.Children.Add(_runRow);
         _runHelpText = new TextBlock {
-            Text = "主界面始终以普通权限运行；只有执行或还原需要修改系统的项目时，才会单独弹出 UAC 确认。",
+            Text = "每次打开软件时会弹一次管理员确认（UAC）；本次打开期间执行优化、还原和更新都不会再弹。",
             Foreground = Theme.TextFaint, FontSize = 11, Margin = new Thickness(0, 8, 0, 0),
             TextWrapping = TextWrapping.Wrap
         };

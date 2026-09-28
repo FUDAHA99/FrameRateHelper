@@ -806,7 +806,9 @@ function Test-BoosterUpdate {
     $minimum = "$($m.minimumSupportedVersion)"
     $mandatory = [bool]($minimum -and (Compare-BoosterVersion $CurrentVersion $minimum) -lt 0)
     # 用户点过「不再提醒此版本」的就不再弹；出了更新的版本会重新提醒。
-    # 手动检查（-IncludeSkipped）例外：用户主动点按钮就是想看结果，不该被跳过记录挡住
+    # 这条分支只能在 GUI 自己的作用域里用。GUI 的两处调用都带 -IncludeSkipped：
+    # 手动检查是用户主动要看结果；自动检查在后台 runspace 里跑，这里读不到配置，
+    # 跳过判断回到界面线程做（Start-UpdateCheck 的回调与 Show-DetectedUpdateDialog）
     if (-not $IncludeSkipped -and
         (Test-BoosterUpdateSkipped ([pscustomobject]@{ Version = "$($m.version)"; Mandatory = $mandatory }))) {
       return $null

@@ -8940,9 +8940,13 @@ function Show-UpdateDialog($UpdInfo) {
   })
   $script:UpdDlg.ShowDialog() | Out-Null
   if (-not $UpdInfo.Mandatory -and $script:UpdUi.SkipChk.IsChecked -and (Get-Command Set-BoosterSkipVersion -ErrorAction SilentlyContinue)) {
-    # 返回值必须吞掉：现在函数输出会被调用方接住，落盘结果混进去会把 $skipped 变成数组
-    Set-BoosterSkipVersion $UpdInfo.Version | Out-Null
-    Write-Log "已设置不再提醒 v$($UpdInfo.Version)。"
+    # 落盘结果只能进 if 条件：混进函数输出会把调用方的 $skipped 变成数组；
+    # 也不能丢掉——没存上的话下次启动还会弹，日志不能说已经设置好了
+    if (Set-BoosterSkipVersion $UpdInfo.Version) {
+      Write-Log "已设置不再提醒 v$($UpdInfo.Version)。"
+    } else {
+      Write-Log "「不再提醒 v$($UpdInfo.Version)」没能保存，下次启动仍会提示这个版本。"
+    }
     # 返回「用户选择了跳过」：调用方据此把标题栏的更新入口一并收起，语义保持一致
     return $true
   }
@@ -8955,6 +8959,9 @@ function Show-DetectedUpdateDialog {
   if (-not $script:UpdateInfo -or $script:Busy -or $script:UpdateDialogOpen -or (Test-TuningExperimentActive)) { return }
   $ver = "$($script:UpdateInfo.Version)"
   if (-not $ver -or "$script:UpdatePromptedVersion" -eq $ver) { return }
+  # 自动弹窗的每个入口（检查回调、忙碌结束时的补弹）都走这里，跳过判断必须放在这里：
+  # 手动检查会把 $script:UpdateInfo 设成用户跳过的版本，只在检查回调里过滤，忙碌结束时照样补弹
+  if (Test-BoosterUpdateSkipped $script:UpdateInfo) { return }
   $script:UpdatePromptedVersion = $ver
   $script:UpdateDialogOpen = $true
   try {
@@ -9046,14 +9053,14 @@ function Show-PowerRecoveryVersionNotice {
     ''
     '操作方法：'
     '1. 进入「优化」页，点击「还原设置」。'
-    '2. 点击面板下方的「全部复原」。'
+    '2. 点击面板下方的「确认全部复原」，在弹出的确认框里点「全部复原」。'
     '3. 完成后重启电脑。'
     ''
     '为什么不是「复原所选项目」：电源相关的三项（切换到「卓越性能」、电源计划隐藏项深度调优、锁定电源计划）'
     '目前只能通过「全部复原」恢复，它们不会出现在上方的勾选清单里。'
     ''
     '「全部复原」只会回退本工具实际改过的设置，你没有执行过的项目不受影响；'
-    '每一项的结果（成功／没回到原值／失败）都会逐条列出来。'
+    '完成后会给出汇总，没能回到原值或失败的项目会单独列出来。'
   ) -join "`n"
   if (Show-ConfirmDialog '重要提醒' 'POWER RECOVERY NOTICE' $message '我知道了' -InfoOnly `
       -Banner '优化后出现异常：先恢复电源选项并重启电脑') {
@@ -9162,6 +9169,8 @@ function Start-ManualUpdateCheck {
     } else {
       # 发现新版：与定时检查同一收口——点亮标题栏入口，并直接弹更新详情
       $script:UpdateInfo = $r.Info
+      # 这个版本已经当面给用户看过：忙碌结束时的自动补弹不该再弹一次
+      $script:UpdatePromptedVersion = "$($r.Info.Version)"
       $ui.UpdateBtn.ToolTip = "新版本 v$($r.Info.DisplayVersion) 可用（当前 v$script:DisplayVersion），点击查看详情"
       $ui.UpdateBtn.Visibility = 'Visible'
       Write-Log "检测到新版本 v$($r.Info.DisplayVersion)（当前 v$script:DisplayVersion）。"
