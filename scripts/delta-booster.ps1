@@ -4105,9 +4105,10 @@ function Invoke-Apply([string[]]$ItemIds, [string]$GamePath, [bool]$AllowRisky, 
         else {
           # 逐操作容错：某个子操作写入失败（如 12 代大小核机器上个别电源项不受支持）
           # 不再拖垮整项，其余子操作照常执行，失败的逐条记录进结果
-          $notes = @(); $errs = @()
+          $notes = @(); $errs = @(); $attempted = 0
           foreach ($op in $it.Ops) {
             if ($journal.Error) { break }
+            $attempted++
             try {
               $n = Invoke-ApplyOp $op $it.Id $prepareBackup $markApplied
               if ($n) { $notes += $n }
@@ -4116,9 +4117,17 @@ function Invoke-Apply([string[]]$ItemIds, [string]$GamePath, [bool]$AllowRisky, 
               $errs += "$opLabel：$($_.Exception.Message)"
             }
           }
-          if ($errs.Count -eq 0) {
+          # 备份落不了盘时循环会提前停下，后面的子项根本没执行，绝不能再说「其余已写入」
+          $notRun = @($it.Ops).Count - $attempted
+          if ($errs.Count -eq 0 -and $notRun -eq 0) {
             $msg = $(if ($notes.Count -gt 0) { "已写入（$($notes -join '；')）" } else { '已写入' })
             $results += [pscustomobject]@{ Id = $it.Id; Name = $it.Name; Ok = $true; Skipped = $false; Msg = $msg }
+          } elseif ($notRun -gt 0) {
+            $done = $attempted - $errs.Count
+            $head = $(if ($done -gt 0) { "部分子项写入失败（$done 项已完成，其后 $notRun 项因备份无法落盘未执行）" }
+                      else { "失败（备份无法落盘，其余 $notRun 项未执行）" })
+            $results += [pscustomobject]@{ Id = $it.Id; Name = $it.Name; Ok = $false; Skipped = $false
+                                           Msg = $(if ($errs.Count -gt 0) { "$head：$($errs -join '；')" } else { $head }) }
           } elseif ($errs.Count -lt @($it.Ops).Count) {
             $results += [pscustomobject]@{ Id = $it.Id; Name = $it.Name; Ok = $false; Skipped = $false
                                            Msg = "部分子项写入失败（其余已写入）：$($errs -join '；')" }

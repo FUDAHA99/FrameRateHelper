@@ -783,6 +783,15 @@ function Invoke-BoosterSetupDownload {
   }
 }
 
+# 「不再提醒此版本」的唯一判定。配置目录只有 GUI 自己的作用域知道：后台 runspace 里
+# $script:BoosterUserConfigDir 是空的，提权时读配置直接抛错被吞，跳过记录等于不存在。
+# 所以自动检查在后台只联网，拿到结果回到界面线程再调这里过滤。强制更新永远不可跳过。
+function Test-BoosterUpdateSkipped($Info) {
+  if (-not $Info -or $Info.Mandatory) { return $false }
+  $skipped = "$((Get-BoosterUpdateConfig).SkippedVersion)"
+  [bool]($skipped -and $skipped -eq "$($Info.Version)")
+}
+
 function Test-BoosterUpdate {
   param(
     [Parameter(Mandatory)][string]$CurrentVersion,
@@ -798,9 +807,9 @@ function Test-BoosterUpdate {
     $mandatory = [bool]($minimum -and (Compare-BoosterVersion $CurrentVersion $minimum) -lt 0)
     # 用户点过「不再提醒此版本」的就不再弹；出了更新的版本会重新提醒。
     # 手动检查（-IncludeSkipped）例外：用户主动点按钮就是想看结果，不该被跳过记录挡住
-    if (-not $IncludeSkipped -and -not $mandatory) {
-      $cfg = Get-BoosterUpdateConfig
-      if ("$($cfg.SkippedVersion)" -eq "$($m.version)") { return $null }
+    if (-not $IncludeSkipped -and
+        (Test-BoosterUpdateSkipped ([pscustomobject]@{ Version = "$($m.version)"; Mandatory = $mandatory }))) {
+      return $null
     }
     $setupUrl = "$($m.setupUrl)"
     $sha = "$($m.sha256)"

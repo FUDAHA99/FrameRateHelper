@@ -9075,9 +9075,12 @@ function Start-UpdateCheck {
   $script:UpdateCheckBusy = $true
   try {
     $ps = [PowerShell]::Create()
+    # 后台只联网、一律带 -IncludeSkipped：「不再提醒此版本」记在受保护的 per-SID 配置目录里，
+    # 这个 runspace 不知道它在哪（提权时读配置抛错被吞），跳过记录会被当成不存在，
+    # 勾过「不再提醒」的版本每次启动照弹。跳过判断在下面回到界面线程做。
     [void]$ps.AddScript({
       param($ModulePath, $Cur)
-      try { . $ModulePath; Test-BoosterUpdate -CurrentVersion $Cur } catch { $null }
+      try { . $ModulePath; Test-BoosterUpdate -CurrentVersion $Cur -IncludeSkipped } catch { $null }
     }).AddArgument($script:UpdaterPath).AddArgument($script:GuiVersion)
     $script:UpdateJob = $ps
     $script:UpdateAsync = $ps.BeginInvoke()
@@ -9089,6 +9092,8 @@ function Start-UpdateCheck {
       try {
         $r = @($script:UpdateJob.EndInvoke($script:UpdateAsync))
         $found = $r | Where-Object { $_ } | Select-Object -First 1
+        # 用 GUI 自己的配置目录判断，和勾选「不再提醒」时写入的是同一个文件
+        if ($found -and (Test-BoosterUpdateSkipped $found)) { $found = $null }
         if ($found) {
           # 新版本第一次出现就直接弹详情；同一版本本次运行只自动弹一次，标题栏入口常驻
           $isNew = ("$($found.Version)" -ne "$(if ($script:UpdateInfo) { $script:UpdateInfo.Version })")
