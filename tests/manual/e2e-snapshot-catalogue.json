@@ -1,0 +1,816 @@
+{
+  "CleanupTaskPrefix": "DeltaForceBooster-RestorePowerOverride",
+  "EngineSha256": "6300DCFF71FEC65D3F2ACE785B798C4C1E721178E7A7EB9D86F8193D1CDF503F",
+  "EngineVersion": "0.17.1",
+  "GameExeNames": [
+    "DeltaForce.exe",
+    "DeltaForceClient-Win64-Shipping.exe",
+    "DeltaForceClient.exe"
+  ],
+  "GamePathExeNames": [
+    "DeltaForce.exe",
+    "DeltaForceClient-Win64-Shipping.exe"
+  ],
+  "Items": [
+    {
+      "Admin": true,
+      "Id": "power-ultimate",
+      "Kind": "power",
+      "Name": "电源计划切换到「卓越性能」",
+      "Ops": [],
+      "Reboot": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "power-tuning",
+      "Kind": "multi",
+      "Name": "电源计划隐藏项深度调优（USB/调度/时间片）",
+      "Ops": [
+        {
+          "Kind": "pcfg",
+          "Label": "USB3 链路电源管理=关闭",
+          "Setting": "d4e98f31-5ffe-4ce1-be31-1b38b384c009",
+          "Sub": "2a737441-1930-4402-8d77-b2bebba308a3",
+          "Value": 0
+        },
+        {
+          "Kind": "pcfg",
+          "Label": "处理器性能时间检查间隔=5000ms",
+          "Setting": "4d2b0152-7d5c-498b-88e2-34345392a2c5",
+          "Sub": "54533251-82be-4824-96c1-47b60b740d00",
+          "Value": 5000
+        },
+        {
+          "Kind": "pcfg",
+          "Label": "大小核调度策略=高性能核心",
+          "Optional": true,
+          "Setting": "93b8b6dc-0698-4d1c-9ee4-0644e900c85d",
+          "Sub": "54533251-82be-4824-96c1-47b60b740d00",
+          "Value": 1
+        },
+        {
+          "Kind": "pcfg",
+          "Label": "短任务大小核调度=高性能核心",
+          "Optional": true,
+          "Setting": "bae08b81-2d5e-4688-ad6a-13243356654b",
+          "Sub": "54533251-82be-4824-96c1-47b60b740d00",
+          "Value": 1
+        },
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Label": "关闭电源节流",
+          "Name": "PowerThrottlingOff",
+          "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerThrottling",
+          "Value": 1
+        }
+      ],
+      "Reboot": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "powerplan-lock",
+      "Kind": "sched",
+      "Name": "锁定电源计划（防游戏偷改回去）",
+      "Ops": [],
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "hags",
+      "Kind": "multi",
+      "Name": "开启硬件加速 GPU 计划（HAGS）",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "HwSchMode",
+          "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers",
+          "Value": 2
+        }
+      ],
+      "Reboot": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Id": "game-mode",
+      "Kind": "multi",
+      "Name": "开启 Windows 游戏模式",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "AutoGameModeEnabled",
+          "Path": "HKCU:\\Software\\Microsoft\\GameBar",
+          "Value": 1
+        },
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "AllowAutoGameMode",
+          "Path": "HKCU:\\Software\\Microsoft\\GameBar",
+          "Value": 1
+        }
+      ],
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Id": "dvr-off",
+      "Kind": "multi",
+      "Name": "关闭 Xbox 后台录制（Game DVR）",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "GameDVR_Enabled",
+          "Path": "HKCU:\\System\\GameConfigStore",
+          "Value": 0
+        },
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "AppCaptureEnabled",
+          "Path": "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR",
+          "Value": 0
+        }
+      ],
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "prio-separation",
+      "Kind": "multi",
+      "Name": "前台程序调度权重（Win32PrioritySeparation=40）",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "Win32PrioritySeparation",
+          "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\PriorityControl",
+          "Value": 40
+        }
+      ],
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "paging-exec",
+      "Kind": "multi",
+      "Name": "内核代码常驻内存（DisablePagingExecutive）",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "DisablePagingExecutive",
+          "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management",
+          "Value": 1
+        }
+      ],
+      "Reboot": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Id": "wer-off",
+      "Kind": "multi",
+      "Name": "关闭 Windows 错误报告",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "Disabled",
+          "Path": "HKCU:\\Software\\Microsoft\\Windows\\Windows Error Reporting",
+          "Value": 1
+        }
+      ],
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "mem-compress-off",
+      "Kind": "multi",
+      "Name": "关闭内存压缩与页面合并",
+      "Ops": [
+        {
+          "Feature": "mc",
+          "Kind": "mmagent",
+          "Label": "内存压缩"
+        },
+        {
+          "Feature": "pc",
+          "Kind": "mmagent",
+          "Label": "页面合并"
+        }
+      ],
+      "Reboot": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Id": "transparency-off",
+      "Kind": "multi",
+      "Name": "关闭窗口透明特效",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "EnableTransparency",
+          "Path": "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+          "Value": 0
+        }
+      ],
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Id": "visualfx-perf",
+      "Kind": "multi",
+      "Name": "视觉效果调整为最佳性能（改变系统外观）",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "VisualFXSetting",
+          "Path": "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VisualEffects",
+          "Value": 2
+        }
+      ],
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Id": "mouse-accel-off",
+      "Kind": "multi",
+      "Name": "关闭鼠标「提高指针精确度」（电竞常规操作）",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "String",
+          "Name": "MouseSpeed",
+          "Path": "HKCU:\\Control Panel\\Mouse",
+          "Value": "0"
+        },
+        {
+          "Kind": "reg",
+          "Kind2": "String",
+          "Name": "MouseThreshold1",
+          "Path": "HKCU:\\Control Panel\\Mouse",
+          "Value": "0"
+        },
+        {
+          "Kind": "reg",
+          "Kind2": "String",
+          "Name": "MouseThreshold2",
+          "Path": "HKCU:\\Control Panel\\Mouse",
+          "Value": "0"
+        }
+      ],
+      "Reboot": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "mpo-off",
+      "Kind": "multi",
+      "Name": "禁用 MPO 多平面叠加（治闪烁/卡顿）",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "OverlayTestMode",
+          "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows\\Dwm",
+          "Value": 5
+        }
+      ],
+      "Reboot": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "net-throttling-off",
+      "Kind": "multi",
+      "Name": "解除多媒体网络限流",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Label": "网络限流指数（-1 即 0xffffffff 不限流）",
+          "Name": "NetworkThrottlingIndex",
+          "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile",
+          "Value": -1
+        }
+      ],
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "sys-responsiveness",
+      "Kind": "multi",
+      "Name": "提高系统响应度（MMCSS 后台保留=10%）",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Label": "后台 CPU 保留比例",
+          "Name": "SystemResponsiveness",
+          "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile",
+          "Value": 10
+        }
+      ],
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "sysmain-off",
+      "Kind": "multi",
+      "Name": "禁用 SysMain 预取服务",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Label": "SysMain 启动类型（4=禁用）",
+          "Name": "Start",
+          "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\SysMain",
+          "Value": 4
+        }
+      ],
+      "Reboot": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "wsearch-off",
+      "Kind": "multi",
+      "Name": "禁用 Windows Search 索引服务",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Label": "WSearch 启动类型（4=禁用）",
+          "Name": "Start",
+          "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WSearch",
+          "Value": 4
+        }
+      ],
+      "Reboot": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "hibernate-off",
+      "Kind": "multi",
+      "Name": "关闭休眠与快速启动",
+      "Ops": [
+        {
+          "Kind": "hib",
+          "Label": "休眠"
+        }
+      ],
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "gpu-pstate-lock",
+      "Kind": "multi",
+      "Name": "禁止显卡动态降频（锁 P-State）",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "DisableDynamicPstate",
+          "Path": "[RUNTIME]",
+          "PathPatterns": [
+            "^HKLM:\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Class\\\\\\{4d36e968-e325-11ce-bfc1-08002be10318\\}\\\\\\d{4}$"
+          ],
+          "Runtime": "Get-GpuClassKeyPath",
+          "Template": "regpath",
+          "Value": 1
+        }
+      ],
+      "OpsRuntime": "Get-GpuClassKeyPath",
+      "Reboot": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Check": "Get-NvAutoOptStatus",
+      "Id": "nv-autoopt-off",
+      "Kind": "check",
+      "Name": "NVIDIA App 自动优化体检（手动关闭）",
+      "Ops": [],
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "gpu-irq-affinity",
+      "Kind": "multi",
+      "Name": "显卡中断绑核（固定到高性能核）",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Label": "中断策略=指定处理器",
+          "Name": "DevicePolicy",
+          "Path": "[RUNTIME]",
+          "PathPatterns": [
+            "^HKLM:\\\\SYSTEM\\\\CurrentControlSet\\\\Enum\\\\PCI\\\\VEN_(10DE|1002)&[^\\\\]+\\\\[^\\\\]+\\\\Device Parameters\\\\Interrupt Management\\\\Affinity Policy$"
+          ],
+          "Runtime": "Get-GpuIrqOps",
+          "Template": "regpath",
+          "Value": 4
+        },
+        {
+          "Kind": "reg",
+          "Kind2": "Binary",
+          "Name": "AssignmentSetOverride",
+          "Path": "[RUNTIME]",
+          "PathPatterns": [
+            "^HKLM:\\\\SYSTEM\\\\CurrentControlSet\\\\Enum\\\\PCI\\\\VEN_(10DE|1002)&[^\\\\]+\\\\[^\\\\]+\\\\Device Parameters\\\\Interrupt Management\\\\Affinity Policy$"
+          ],
+          "Runtime": "Get-GpuIrqOps",
+          "Template": "regpath",
+          "Value": "[RUNTIME]"
+        }
+      ],
+      "OpsRuntime": "Get-GpuIrqOps",
+      "Reboot": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "mmcss-games",
+      "Kind": "multi",
+      "Name": "MMCSS 游戏任务档位拉满",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Label": "GPU 优先级",
+          "Name": "GPU Priority",
+          "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games",
+          "Value": 8
+        },
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Label": "任务优先级",
+          "Name": "Priority",
+          "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games",
+          "Value": 6
+        },
+        {
+          "Kind": "reg",
+          "Kind2": "String",
+          "Label": "调度类别",
+          "Name": "Scheduling Category",
+          "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games",
+          "Value": "High"
+        },
+        {
+          "Kind": "reg",
+          "Kind2": "String",
+          "Label": "文件IO优先级",
+          "Name": "SFIO Priority",
+          "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games",
+          "Value": "High"
+        }
+      ],
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Id": "windowed-opt-off",
+      "Kind": "multi",
+      "Name": "关闭「窗口化游戏优化」",
+      "Ops": [
+        {
+          "Key": "SwapEffectUpgradeEnable",
+          "Kind": "kvstr",
+          "Label": "窗口化游戏优化",
+          "Name": "DirectXUserGlobalSettings",
+          "Path": "HKCU:\\Software\\Microsoft\\DirectX\\UserGpuPreferences",
+          "Value": "0"
+        }
+      ],
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Check": "Get-PcieLinkStatus",
+      "Id": "pcie-check",
+      "Kind": "check",
+      "Name": "PCIe 通道体检（纯检测，不改设置）",
+      "Ops": [],
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Check": "Get-VcRedistStatus",
+      "Id": "vcredist-check",
+      "Kind": "check",
+      "Name": "VC++ 运行库体检（纯检测，不改设置）",
+      "Ops": [],
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Check": "Get-MemoryXmpStatus",
+      "Id": "xmp-check",
+      "Kind": "check",
+      "Name": "内存频率 / XMP·A-XMP·EXPO·DOCP 体检（纯检测）",
+      "Ops": [],
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Id": "shader-cache-clean",
+      "Kind": "cache",
+      "Name": "★ 解决掉帧：清理着色器缓存（实验功能，不保证生效）",
+      "Ops": [],
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "dyntick-off",
+      "Kind": "multi",
+      "Name": "禁用动态计时器（bcdedit）",
+      "Ops": [
+        {
+          "Kind": "bcd",
+          "Label": "动态计时器",
+          "Name": "disabledynamictick",
+          "Value": "yes"
+        }
+      ],
+      "Reboot": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Id": "fso-off",
+      "Kind": "multi",
+      "Name": "为游戏禁用全屏优化",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "String",
+          "Name": "[GAME_EXE_PATH]",
+          "Path": "HKCU:\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers",
+          "Template": "game-path",
+          "Value": "~ DISABLEDXMAXIMIZEDWINDOWEDMODE"
+        }
+      ],
+      "RequiresGame": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": false,
+      "Id": "gpu-pref",
+      "Kind": "multi",
+      "Name": "强制游戏使用高性能 GPU",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "String",
+          "Name": "[GAME_EXE_PATH]",
+          "Path": "HKCU:\\Software\\Microsoft\\DirectX\\UserGpuPreferences",
+          "Template": "game-path",
+          "Value": "GpuPreference=2;"
+        }
+      ],
+      "RequiresGame": true,
+      "Tier": "safe"
+    },
+    {
+      "Admin": true,
+      "Id": "game-priority",
+      "Kind": "multi",
+      "Name": "游戏进程 CPU/IO 优先级提到「高」",
+      "Ops": [
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "CpuPriorityClass",
+          "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\[GAME_EXE_NAME]\\PerfOptions",
+          "Template": "game-exe",
+          "Value": 3
+        },
+        {
+          "Kind": "reg",
+          "Kind2": "DWord",
+          "Name": "IoPriority",
+          "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\[GAME_EXE_NAME]\\PerfOptions",
+          "Template": "game-exe",
+          "Value": 3
+        }
+      ],
+      "RequiresGame": true,
+      "Tier": "safe"
+    }
+  ],
+  "LockTaskPrefix": "DeltaForceBooster-PowerPlanLock",
+  "RestoreWhitelist": [
+    {
+      "Names": [
+        "CpuPriorityClass",
+        "IoPriority"
+      ],
+      "Pattern": "^HKLM:\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\\\\(DeltaForceClient-Win64-Shipping|DeltaForceClient|DeltaForce)\\.exe\\\\PerfOptions$",
+      "Type": "pattern"
+    },
+    {
+      "Names": [
+        "DisableDynamicPstate"
+      ],
+      "Pattern": "^HKLM:\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Class\\\\\\{4d36e968-e325-11ce-bfc1-08002be10318\\}\\\\\\d{4}$",
+      "Type": "pattern"
+    },
+    {
+      "Names": [
+        "DeviceDesc"
+      ],
+      "Pattern": "^HKLM:\\\\SYSTEM\\\\CurrentControlSet\\\\Enum\\\\PCI\\\\VEN_(10DE|1002)&[^\\\\]+\\\\[^\\\\]+$",
+      "Type": "pattern"
+    },
+    {
+      "Names": [
+        "AssignmentSetOverride",
+        "DevicePolicy"
+      ],
+      "Pattern": "^HKLM:\\\\SYSTEM\\\\CurrentControlSet\\\\Enum\\\\PCI\\\\VEN_(10DE|1002)&[^\\\\]+\\\\[^\\\\]+\\\\Device Parameters\\\\Interrupt Management\\\\Affinity Policy$",
+      "Type": "pattern"
+    },
+    {
+      "Names": [
+        "MouseSpeed",
+        "MouseThreshold1",
+        "MouseThreshold2"
+      ],
+      "Path": "HKCU:\\Control Panel\\Mouse",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "DirectXUserGlobalSettings",
+        "[GAME_EXE_PATH]"
+      ],
+      "Path": "HKCU:\\Software\\Microsoft\\DirectX\\UserGpuPreferences",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "AllowAutoGameMode",
+        "AutoGameModeEnabled"
+      ],
+      "Path": "HKCU:\\Software\\Microsoft\\GameBar",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "[GAME_EXE_PATH]"
+      ],
+      "Path": "HKCU:\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "VisualFXSetting"
+      ],
+      "Path": "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VisualEffects",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "AppCaptureEnabled"
+      ],
+      "Path": "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "EnableTransparency"
+      ],
+      "Path": "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "Disabled"
+      ],
+      "Path": "HKCU:\\Software\\Microsoft\\Windows\\Windows Error Reporting",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "GameDVR_Enabled"
+      ],
+      "Path": "HKCU:\\System\\GameConfigStore",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "NetworkThrottlingIndex",
+        "SystemResponsiveness"
+      ],
+      "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "GPU Priority",
+        "Priority",
+        "SFIO Priority",
+        "Scheduling Category"
+      ],
+      "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "OverlayTestMode"
+      ],
+      "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows\\Dwm",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "HwSchMode"
+      ],
+      "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "Attributes"
+      ],
+      "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerSettings\\2a737441-1930-4402-8d77-b2bebba308a3\\d4e98f31-5ffe-4ce1-be31-1b38b384c009",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "Attributes"
+      ],
+      "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerSettings\\54533251-82be-4824-96c1-47b60b740d00\\4d2b0152-7d5c-498b-88e2-34345392a2c5",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "Attributes"
+      ],
+      "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerSettings\\54533251-82be-4824-96c1-47b60b740d00\\93b8b6dc-0698-4d1c-9ee4-0644e900c85d",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "Attributes"
+      ],
+      "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerSettings\\54533251-82be-4824-96c1-47b60b740d00\\bae08b81-2d5e-4688-ad6a-13243356654b",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "PowerThrottlingOff"
+      ],
+      "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerThrottling",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "Win32PrioritySeparation"
+      ],
+      "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\PriorityControl",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "DisablePagingExecutive",
+        "PagingFiles"
+      ],
+      "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "Start"
+      ],
+      "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\SysMain",
+      "Type": "value"
+    },
+    {
+      "Names": [
+        "Start"
+      ],
+      "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WSearch",
+      "Type": "value"
+    }
+  ],
+  "Schema": "dfb-e2e-catalogue/2",
+  "StaticIssues": [],
+  "TaskNamePrefix": "DeltaForceBooster",
+  "ToolSchemeName": "三角洲优化 · 卓越性能",
+  "UltimateGuid": "e9a42b02-d5df-448d-aa00-03f14749eb61"
+}

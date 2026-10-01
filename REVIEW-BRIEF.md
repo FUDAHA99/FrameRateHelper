@@ -74,7 +74,7 @@ Read-ValidatedBackup -> Assert-BackupDocument -> Assert-BackupOperation
 2. **`Save-AppUiPreferences` 的第三个参数**（窗口宽度）默认「读回磁盘当前值」。
    切主题、关窗会不会意外抹掉用户拉好的宽度？
 3. **`startup-logs` 的 ACL** —— 唯一一个 `$UsersRead = $true` 的受保护子目录，普通用户应只读不可写。
-4. **非中文区域设置** —— 上游有过「非中文 locale 上软件完全无法启动」的事故（`367fd75`），
+4. **非中文区域设置** —— 上游有过「非中文 locale 上软件完全无法启动」的事故（`eb7f415`），
    本分支新增代码含中文字符串，英文/日文 Windows 上需复验。
 
 ---
