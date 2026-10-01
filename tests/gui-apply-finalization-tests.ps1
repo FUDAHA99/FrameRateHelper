@@ -770,7 +770,7 @@ Add-Type -AssemblyName WindowsBase
     $s8Rows = @($script:AFReply.Results)
     Assert-True ((@($s8Rows | ForEach-Object { "$($_.Id)" }) -join ',') -ceq 'fixture-sys,fixture-sys2' -and
       $s8Rows[0].Ok -eq $true -and $s8Rows[0].Changed -eq $true -and $s8Rows[1].Ok -eq $false -and $s8Rows[1].Changed -eq $true -and
-      "$($s8Rows[1].Msg)".StartsWith('部分子项写入失败（其余已写入）', [StringComparison]::Ordinal)) `
+      "$($s8Rows[1].Msg)".StartsWith('部分子项写入失败（其余 1 项已完成）', [StringComparison]::Ordinal)) `
       ("[S8] the real engine's rows are not 'fixture-sys written and recorded, fixture-sys2 partially written, then stop at the " +
        "backup failure' (expected fixture-sys:Ok=True:Changed=True, fixture-sys2:Ok=False:Changed=True with the partial-write message): " +
        "rows [$(@($s8Rows | ForEach-Object { "$($_.Id):Ok=$($_.Ok):Changed=$($_.Changed)" }) -join ', ')]")
@@ -812,7 +812,7 @@ Add-Type -AssemblyName WindowsBase
     Assert-AFRouting 'S9' @('fixture-sys', 'fixture-sys2') @('fixture-cache')
 
     # S10（攻击复核 A1–A4），**真实 Invoke-Apply**：exit 2 且**没有任何一行 Ok**。唯一的系统项第一个子操作已写入，
-    # 第二个子操作的系统写入被拒（Ok=false、Changed=true、「部分子项写入失败（其余已写入）」），备份完整落盘；
+    # 第二个子操作的系统写入被拒（Ok=false、Changed=true、「部分子项写入失败（其余 1 项已完成）」），备份完整落盘；
     # 随后本地缓存收尾炸掉。系统已被改动，重复点击会叠加执行。S6–S9 每个回复都有 Ok 行且首行都是 Ok，
     # 「至少一行 Ok / 首行 Ok 才算已返回」或传输层「没有 Ok 行就当失败抛出」只有这里会红。
     Set-AFEngineRealScenario @(
@@ -833,7 +833,7 @@ Add-Type -AssemblyName WindowsBase
     Assert-AFEngineChildSaw 'S10' @('fixture-sys')
 
     # S11（攻击复核 A7、A8），**真实 Invoke-Apply**：exit 3 且什么都没改成——第一项第一个子操作写 prepared 备份就落盘失败，
-    # 引擎停手不做第二项（Results 只有 1 行），交回只含 prepared 记录的 .pending.json，UnrecordedNames 为空。
+    # 引擎停手不做第二项（Results 只有 1 行），盘上没有任何撤销记录、不交回备份文件，UnrecordedNames 为空。
     # 界面收尾抛的是普通脚本错误（RuntimeException）而不是 IOException：生产里 WPF / 界面代码的失败
     # 几乎都是这类，S1–S10 注入的全是 IOException，按异常类型分流的变异只有这里会红。
     Set-AFEngineRealScenario @(

@@ -3967,7 +3967,9 @@ function Invoke-Apply([string[]]$ItemIds, [string]$GamePath, [bool]$AllowRisky, 
   # 系统写入并回读成功后再标 applied。GUID 文件名避免并发/同秒冲突，核心 mutex 负责串行化。
   $applyTime = Get-Date
   $applyId = [guid]::NewGuid().ToString('D')
-  $journal = [pscustomobject]@{ Document = $null; Path = $null; Error = $null; CurrentItem = $null; CurrentOpIndex = 0 }
+  # PersistedOps：真正落过盘的撤销记录条数。写失败的那一条只在内存里（Write-BytesAtomic 抛错时
+  # 盘上的文件原样不动），收尾判断「有没有抢救出备份」只能看它，不能看内存里的 Ops
+  $journal = [pscustomobject]@{ Document = $null; Path = $null; Error = $null; CurrentItem = $null; CurrentOpIndex = 0; PersistedOps = 0 }
   if ($needsJournal) {
     try {
       Initialize-ProtectedStore
@@ -4005,6 +4007,7 @@ function Invoke-Apply([string[]]$ItemIds, [string]$GamePath, [bool]$AllowRisky, 
     $journal.CurrentOpIndex++
     try { Write-BackupDocumentAtomic $journal.Path $journal.Document }
     catch { $journal.Error = $_.Exception.Message; throw "备份 prepared 状态持久化失败：$($journal.Error)" }
+    $journal.PersistedOps = @($journal.Document.Ops).Count
     $op.Id
   }
   $markApplied = {
@@ -4117,20 +4120,22 @@ function Invoke-Apply([string[]]$ItemIds, [string]$GamePath, [bool]$AllowRisky, 
               $errs += "$opLabel：$($_.Exception.Message)"
             }
           }
-          # 备份落不了盘时循环会提前停下，后面的子项根本没执行，绝不能再说「其余已写入」
+          # 备份落不了盘时循环会提前停下，后面的子项根本没执行，绝不能说「其余已写入」。
+          # 执行过且没出错的子项也不一定写过系统（已是目标状态、本机没有的可选电源项），
+          # 所以计数统一叫「已完成」
           $notRun = @($it.Ops).Count - $attempted
+          $done = $attempted - $errs.Count
           if ($errs.Count -eq 0 -and $notRun -eq 0) {
             $msg = $(if ($notes.Count -gt 0) { "已写入（$($notes -join '；')）" } else { '已写入' })
             $results += [pscustomobject]@{ Id = $it.Id; Name = $it.Name; Ok = $true; Skipped = $false; Msg = $msg }
           } elseif ($notRun -gt 0) {
-            $done = $attempted - $errs.Count
             $head = $(if ($done -gt 0) { "部分子项写入失败（$done 项已完成，其后 $notRun 项因备份无法落盘未执行）" }
                       else { "失败（备份无法落盘，其余 $notRun 项未执行）" })
             $results += [pscustomobject]@{ Id = $it.Id; Name = $it.Name; Ok = $false; Skipped = $false
                                            Msg = $(if ($errs.Count -gt 0) { "$head：$($errs -join '；')" } else { $head }) }
-          } elseif ($errs.Count -lt @($it.Ops).Count) {
+          } elseif ($done -gt 0) {
             $results += [pscustomobject]@{ Id = $it.Id; Name = $it.Name; Ok = $false; Skipped = $false
-                                           Msg = "部分子项写入失败（其余已写入）：$($errs -join '；')" }
+                                           Msg = "部分子项写入失败（其余 $done 项已完成）：$($errs -join '；')" }
           } else {
             $results += [pscustomobject]@{ Id = $it.Id; Name = $it.Name; Ok = $false; Skipped = $false
                                            Msg = "失败：$($errs -join '；')" }
@@ -4158,7 +4163,9 @@ function Invoke-Apply([string[]]$ItemIds, [string]$GamePath, [bool]$AllowRisky, 
   if (-not $journal.Path) {
     $bf = $null
   } elseif ($journal.Error) {
-    if (@($journal.Document.Ops).Count -gt 0) { $bf = $journal.Path }
+    # 第一条 prepared 就没写进去时，盘上的 .pending.json 一条记录都没有；还把它交回去，
+    # 界面和命令行就会说「备份已保存」「已抢救出部分备份」
+    if ($journal.PersistedOps -gt 0) { $bf = $journal.Path }
     else { Remove-Item -LiteralPath $journal.Path -Force -ErrorAction SilentlyContinue }
   } elseif (@($journal.Document.Ops).Count -gt 0) {
     try {
