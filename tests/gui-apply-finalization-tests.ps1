@@ -46,6 +46,14 @@ Assert-True ($failureHelpers.Count -eq 1) 'Apply failure context helper missing 
   foreach ($phrase in '系统批次可能已经执行','请不要重复点击「执行优化」','优先点击「还原设置」','点击「重新检测」','post-admin finalization error') {
     Assert-True $post.UserMessage.Contains($phrase) "post-admin user message omitted: $phrase"
   }
+  Assert-True (-not $post.BackupError -and @($post.UnrecordedNames).Count -eq 0) 'a batch whose backup stayed intact was given a backup error or unrecorded names'
+  Assert-True (-not $preflight.BackupError -and @($preflight.UnrecordedNames).Count -eq 0) 'preflight failure invented a backup error or unrecorded names'
+  # 备份写盘失败的批次（独立复核遗留 2）：收尾在正常路径的告警之前就抛了，catch 只能凭这两样补告警
+  $failedBackup = Get-ApplyFailureContext $postError $true ([pscustomobject]@{
+    Backup = $backup; BackupError = 'fixture disk full'; UnrecordedNames = @('item A', '', 'item B') })
+  Assert-True ($failedBackup.BackupError -ceq 'fixture disk full' -and (@($failedBackup.UnrecordedNames) -join '|') -ceq 'item A|item B' -and
+    $failedBackup.BackupPath -ceq $backup) `
+    "post-admin failure lost the batch's backup error or unrecorded names (error '$($failedBackup.BackupError)', names [$(@($failedBackup.UnrecordedNames) -join '|')])"
 } $failureHelpers[0].Extent.Text
 
 # 真实点击路径：不再在源码文本里 IndexOf '$adminBatchReturned = $true'——那行被注释掉后
@@ -121,6 +129,8 @@ $afReal = @{
   # 真 Set-BusyState（攻击复核 B7）：桩成 { $script:Busy = $On } 时，生产函数把标志写错名字，
   # 闸门、忙碌记录和 Update-TuningUi 读到的永远是 False，测试却量的是桩。
   BusyState = (Get-AFRenamedFunctionText $ast 'Set-BusyState' 'Invoke-AFRealSetBusyState')
+  # 备份写入失败的告警（日志两句 + BACKUP WRITE FAILED 弹窗）：正常收尾与收尾失败的 catch 共用的生产原文。
+  BackupAlarm = (Get-AFFunctionText $ast 'Show-ApplyBackupFailureAlarm')
   # 真 Update-ApplyProgress（复核 R3 msg）：处理器对引擎交回的每一行调它落「[失败] 项名 — 文案」实时日志。
   # 默认仍是空桩（S0–S13 的日志断言按此编写），S14–S31 打开它，核对界面没有改写引擎的结果文案。
   Progress = (Get-AFRenamedFunctionText $ast 'Update-ApplyProgress' 'Invoke-AFRealUpdateApplyProgress')
@@ -151,6 +161,7 @@ Add-Type -AssemblyName WindowsBase
 & {
   param([string]$FunctionText, [string]$HandlerText, [hashtable]$Real)
   Invoke-Expression $FunctionText
+  Invoke-Expression $Real.BackupAlarm
   $applyHandler = & ([scriptblock]::Create($HandlerText))
   Assert-True ($applyHandler -is [scriptblock]) 'Apply click handler body did not materialise as a scriptblock'
 
@@ -908,6 +919,19 @@ Add-Type -AssemblyName WindowsBase
       # 非空锚点：确认处理器面对的真是生产整形出的非 0 退出码，而不是退回了上面的 exit-0 手写桩。
       Assert-True ($null -ne $script:AFReply -and [int]$script:AFReply.EngineExitCode -eq $ExpectedExit) `
         "$Label did not come back through the real result shaping as engine exit $ExpectedExit"
+      # 引擎报了备份写入失败（BackupError）就必须恰好告警一次（弹窗 + 严重告警日志），不论收尾在告警之前（S9、S38：本地执行器）
+      # 还是之后（S8、S11：界面刷新）失败；告警排在「执行收尾失败」之前（同 S8 的顺序）。没报就一次都不许有。
+      $alarmDialogs = @($script:AFDialogs | Where-Object { "$($_.En)" -ceq 'BACKUP WRITE FAILED' }).Count
+      $severeIdx = @(for ($i = 0; $i -lt $script:AFLog.Count; $i++) { if ($script:AFLog[$i].StartsWith('！！严重：备份文件写入失败', [StringComparison]::Ordinal)) { $i } })
+      if ($script:AFReply.BackupError) {
+        Assert-True ($alarmDialogs -eq 1 -and $severeIdx.Count -eq 1 -and $severeIdx[0] -lt $idx) `
+          ("$Label reported a backup-write failure ('$($script:AFReply.BackupError)') but the GUI raised the backup-failure alarm " +
+           "$alarmDialogs time(s) as a dialog and $($severeIdx.Count) time(s) as a severe log line (at [$($severeIdx -join ',')], finalization failure at $idx); " +
+           "expected exactly once, before the finalization failure, even when finalization fails before the alarm (dialogs [$(Get-AFDialogTitles)])")
+      } else {
+        Assert-True ($alarmDialogs -eq 0 -and $severeIdx.Count -eq 0) `
+          "$Label had no backup-write failure but the GUI raised a backup-failure alarm (dialogs [$(Get-AFDialogTitles)]; severe log lines $($severeIdx.Count))"
+      }
       $idx
     }
     # 传输链路核对：GUI 请求 → 真 Invoke-ElevatedEngineAction 写的请求文件 → 引擎真实分发 → Invoke-Apply。
@@ -1100,13 +1124,15 @@ Add-Type -AssemblyName WindowsBase
     # 名单一律按引擎顺序（执行顺序）逐字比较：S30 的执行顺序与字母序相反，引擎、界面日志、弹窗或命令行排过序再列都会在那里红；
     # 其余场景的引擎顺序恰好是字母序，单看它们分不出「按顺序」与「排过序」（复攻四 N30/N31）。
     # -BackupError：备份失败的原文不是夹具注入的（S36 改名失败，原文由系统给出、先由场景锚定），按它核对弹窗与告警。
-    function Assert-AFBackupFailureSurfaced([string]$Scenario, $Published, [string[]]$ExpectedUnrecorded, [string]$BackupError) {
+    # -Titles：收尾失败的场景（S38）在备份失败弹窗之后还有 APPLY FINALIZATION FAILED。
+    function Assert-AFBackupFailureSurfaced([string]$Scenario, $Published, [string[]]$ExpectedUnrecorded, [string]$BackupError,
+                                            [string]$Titles = 'CONFIRM APPLY|BACKUP WRITE FAILED') {
       $engineLost = (@($Published.Data.UnrecordedNames | ForEach-Object { "$_" }) -join '|')
       $wantLost = (@($ExpectedUnrecorded | Where-Object { $_ }) -join '|')
       Assert-True ($engineLost -ceq $wantLost) `
         "[$Scenario] the real engine's UnrecordedNames were [$engineLost], expected exactly [$wantLost] (the items it changed before the backup-write failure)"
-      Assert-True ((Get-AFDialogTitles) -ceq 'CONFIRM APPLY|BACKUP WRITE FAILED') `
-        "[$Scenario] the Apply handler did not show exactly the BACKUP WRITE FAILED dialog after the confirmation: dialogs [$(Get-AFDialogTitles)]"
+      Assert-True ((Get-AFDialogTitles) -ceq $Titles) `
+        "[$Scenario] the Apply handler did not show exactly the BACKUP WRITE FAILED dialog after the confirmation: dialogs [$(Get-AFDialogTitles)], expected [$Titles]"
       # 弹窗正文（复攻二）：「· 项名」逐行列出的就是用户手动回退的全部线索，按引擎顺序逐字核对；一个都没有时写「（无）」，
       # 并带上注入的落盘错误原文。只核对标题时，弹窗漏列、多列（把没动过系统的项也列进去）都看不见。
       $bwf = @($script:AFDialogs | Where-Object { "$($_.En)" -ceq 'BACKUP WRITE FAILED' })[0]
@@ -1980,6 +2006,29 @@ Add-Type -AssemblyName WindowsBase
       (Get-AFLogIndex "备份已保存：$pendingBackup") -lt $failIdx) `
       '[S9] exit-3 all-ok batch did not log the salvaged backup exactly once before finalization failed'
     Assert-AFRouting 'S9' @('fixture-sys', 'fixture-sys2') @('fixture-cache')
+
+    # S38（独立复核遗留 2），**真实 Invoke-Apply**：exit 3 的批次已经返回，本地缓存收尾在备份失败告警之前就炸了。
+    # 告警原来写在逐项日志、本地执行器、目录同步之后，异常一冲进 catch，「备份写入失败」弹窗与「以下已生效的改动…」名单
+    # 都到不了用户眼前，只剩「执行收尾失败」与「备份已保存」——Get-ApplyFailureContext 原来也只带回 Backup。
+    # 形状同 S8：fixture-sys 写入并记账；fixture-sys2 的 op1 写入并记账、op2 写 prepared 时落盘失败（部分写入）。
+    $s38Items = @(
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1'))),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1'), (New-AFRealOp 'op2' -PrepareFails)))
+    )
+    Set-AFEngineRealScenario $s38Items 'fixture disk full'
+    Invoke-AFApplyClick 'S38' 'local' @('fixture-sys', 'fixture-sys2', 'fixture-cache') $true -RealProgress
+    $failIdx = Assert-AFFinalizationAfterBatch '[S38] exit-3 batch whose local finalization failed before the backup alarm' 3 'fixture cache cleanup exploded'
+    # 锚点：失败点真的在告警之前——逐项日志（生产 Update-ApplyProgress，本场景接的是原文）与「执行完成」汇总都排在本地执行器之后，
+    # 一行都没写出来；本地执行器确实收到了缓存项（由下面的路由断言核对）。
+    Assert-True ($script:AFProgressCalls -eq 0 -and (Get-AFLogIndex '执行完成：') -lt 0) `
+      ("[S38] fixture problem: the local finalization did not fail before the per-item log and the summary " +
+       "(Update-ApplyProgress calls $($script:AFProgressCalls); log: $($script:AFLog -join ' / '))")
+    $pub = Get-AFEngineResult
+    Assert-AFBackupFailureSurfaced 'S38' $pub @('fixture system item', 'fixture system item 2') `
+      -Titles 'CONFIRM APPLY|BACKUP WRITE FAILED|APPLY FINALIZATION FAILED'
+    Assert-AFSalvageSurfaced 'S38' $pub @('fixture-sys:reg:op1=applied', 'fixture-sys2:reg:op1=applied')
+    Assert-AFRouting 'S38' @('fixture-sys', 'fixture-sys2') @('fixture-cache')
+    Assert-AFEngineChildSaw 'S38' @('fixture-sys', 'fixture-sys2')
 
     # S10（攻击复核 A1–A4），**真实 Invoke-Apply**：exit 2 且**没有任何一行 Ok**。唯一的系统项第一个子操作已写入，
     # 第二个子操作的系统写入被拒（Ok=false、Changed=true、「部分子项写入失败（其余 1 项已完成）」），备份完整落盘；

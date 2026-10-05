@@ -7689,6 +7689,13 @@ function Get-ApplyFailureContext($ErrorRecord, [bool]$AdminBatchReturned, $Reply
   $backupPath = $(if ($Reply -and $Reply.PSObject.Properties['Backup'] -and $Reply.Backup) {
                     "$($Reply.Backup)"
                   } else { $null })
+  # 批次已返回但备份写盘失败：收尾可能在正常路径的告警之前就抛了，catch 要凭这两样把告警补上
+  $backupError = $(if ($Reply -and $Reply.PSObject.Properties['BackupError'] -and $Reply.BackupError) {
+                     "$($Reply.BackupError)"
+                   } else { $null })
+  $unrecordedNames = @(if ($backupError -and $Reply.PSObject.Properties['UnrecordedNames']) {
+                         @($Reply.UnrecordedNames) | Where-Object { $_ } | ForEach-Object { "$_" }
+                       })
   $userMessage = $message
   if ($AdminBatchReturned) {
     $userMessage = "系统批次可能已经执行，但界面收尾没有完成。请不要重复点击「执行优化」。" +
@@ -7701,8 +7708,25 @@ function Get-ApplyFailureContext($ErrorRecord, [bool]$AdminBatchReturned, $Reply
     ExceptionType = $exceptionType
     ScriptStackTrace = $stack
     BackupPath = $backupPath
+    BackupError = $backupError
+    UnrecordedNames = $unrecordedNames
     UserMessage = $userMessage
   }
+}
+
+# 备份写盘失败 = 「系统改了、凭据没记全」，比任何一项优化失败都严重：
+# 日志 + 弹窗双通道警告，并把已生效项名和抢救出的部分备份当场给到用户。
+# 执行优化的正常收尾与收尾失败的 catch 共用这一处：收尾在正常路径的告警之前就抛了，这份警告也不能丢。
+function Show-ApplyBackupFailureAlarm([string]$BackupError, [string[]]$UnrecordedNames, [string]$BackupPath) {
+  $lost = @($UnrecordedNames | Where-Object { $_ })
+  Write-Log "！！严重：备份文件写入失败（$BackupError），剩余优化项已中止执行。"
+  if ($lost.Count -gt 0) { Write-Log "！！以下已生效的改动可能没有完整的备份记录：$($lost -join '、')" }
+  $warn = "备份文件写入失败，本轮执行已中止。`n`n以下改动已经生效、但可能没有完整的备份记录：`n" +
+          $(if ($lost.Count -gt 0) { @($lost | ForEach-Object { "· $_" }) -join "`n" } else { '（无）' }) +
+          "`n`n失败原因：$BackupError" +
+          $(if ($BackupPath) { "`n`n已抢救出部分备份：$(Split-Path -Leaf $BackupPath)，「还原设置」可还原其中已记录的部分。" }) +
+          "`n`n其余项如需回退，请按上面的项名手动处理，或点「导出诊断报告」发给开发者。"
+  Show-ConfirmDialog '备份写入失败' 'BACKUP WRITE FAILED' $warn '我已知晓' -InfoOnly | Out-Null
 }
 
 # GUI 由 EngineHost 在一次 UAC 后长期持有管理员令牌。Apply/Restore/Beta 仍使用
@@ -9719,6 +9743,7 @@ $ui.ApplyBtn.Add_Click({
   if ($script:Busy) { Write-Log '正在执行优化/还原，请等本轮结束。'; return }
   $adminBatchReturned = $false
   $adminBatchBackupLogged = $false
+  $adminBatchBackupAlarmed = $false
   $r = $null
   try {
     if (Test-TuningExperimentActive) { throw '自动调优实验期间已锁定配置，请使用实验「下一步」，或先停止并回滚' }
@@ -9874,18 +9899,10 @@ $ui.ApplyBtn.Add_Click({
     $ui.ProgText.Text = "执行完成：$okN 成功 / $($failList.Count) 失败 / $($skipList.Count) 跳过$att"
     $ui.ProgCount.Text = "共 $total 项"
     if ($r.Backup -and -not $adminBatchBackupLogged) { Write-Log "备份已保存：$($r.Backup)" }
-    # 备份写盘失败 = 「系统改了、凭据没记全」，比任何一项优化失败都严重：
-    # 日志 + 弹窗双通道警告，并把已生效项名和抢救出的部分备份当场给到用户
     if ($r.BackupError) {
-      $lost = @($r.UnrecordedNames)
-      Write-Log "！！严重：备份文件写入失败（$($r.BackupError)），剩余优化项已中止执行。"
-      if ($lost.Count -gt 0) { Write-Log "！！以下已生效的改动可能没有完整的备份记录：$($lost -join '、')" }
-      $warn = "备份文件写入失败，本轮执行已中止。`n`n以下改动已经生效、但可能没有完整的备份记录：`n" +
-              $(if ($lost.Count -gt 0) { @($lost | ForEach-Object { "· $_" }) -join "`n" } else { '（无）' }) +
-              "`n`n失败原因：$($r.BackupError)" +
-              $(if ($r.Backup) { "`n`n已抢救出部分备份：$(Split-Path -Leaf $r.Backup)，「还原设置」可还原其中已记录的部分。" }) +
-              "`n`n其余项如需回退，请按上面的项名手动处理，或点「导出诊断报告」发给开发者。"
-      Show-ConfirmDialog '备份写入失败' 'BACKUP WRITE FAILED' $warn '我已知晓' -InfoOnly | Out-Null
+      # 先置标记再告警：告警本身抛了也不在 catch 里重弹第二次
+      $adminBatchBackupAlarmed = $true
+      Show-ApplyBackupFailureAlarm "$($r.BackupError)" @($r.UnrecordedNames) "$($r.Backup)"
     }
     Write-Log "执行完成：共 $total 项 — $okN 成功、$($failList.Count) 失败、$($skipList.Count) 跳过$(if ($attList.Count -gt 0) { "、$($attList.Count) 项体检发现问题" })。"
     # 日志在另一页了：有失败/体检问题就给标签打角标，提示那边有内容值得看
@@ -9915,6 +9932,13 @@ $ui.ApplyBtn.Add_Click({
     }
   } catch {
     $failure = Get-ApplyFailureContext $_ $adminBatchReturned $r
+    # 批次已返回且备份写盘失败，收尾却在上面的告警之前就抛了（本地执行器、逐项日志、目录同步都排在它前面）：
+    # 「备份写入失败」与「以下已生效的改动…」是用户手动回退的唯一线索，比收尾失败更要紧，先补上
+    if ($failure.AdminBatchReturned -and $failure.BackupError -and -not $adminBatchBackupAlarmed) {
+      $adminBatchBackupAlarmed = $true
+      try { Show-ApplyBackupFailureAlarm $failure.BackupError $failure.UnrecordedNames $failure.BackupPath }
+      catch { Write-Log "！！备份写入失败的告警没能显示：$($_.Exception.Message)；失败原因：$($failure.BackupError)" }
+    }
     if ($failure.AdminBatchReturned) {
       Write-Log "执行收尾失败：$($failure.ErrorMessage)"
       if ($failure.BackupPath -and -not $adminBatchBackupLogged) {
