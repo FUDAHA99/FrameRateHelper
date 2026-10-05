@@ -8941,19 +8941,27 @@ function Show-UpdateDialog($UpdInfo) {
   $script:UpdDlg.Add_Closed({
     if ($script:DlState -and -not $script:DlState.Done) { $script:DlState.Cancel = $true }
   })
-  $script:UpdDlg.ShowDialog() | Out-Null
-  if (-not $UpdInfo.Mandatory -and $script:UpdUi.SkipChk.IsChecked -and (Get-Command Set-BoosterSkipVersion -ErrorAction SilentlyContinue)) {
-    # 落盘结果只能进 if 条件：混进函数输出会把调用方的 $skipped 变成数组；
-    # 也不能丢掉——没存上的话下次启动还会弹，日志不能说已经设置好了
-    if (Set-BoosterSkipVersion $UpdInfo.Version) {
-      Write-Log "已设置不再提醒 v$($UpdInfo.Version)。"
-    } else {
-      Write-Log "「不再提醒 v$($UpdInfo.Version)」没能保存，下次启动仍会提示这个版本。"
+  # 模态期间对话框自己泵消息，30 分钟的周期复查、忙碌结束的补弹都会在这里面派发。标题栏入口和手动检查直接调本函数，
+  # 所以「已有更新对话框」得由本函数挂上：Show-DetectedUpdateDialog 见到它就不再嵌套弹第二个——嵌套的那个会改写
+  # $script:UpdDlg / $script:UpdUi / $script:UpdDlgInfo，外层对话框的按钮从此操作的是内层（已关闭）的窗口，用户关不掉它。
+  # 先存后还：经 Show-DetectedUpdateDialog 进来时标志已经挂着，不能在这里提前放开。
+  $outerUpdateDialogOpen = $script:UpdateDialogOpen
+  $script:UpdateDialogOpen = $true
+  try {
+    $script:UpdDlg.ShowDialog() | Out-Null
+    if (-not $UpdInfo.Mandatory -and $script:UpdUi.SkipChk.IsChecked -and (Get-Command Set-BoosterSkipVersion -ErrorAction SilentlyContinue)) {
+      # 落盘结果只能进 if 条件：混进函数输出会把调用方的 $skipped 变成数组；
+      # 也不能丢掉——没存上的话下次启动还会弹，日志不能说已经设置好了
+      if (Set-BoosterSkipVersion $UpdInfo.Version) {
+        Write-Log "已设置不再提醒 v$($UpdInfo.Version)。"
+      } else {
+        Write-Log "「不再提醒 v$($UpdInfo.Version)」没能保存，下次启动仍会提示这个版本。"
+      }
+      # 返回「用户选择了跳过」：调用方据此把标题栏的更新入口一并收起，语义保持一致
+      return $true
     }
-    # 返回「用户选择了跳过」：调用方据此把标题栏的更新入口一并收起，语义保持一致
-    return $true
-  }
-  $false
+    $false
+  } finally { $script:UpdateDialogOpen = $outerUpdateDialogOpen }
 }
 
 # 自动检查发现新版时的统一弹窗出口。同一版本每次程序运行只自动弹一次；用户选了

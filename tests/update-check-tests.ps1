@@ -16,6 +16,8 @@ using namespace System.Management.Automation.Language
 #   Show-DetectedUpdateDialog —— 也要看跳过记录（跳过判断放进 Show-DetectedUpdateDialog 本身）；
 #   手动检查当面弹过的版本记进 UpdatePromptedVersion，忙碌结束时不再自动补弹；
 #   勾了「不再提醒」却没存上时，日志如实写「没能保存」，不再说「已设置不再提醒」。
+#   嵌套对话框（X 场景）：标题栏入口与手动检查直接调 Show-UpdateDialog，原来不挂 $script:UpdateDialogOpen，周期复查
+#   检出更新的版本时会在它的模态帧里再建一个对话框、改写外层正在用的全局状态；现在由 Show-UpdateDialog 自己挂上、先存后还。
 #
 # 这里跑的是生产原文，不是复制品：
 #   - Start-UpdateCheck / Start-ManualUpdateCheck / Show-DetectedUpdateDialog / Show-UpdateDialog /
@@ -690,21 +692,36 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
   #     按钮必须在屏幕上且可用；由生产的按钮处理器设 DialogResult、关窗。
   # ShowDialog() 的返回值原样交回生产代码。在生产的调用链里（tick 的 catch {} 会吞异常），所以这里不抛：
   # 夹具自身的问题记到 FxDialogProblems，用户关不掉窗口之类的产品问题记到这次调用的 UserProblem，都由驱动方核对。
+  # 「用户」只认屏幕上的那个窗口：观察与点击都按名字在本次真正 ShowDialog() 的窗口里找控件（FxDlgWindow），不经生产的
+  # $script:UpdDlg / $script:UpdUi —— 两者平时是同一批对象；被嵌套的第二个对话框改写之后，用户点的仍是自己眼前那个窗口的按钮（X 场景）。
+  # FxDuringDialog：窗口渲染出来、用户动手之前在模态帧里做一次的事（例如让周期复查的定时器触发）；FxHoldDialogUntil：用户等它成立再动手。
+  # 在一个更新对话框的模态期间生产又要显示第二个：产品问题，记进 FxNestedDialogs（由 DLG.no-nested 与各场景报），不再真的显示它——
+  # 夹具的「用户」一次只扮演一个窗口；外层窗口照常由用户操作，改写的后果照样看得见。
   Add-Type -AssemblyName UIAutomationProvider
   $script:FxCloseWith = ''
   $script:FxMainWindowCloses = 0
+  $script:FxDialogDepth = 0
+  $script:FxNestedDialogs = New-Object 'System.Collections.Generic.List[string]'
+  $script:FxNestedReported = 0
+  $script:FxDuringDialog = $null
+  $script:FxHoldDialogUntil = $null
   function Invoke-FixtureUserSeesUpdateDialog($Info) {
+    if ($script:FxDialogDepth -gt 0) {
+      $script:FxNestedDialogs.Add("v$($Info.DisplayVersion) 在 v$($script:FxDlgCall.DisplayVersion) 的更新对话框模态期间被弹出")
+      return $false
+    }
     $call = [pscustomobject]@{
       Version = "$($Info.Version)"; DisplayVersion = "$($Info.DisplayVersion)"; Mandatory = [bool]$Info.Mandatory
       Rendered = $false; VerText = ''; UpdBtnVisibility = ''
       SkipVisibility = ''; SkipEnabled = $false; SkipOnScreen = $false
       ResetSkipVisibility = ''; ResetSkipOnScreen = $false
       UserTicked = $false; ClosedWith = ''; UserProblem = ''; Reported = $false
-      ShowDialogResult = $null; DialogResultAfter = $null
+      ShowDialogResult = $null; DialogResultAfter = $null; Held = ''
     }
     $script:FxDialogCalls.Add($call)
     $dlg = $script:UpdDlg
     if (-not ($dlg -is [Windows.Window])) { $script:FxDialogProblems.Add('生产 Show-UpdateDialog 没有建出 $script:UpdDlg 窗口'); return $null }
+    $script:FxDlgWindow = $dlg
     $dlg.WindowStartupLocation = [Windows.WindowStartupLocation]::Manual
     $dlg.Left = -32000
     $dlg.Top = -32000
@@ -725,9 +742,15 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
     $script:FxUserTimer.Add_Tick({ Invoke-FixtureDialogUser })
     $script:FxUserTimer.Start()
     $res = $null
+    $script:FxDialogDepth++
     try { $res = $dlg.ShowDialog() }
     catch { $script:FxDialogProblems.Add("真模态 ShowDialog() 抛出异常：$($_.Exception.Message)") }
-    finally { $script:FxUserTimer.Stop() }
+    finally { $script:FxUserTimer.Stop(); $script:FxDialogDepth-- }
+    # 嵌套的 Show-UpdateDialog 不一定走得到上面的深度检查：模态期间 $window 是本函数的替身，它在 `.Owner = $window` 就抛了
+    # （被 tick 的 catch {} 吞掉）—— 但在那之前已经改写了 $script:UpdDlg / UpdDlgInfo，外层的按钮照样失灵。按改写本身认
+    if (-not [object]::ReferenceEquals($script:UpdDlg, $dlg)) {
+      $script:FxNestedDialogs.Add("v$($call.DisplayVersion) 的更新对话框模态期间生产又建了一个（`$script:UpdDlgInfo 成了 v$($script:UpdDlgInfo.DisplayVersion)）")
+    }
     $call.ShowDialogResult = $res
     $call.DialogResultAfter = $dlg.DialogResult
     $res
@@ -735,7 +758,7 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
 
   # 用户的手（定时器 tick 里跑；不抛）
   function Invoke-FixtureDialogUser {
-    $dlg = $script:UpdDlg
+    $dlg = $script:FxDlgWindow
     $call = $script:FxDlgCall
     try {
       if ($null -eq $script:FxDlgActedAt) {
@@ -743,15 +766,34 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
           if ([DateTime]::UtcNow -gt $script:FxDlgDeadline) { throw '更新对话框 20 秒内没有真正显示（渲染）出来' }
           return
         }
+        $chk = $dlg.FindName('SkipChk')
+        if (-not $call.Rendered) {
+          $call.Rendered = $true
+          $call.VerText = "$($dlg.FindName('VerText').Text)"
+          $call.UpdBtnVisibility = "$($dlg.FindName('UpdBtn').Visibility)"
+          if ($chk -is [Windows.Controls.CheckBox]) {
+            $call.SkipVisibility = "$($chk.Visibility)"
+            $call.SkipEnabled = [bool]$chk.IsEnabled
+            $call.SkipOnScreen = [bool]$chk.IsVisible
+          }
+          if ($script:FxDuringDialog) {
+            # 只对第一个渲染出来的对话框做一次
+            $during = $script:FxDuringDialog
+            $script:FxDuringDialog = $null
+            $script:FxDlgHoldDeadline = [DateTime]::UtcNow.AddSeconds(40)
+            $call.Held = 'holding'
+            & $during
+          }
+        }
+        if ($call.Held -ceq 'holding') {
+          if ($script:FxHoldDialogUntil -and -not (& $script:FxHoldDialogUntil)) {
+            if ([DateTime]::UtcNow -gt $script:FxDlgHoldDeadline) { throw '更新对话框开着时要等的事 40 秒内没有完成' }
+            return
+          }
+          $call.Held = 'released'
+        }
         $script:FxDlgActedAt = [DateTime]::UtcNow
-        $call.Rendered = $true
-        $call.VerText = "$($script:UpdUi.VerText.Text)"
-        $call.UpdBtnVisibility = "$($script:UpdUi.UpdBtn.Visibility)"
-        $chk = $script:UpdUi.SkipChk
         if ($chk -is [Windows.Controls.CheckBox]) {
-          $call.SkipVisibility = "$($chk.Visibility)"
-          $call.SkipEnabled = [bool]$chk.IsEnabled
-          $call.SkipOnScreen = [bool]$chk.IsVisible
           if ($script:FxProbeResetButtons) {
             Reset-UpdDialogButtons
             $call.ResetSkipVisibility = "$($chk.Visibility)"
@@ -769,7 +811,7 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
           $call.ResetSkipVisibility = '(no SkipChk)'
         }
         $with = $(if ($script:FxCloseWith) { $script:FxCloseWith } elseif ($call.Mandatory) { 'GoBtn' } else { 'LaterBtn' })
-        $btn = $script:UpdUi[$with]
+        $btn = $dlg.FindName($with)
         if (-not ($btn -is [Windows.Controls.Button] -and $btn.IsVisible -and $btn.IsEnabled)) {
           $call.UserProblem = "对话框里的 $with 不在屏幕上或不可用，用户没法这样关窗"
           Close-FixtureDialogForcibly
@@ -802,7 +844,7 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
   function Close-FixtureDialogForcibly {
     $script:FxDlgForced = $true
     $script:AllowMandatoryDialogClose = $true
-    try { $script:UpdDlg.Close() } catch {}
+    try { $script:FxDlgWindow.Close() } catch {}
   }
   function Get-FixtureDialogCall([int]$Index) {
     if ($Index -ge 0 -and $Index -lt $script:FxDialogCalls.Count) { $script:FxDialogCalls[$Index] } else { $null }
@@ -923,6 +965,11 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
     $script:FxCloseWith = ''
     $script:FxOpenUrlCalls.Clear()
     $script:FxMainWindowCloses = 0
+    $script:FxDialogDepth = 0
+    $script:FxNestedDialogs.Clear()
+    $script:FxNestedReported = 0
+    $script:FxDuringDialog = $null
+    $script:FxHoldDialogUntil = $null
     $script:ActiveTuningExperiment = $null
     Assert-Fixture (-not (Test-TuningExperimentActive)) 'Test-TuningExperimentActive 在没有实验时返回了真'
     Assert-Fixture ("$($ui.UpdateBtn.Visibility)" -ceq $script:XamlUpdateBtnVisibility -and $null -eq $script:UpdateInfo -and
@@ -960,6 +1007,23 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
         Assert-Soft (-not $c.UserProblem) "[DLG.user-can-close] v$($c.DisplayVersion) 的更新对话框：$($c.UserProblem)（$Via）"
       }
     }
+    # 一个更新对话框还开着，生产又弹第二个（嵌套在它的模态帧里）：每次嵌套报一次
+    while ($script:FxNestedReported -lt $script:FxNestedDialogs.Count) {
+      Assert-Soft $false ("[DLG.no-nested] $($script:FxNestedDialogs[$script:FxNestedReported])：第二个对话框改写了外层正在用的 `$script:UpdDlg 等全局状态，" +
+        "外层对话框的按钮从此操作的不是它自己（$Via）")
+      $script:FxNestedReported++
+    }
+  }
+
+  # 生产周期 tick 原文挂到真 DispatcherTimer 上，只触发一次；不等它（X 场景在更新对话框的模态帧里用它）
+  function Start-FixturePeriodicTick {
+    $script:FxPeriodicFired = 0
+    $script:FxPeriodicTimer = New-Object Windows.Threading.DispatcherTimer
+    $script:FxPeriodicTimer.Interval = [TimeSpan]::FromMilliseconds(30)
+    # 先挂的先跑：先记一次并停表（只要一次），再跑生产 tick 原文
+    $script:FxPeriodicTimer.Add_Tick({ $script:FxPeriodicFired++; $script:FxPeriodicTimer.Stop() })
+    $script:FxPeriodicTimer.Add_Tick($script:PeriodicTickBlock)
+    $script:FxPeriodicTimer.Start()
   }
 
   # 一次自动检查：startup = ContentRendered 的直接调用；periodic = 生产周期 tick 原文挂到真 DispatcherTimer 上触发
@@ -971,13 +1035,7 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
       Start-UpdateCheck
       Assert-Fixture ([bool]$script:UpdateCheckBusy) 'Start-UpdateCheck 返回后没有处于检查中：更新模块未加载或后台 runspace 没有启动'
     } else {
-      $script:FxPeriodicFired = 0
-      $script:FxPeriodicTimer = New-Object Windows.Threading.DispatcherTimer
-      $script:FxPeriodicTimer.Interval = [TimeSpan]::FromMilliseconds(30)
-      # 先挂的先跑：先记一次并停表（只要一次），再跑生产 tick 原文
-      $script:FxPeriodicTimer.Add_Tick({ $script:FxPeriodicFired++; $script:FxPeriodicTimer.Stop() })
-      $script:FxPeriodicTimer.Add_Tick($script:PeriodicTickBlock)
-      $script:FxPeriodicTimer.Start()
+      Start-FixturePeriodicTick
       Assert-Fixture (Wait-FixtureDispatcher { $script:FxPeriodicFired -ge 1 } 10000) '周期复查定时器 10 秒内没有触发'
       Assert-Fixture ($script:FxPeriodicFired -eq 1) "周期复查定时器触发了 $script:FxPeriodicFired 次，应为 1 次"
       Assert-True ([bool]$script:UpdateCheckBusy) '[P.periodic-starts-check] 生产的周期复查 tick 触发后没有开始更新检查'
@@ -1472,6 +1530,65 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
       ("[K2.gate] v$x 的跳过记录在检出之后、忙碌结束之前写下，忙碌结束时的自动补弹（Show-DetectedUpdateDialog）无视它弹了出来" +
        "（$($script:FxDialogCalls.Count) 次）：自动弹窗的共同出口没有看跳过记录")
   }
+
+  # ---------- X：标题栏入口 / 手动检查打开的对话框还开着，周期复查检出了更新的版本 ----------
+  # 这两个入口直接调 Show-UpdateDialog。对话框模态期间自己泵消息，30 分钟的周期复查照常派发；检出新版本时 tick 走
+  # Show-DetectedUpdateDialog，它只认 $script:UpdateDialogOpen。这个标志原来只由 Show-DetectedUpdateDialog 自己挂，于是第二个
+  # 对话框嵌套弹在第一个的模态帧里：$script:UpdDlg / UpdUi / UpdDlgInfo 被改写，外层对话框的「稍后再说」去设内层（已关闭）
+  # 窗口的 DialogResult，抛异常、关不掉。用户点的是自己眼前那个窗口的按钮（夹具按名字在 FxDlgWindow 里找）。
+  # 新版本被压下之后不能丢：入口亮着、UpdateInfo 是它，下一次忙碌结束时照常补弹。
+  function Invoke-NewerWhileOpenScenario([string]$Tag, [int]$N, [string]$Entry) {
+    $x = New-FixtureVersion $N
+    $y = New-FixtureVersion ($N + 1)
+    Initialize-FixtureScenario $Tag
+    $script:ManifestFake.Body = New-FixtureManifestJson $y "$y-display" $script:GuiVersion
+    [void](Invoke-FixtureManifestProbe $y $false)
+    $script:FxNewerManifest = $script:ManifestFake.Body
+    $script:ManifestFake.Body = New-FixtureManifestJson $x "$x-display" $script:GuiVersion
+    [void](Invoke-FixtureManifestProbe $x $false)
+    if ($Entry -ceq 'title-bar') {
+      # 启动检查弹出 v$x，用户点「稍后再说」：标题栏入口亮着
+      Invoke-FixtureUpdateCheck 'startup'
+      Assert-True ($script:FxDialogCalls.Count -eq 1 -and "$($ui.UpdateBtn.Visibility)" -ceq 'Visible') `
+        "[$Tag.entry-lit] 启动检查应弹一次 v$x、点「稍后再说」后标题栏入口亮着（弹窗 $($script:FxDialogCalls.Count) 次，入口 $($ui.UpdateBtn.Visibility)）"
+    }
+    $before = $script:FxDialogCalls.Count
+    # 对话框开着的时候发布了 v$y，30 分钟的周期复查在它的模态帧里触发；用户等这一轮检查跑完再点「稍后再说」
+    $script:FxHitsAtDuring = -1
+    $script:FxDuringDialog = {
+      $script:ManifestFake.Body = $script:FxNewerManifest
+      $script:FxHitsAtDuring = $script:ManifestFake.CreateCount
+      Start-FixturePeriodicTick
+    }
+    $script:FxHoldDialogUntil = { $script:FxPeriodicFired -ge 1 -and -not $script:UpdateCheckBusy }
+    if ($Entry -ceq 'title-bar') { $opened = Invoke-FixtureTitleBarClick } else { Invoke-FixtureManualCheck; $opened = $true }
+    $script:FxHoldDialogUntil = $null
+    $d = Get-FixtureDialogCall $before
+    Assert-Fixture ($opened -and $null -ne $d -and $d.Version -ceq $x) "$Tag：$Entry 没有打开 v$x 的更新对话框（弹窗累计 $($script:FxDialogCalls.Count) 次）"
+    Assert-Fixture ($d.Held -ceq 'released' -and $script:FxPeriodicFired -eq 1 -and $script:FxHitsAtDuring -ge 0 -and
+      $script:ManifestFake.CreateCount -eq $script:FxHitsAtDuring + 1 -and -not $script:UpdateCheckBusy -and -not $script:UpdateTimer.IsEnabled) `
+      ("$($Tag)：v$x 的对话框开着时，周期复查没有触发并跑完一轮检查（Held=[$($d.Held)]，触发 $script:FxPeriodicFired 次，" +
+       "取清单 $($script:ManifestFake.CreateCount - $script:FxHitsAtDuring) 次）")
+    # 锚点：tick 确实在对话框开着时拿到了 v$y，走到了「检出新版本」那一支
+    Assert-Fixture ((Get-FixtureLogCount "检测到新版本 v$y-display") -eq 1) `
+      "$($Tag)：周期复查没有在 v$x 的对话框开着时检出 v$y（日志：$($script:FxLog -join ' / ')）"
+    Assert-Soft ($script:FxNestedDialogs.Count -eq 0 -and $script:FxDialogCalls.Count -eq $before + 1) `
+      ("[$Tag.no-nested-dialog] 从 $Entry 入口打开的 v$x 对话框还开着，周期复查检出 v$y 时又建了一个更新对话框" +
+       "（嵌套：$($script:FxNestedDialogs -join ' / ')；顶层弹窗 $($script:FxDialogCalls.Count - $before) 次）")
+    Assert-Soft ($d.ClosedWith -ceq 'LaterBtn' -and -not $d.UserProblem -and $d.ShowDialogResult -eq $false) `
+      "[$Tag.outer-closes] v$x 的对话框没能用它自己的「稍后再说」正常关掉（$(Format-FixtureClose $d)；$($d.UserProblem)）"
+    Assert-Soft ($null -ne $script:UpdateInfo -and "$($script:UpdateInfo.Version)" -ceq $y -and "$($ui.UpdateBtn.Visibility)" -ceq 'Visible') `
+      "[$Tag.newer-pending] 压下的 v$y 应留在标题栏入口上（UpdateInfo [$($script:UpdateInfo.Version)]，入口 $($ui.UpdateBtn.Visibility)）"
+    Assert-Soft ((Get-FixtureSkipRecord) -ceq '') "[$Tag.record-unchanged] 用户没勾「不再提醒」，跳过记录却成了 [$(Get-FixtureSkipRecord)]"
+    $n = $script:FxDialogCalls.Count
+    Invoke-FixtureBusyCycle
+    Assert-Soft ($script:FxDialogCalls.Count -eq $n + 1 -and (Get-FixtureDialogCall $n).Version -ceq $y) `
+      ("[$Tag.newer-prompted-later] v$y 在对话框开着时被检出、当时没弹，下一次执行优化/还原结束时应补弹一次" +
+       "（实际 $($script:FxDialogCalls.Count - $n) 次）")
+  }
+
+  Invoke-Scenario 'X1 title-bar dialog open, periodic check finds a newer version' { Invoke-NewerWhileOpenScenario 'X1' 27 'title-bar' }
+  Invoke-Scenario 'X2 manual-check dialog open, periodic check finds a newer version' { Invoke-NewerWhileOpenScenario 'X2' 55 'manual' }
 
   # ---------- N：清单不满足内置更新（退回浏览器下载）—— 对话框同样要给「不再提醒此版本」 ----------
 
