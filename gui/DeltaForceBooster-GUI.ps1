@@ -8954,11 +8954,11 @@ function Show-UpdateDialog($UpdInfo) {
       # 也不能丢掉——没存上的话下次启动还会弹，日志不能说已经设置好了
       if (Set-BoosterSkipVersion $UpdInfo.Version) {
         Write-Log "已设置不再提醒 v$($UpdInfo.Version)。"
-      } else {
-        Write-Log "「不再提醒 v$($UpdInfo.Version)」没能保存，下次启动仍会提示这个版本。"
+        # 返回「这个版本已跳过」：调用方据此把标题栏的更新入口一并收起，语义保持一致
+        return $true
       }
-      # 返回「用户选择了跳过」：调用方据此把标题栏的更新入口一并收起，语义保持一致
-      return $true
+      # 没存上就不算跳过：下次启动照样提示，入口也得留着——收起它，本次运行里就再也打不开这个版本的详情
+      Write-Log "「不再提醒 v$($UpdInfo.Version)」没能保存，下次启动仍会提示这个版本。"
     }
     $false
   } finally { $script:UpdateDialogOpen = $outerUpdateDialogOpen }
@@ -9457,7 +9457,7 @@ if ($script:LightThemeEnabled) {
 $ui.UpdateBtn.Add_Click({
   if (-not $script:UpdateInfo) { return }
   if (Test-TuningExperimentActive) { Write-Log '自动调优实验期间不安装更新，请先停止并回滚。'; return }
-  # 用户在详情框里勾了「不再提醒此版本」就把入口收起，和跳过语义保持一致
+  # 用户在详情框里勾了「不再提醒此版本」且存上了，就把入口收起，和跳过语义保持一致
   if (Show-UpdateDialog $script:UpdateInfo) { $ui.UpdateBtn.Visibility = 'Collapsed' }
 })
 # 忙碌关窗守卫（真正的防线在 Closing 上）：CloseBtn 只拦自绘按钮，外部程序发的

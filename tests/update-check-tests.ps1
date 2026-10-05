@@ -1713,6 +1713,29 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
        "（实际：$($script:FxLog -join ' / ')）")
     Assert-Soft ((Get-FixtureLogCount '已设置不再提醒') -eq 0) `
       "[V.no-false-success-log] 「不再提醒 v$x」没有存上，日志却写「已设置不再提醒」（实际：$($script:FxLog -join ' / ')）"
+    # 没存上就不算跳过：标题栏入口必须留着。三个调用方（自动弹窗、标题栏入口、手动检查）都按 Show-UpdateDialog 的返回值收起入口，
+    # 每一处都让用户再勾一次、再存不上一次（「没能保存」的日志条数是锚点：勾选与保存失败确实又发生了一次）
+    Assert-Soft ("$($ui.UpdateBtn.Visibility)" -ceq 'Visible') `
+      ("[V.button-kept] 「不再提醒 v$x」没能保存（下次启动仍会提示），自动弹窗关掉后标题栏入口却收起了（$($ui.UpdateBtn.Visibility)）：" +
+       '本次运行里再也打不开这个版本的详情')
+    $n = $script:FxDialogCalls.Count
+    $script:FxUserTicksSkip = $true
+    $clicked = Invoke-FixtureTitleBarClick
+    $script:FxUserTicksSkip = $false
+    $dc = Get-FixtureDialogCall $n
+    Assert-Soft ($clicked -and $null -ne $dc -and $dc.Version -ceq $x -and $dc.UserTicked -and (Get-FixtureLogCount '没能保存') -eq 2 -and
+      "$($ui.UpdateBtn.Visibility)" -ceq 'Visible') `
+      ("[V.click-button-kept] 从标题栏入口打开 v$x、勾「不再提醒」仍没能保存后，入口应留着（点击=$clicked，勾上=$($dc.UserTicked)，" +
+       "「没能保存」$(Get-FixtureLogCount '没能保存') 条，入口 $($ui.UpdateBtn.Visibility)）")
+    $n = $script:FxDialogCalls.Count
+    $script:FxUserTicksSkip = $true
+    Invoke-FixtureManualCheck
+    $script:FxUserTicksSkip = $false
+    $dm = Get-FixtureDialogCall $n
+    Assert-Soft ($null -ne $dm -and $dm.Version -ceq $x -and $dm.UserTicked -and (Get-FixtureLogCount '没能保存') -eq 3 -and
+      "$($ui.UpdateBtn.Visibility)" -ceq 'Visible') `
+      ("[V.manual-button-kept] 手动检查弹出 v$x、勾「不再提醒」仍没能保存后，标题栏入口应留着（弹窗 $($script:FxDialogCalls.Count - $n) 次，" +
+       "勾上=$($dm.UserTicked)，「没能保存」$(Get-FixtureLogCount '没能保存') 条，入口 $($ui.UpdateBtn.Visibility)）")
   }
 
   Assert-Soft ((Get-RealLocalUpdaterState) -ceq $localUpdaterBefore) `
