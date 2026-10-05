@@ -99,6 +99,14 @@ $engineDispatchBlock = @($engineAst.EndBlock.Statements | Where-Object {
   $_ -is [Management.Automation.Language.IfStatementAst] -and $_.Clauses.Count -eq 1 -and
   $_.Clauses[0].Item1.Extent.Text -eq '$didDispatch' })
 Assert-True ($engineDispatchFlag.Count -eq 1 -and $engineDispatchBlock.Count -eq 1) 'engine top-level action dispatch missing or duplicated'
+# 电源设置在注册表里的两个根（生产 Invoke-ApplyOp 拼隐藏项 Attributes 路径、Get-PowerSettingAc 读方案值都用它们）：
+# 从引擎顶层赋值语句原样取出，不在替身里手抄。
+$enginePowerRoots = @(foreach ($rootVar in '$script:PsRoot', '$script:PuRoot') {
+  $assign = @($engineAst.EndBlock.Statements | Where-Object {
+    $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq $rootVar })
+  Assert-True ($assign.Count -eq 1) "engine top-level assignment of $rootVar missing or duplicated"
+  $assign[0].Extent.Text
+})
 $afReal = @{
   # 改名后与下方的点击路径桩并存：桩只在 S6–S12 把 Apply 转交给它。
   Transport = (@(
@@ -113,14 +121,28 @@ $afReal = @{
   # 真 Set-BusyState（攻击复核 B7）：桩成 { $script:Busy = $On } 时，生产函数把标志写错名字，
   # 闸门、忙碌记录和 Update-TuningUi 读到的永远是 False，测试却量的是桩。
   BusyState = (Get-AFRenamedFunctionText $ast 'Set-BusyState' 'Invoke-AFRealSetBusyState')
+  # 真 Update-ApplyProgress（复核 R3 msg）：处理器对引擎交回的每一行调它落「[失败] 项名 — 文案」实时日志。
+  # 默认仍是空桩（S0–S13 的日志断言按此编写），S14–S31 打开它，核对界面没有改写引擎的结果文案。
+  Progress = (Get-AFRenamedFunctionText $ast 'Update-ApplyProgress' 'Invoke-AFRealUpdateApplyProgress')
   EngineDispatch = ($engineDispatchFlag[0].Extent.Text + "`r`n" + $engineDispatchBlock[0].Extent.Text)
-  EngineChild = (@(
+  # 复攻 R3 msg：子操作也跑生产原文 Invoke-ApplyOp（改名后由记录尝试的薄壳原样转调）。手写替身每个子操作恰好
+  # 写一条备份、从不返回「无需修改」附注，于是「尝试数」「备份条目数」「已完成数」永远相等，
+  # 拿 $journal.CurrentOpIndex 顶替尝试计数照样全绿。它依赖的比较、备份字段表和电源读取也用生产原文，
+  # 只有碰真注册表 / powercfg 的最底层原语在子进程里换成内存假注册表。
+  EngineChild = ((@(
     (Get-AFFunctionText $engineAst 'Write-BytesAtomic'),
     (Get-AFFunctionText $engineAst 'Get-ApplyExitCode'),
     (Get-AFFunctionText $engineAst 'Write-IpcResult'),
     (Get-AFFunctionText $engineAst 'Set-ApplyResultChangeState'),
-    (Get-AFRenamedFunctionText $engineAst 'Invoke-Apply' 'Invoke-AFRealApply')
-  ) -join "`r`n`r`n")
+    (Get-AFRenamedFunctionText $engineAst 'Invoke-Apply' 'Invoke-AFRealApply'),
+    (Get-AFRenamedFunctionText $engineAst 'Invoke-ApplyOp' 'Invoke-AFRealApplyOp'),
+    (Get-AFFunctionText $engineAst 'Test-ValueEqual'),
+    (Get-AFFunctionText $engineAst 'Test-FixedTimeEqual'),
+    (Get-AFFunctionText $engineAst 'Get-BackupOpFields'),
+    (Get-AFFunctionText $engineAst 'Test-PowerSettingHidden'),
+    (Get-AFFunctionText $engineAst 'Get-PowerSettingAc'),
+    (Get-AFFunctionText $engineAst 'Get-PowerSettingAcExplicit')
+  ) + @($enginePowerRoots)) -join "`r`n`r`n")
 }
 
 # 处理器里的 [Windows.Threading.DispatcherPriority]::Render 需要这个程序集；只加载，不建窗口。
@@ -146,7 +168,8 @@ Add-Type -AssemblyName WindowsBase
   $script:AFDecline = $null; $script:AFOnConfirm = $null; $script:AFTuningActive = $false
   $script:AFRebootAsked = @(); $script:AFRebootStarted = 0; $script:AFRebootAnswer = $false
   $script:AFScenario = $null; $script:AFReply = $null; $script:AFRealEngineError = $null
-  $fixtureBackup = 'C:\ProgramData\DeltaForceBooster\backup\fixture-backup.json'
+  $script:AFRealProgress = $false; $script:AFProgressCalls = 0; $script:AFLastRealProgress = $false; $script:AFLastProgText = $null
+  $fixtureBackup ='C:\ProgramData\DeltaForceBooster\backup\fixture-backup.json'
 
   # 真 Write-Log 写 WPF 并落盘、真 Invoke-ElevatedEngineAction 起提权子进程、真 Invoke-LocalNoBackupItems
   # 删缓存目录——全部桩掉，全程纯内存。Set-BusyState 跑生产原文：它遍历的控件在夹具的 $ui 里大多不存在
@@ -238,7 +261,12 @@ Add-Type -AssemblyName WindowsBase
     # 生产界面收尾的失败多是脚本 / WPF 异常而不是 IO：S11 用普通 throw（RuntimeException）。
     if ($script:AFFailAt -eq 'tail-script') { throw 'fixture tail script error' }
   }
-  function Update-ApplyProgress($Progress) { }
+  Invoke-Expression $Real.Progress
+  # 处理器按名字调 Update-ApplyProgress：-RealProgress 的场景把调用原样转给生产原文，并计数（锚点：
+  # 每一行都真的经过了它，界面日志断言不是空转）。
+  function Update-ApplyProgress($Progress) {
+    if ($script:AFRealProgress) { $script:AFProgressCalls++; Invoke-AFRealUpdateApplyProgress $Progress }
+  }
   function Set-LogBadge($N) { }
   function Show-HealthDialog($List) { }
   function Get-TelemetryOptimizationContext { [pscustomobject]@{ ItemIds = @(); ConfigTier = 'baseline' } }
@@ -268,8 +296,10 @@ Add-Type -AssemblyName WindowsBase
   }
   function Invoke-AFApplyClick([string]$Scenario, [string]$FailAt, [string[]]$Tags, [bool]$WithBackup, [switch]$ClickAgainDuringBatch,
                                [string]$Decline, [scriptblock]$DuringConfirm, [string]$NoWorkBecause, [switch]$TuningActive,
-                               [switch]$RebootNow) {
+                               [switch]$RebootNow, [switch]$RealProgress) {
     $script:AFLog = @(); $script:AFDialogs = @(); $script:AFApplyCalls = 0
+    $script:AFRealProgress = [bool]$RealProgress; $script:AFProgressCalls = 0; $script:AFLastRealProgress = [bool]$RealProgress
+    $script:AFLastProgText = $null
     $script:AFApplyRequests = @(); $script:AFLocalIds = @(); $script:AFBusyAtWork = @(); $script:AFBusyCalls = @()
     $script:AFRebootAsked = @(); $script:AFRebootStarted = 0; $script:AFRebootAnswer = [bool]$RebootNow
     $script:AFReply = $null; $script:AFRealEngineError = $null
@@ -300,7 +330,11 @@ Add-Type -AssemblyName WindowsBase
     $dispatcher | Add-Member -MemberType ScriptMethod -Name Invoke -Value { param($Action, $Priority) if ($Action) { $Action.Invoke() } } -Force
     $window = [pscustomobject]@{ Dispatcher = $dispatcher }
     try { & $applyHandler }
-    finally { $script:AFDecline = $null; $script:AFOnConfirm = $null; $script:AFTuningActive = $false }
+    finally {
+      $script:AFDecline = $null; $script:AFOnConfirm = $null; $script:AFTuningActive = $false; $script:AFRealProgress = $false
+      # 进度区最后停在的文字（处理器收尾写的完成度结论）：$ui 是本函数的局部表，返回后就拿不到了。
+      $script:AFLastProgText = "$($ui.ProgText.Text)"
+    }
     # 唯一的同意框必须逐项列出本次勾选（攻击复核 B2/B8）：列表空着、或把未勾选的行也列进去，
     # 用户是在没看到/看错清单的情况下同意写系统。
     $confirmDialogs = @($script:AFDialogs | Where-Object { $_.Chip -ceq '确认执行' })
@@ -501,9 +535,17 @@ Add-Type -AssemblyName WindowsBase
   $afChildSeen = Join-Path $afRoot 'scripts\af-invoke-apply.json'
   $afEngineResult = Join-Path $afRoot 'scripts\af-engine-result.json'
   $afSystemWrites = Join-Path $afRoot 'scripts\af-system-writes.txt'
+  $afOpAttempts = Join-Path $afRoot 'scripts\af-op-attempts.txt'
+  $afOpsShapes = Join-Path $afRoot 'scripts\af-ops-shapes.txt'
+  $afBackupFailureHits = Join-Path $afRoot 'scripts\af-backup-failures.txt'
+  $afCliOutput = Join-Path $afRoot 'scripts\af-cli-output.txt'
+  $afPowerProbes = Join-Path $afRoot 'scripts\af-power-probes.txt'
+  $afBackupWrites = Join-Path $afRoot 'scripts\af-backup-writes.txt'
   $afBackupDir = Join-Path $afRoot 'scripts\backup'
   $pendingBackup = Join-Path $afBackupDir 'backup-fixture.pending.json'
   $completeBackup = Join-Path $afBackupDir 'backup-fixture.json'
+  # S36：夹具先占住改名目标 backup-fixture.json 时写进去的内容（复攻五 V56）。
+  $afRenameBlocker = 'af-rename-blocker'
   # 「命令未识别」来自替身缺桩（引擎或传输层新增了依赖），不是产品回归：单独报，不许冒充任何一种杀死。
   $afMissingCommand = '识别为 cmdlet|is not recognized as the name of a cmdlet'
   [void][IO.Directory]::CreateDirectory((Join-Path $afRoot 'scripts'))
@@ -525,9 +567,11 @@ Add-Type -AssemblyName WindowsBase
     # 替身引擎：读真实请求文件，按引擎尾部分发的顺序由生产 Get-ApplyExitCode 推出退出码、
     # 生产 Write-IpcResult 原子发布结果，再以该退出码退出（S9 模拟外壳改写进程退出码）。
     # 发布的结果文件另抄一份给父进程：传输层读完就删，失败消息要能说清是引擎发布错了还是传输层读错了。
-    # 真实 Invoke-Apply（S8/S10/S11）只桩叶子：系统写入（Invoke-ApplyOp 记一笔「已写入」）与备份落盘
-    # （Write-BackupDocumentAtomic 真写到临时备份目录；文档里一出现场景标记的那个子操作的 prepared 记录，
-    # 这次及之后的落盘都失败——按语义触发而不是按「第几次写入」，引擎多一次或少一次原子写不会挪动故障点）；
+    # 真实 Invoke-Apply（S8/S10/S11/S14–S31）连同真实 Invoke-ApplyOp 只桩叶子：注册表与 powercfg 原语换成内存假注册表
+    # （Set-RegValue / Show-PowerSetting / Set-PowerSettingAc 每次系统写入记一笔，WriteError 在这一层被拒），
+    # 备份落盘（Write-BackupDocumentAtomic 真写到临时备份目录；文档里一出现场景标记的那个子操作的 prepared 记录，
+    # 这次及之后的落盘都失败——按语义触发而不是按「第几次写入」，引擎多一次或少一次原子写不会挪动故障点；
+    # 每次按注入抛出都记一笔命中，父进程据此确认注入真的打在了预定的子操作上）；
     # 写前日志、逐操作容错、备份失败即停、部分备份抢救、UnrecordedNames、Reboot 标注都是生产原文。
     $childEngine = @(
       'param([string]$RequestFile)',
@@ -546,34 +590,123 @@ Add-Type -AssemblyName WindowsBase
       '$spec = [IO.File]::ReadAllText((Join-Path $PSScriptRoot ''af-scenario.json'')) | ConvertFrom-Json',
       '$script:EngineResultFile = Join-Path (Get-ValidatedEngineSessionRoot) (''engine-result-{0}.json'' -f $request.ResultId)',
       '$script:BackupDir = Join-Path $PSScriptRoot ''backup''',
-      '$afFailPrepared = @($spec.Real.Items | ForEach-Object { $afItem = $_; @($afItem.Ops) | Where-Object { $_.PrepareFails } | ForEach-Object { "$($afItem.Id)/$($_.Name)" } })',
+      '# 场景里的子操作：reg 子操作写 HKLM:\SOFTWARE\AFFixture\<项Id> 下名为子操作名的 DWord；pcfg 子操作的 Sub 是项 Id、Setting 是子操作名。',
+      '# 记账键统一是「项Id/子操作名」，与尝试记录、系统写入记录、注入点同一套名字。',
+      '$afSpecOps = @(if ($spec.Real) { foreach ($afItem in @($spec.Real.Items)) { foreach ($afOp in @($afItem.Ops)) { [pscustomobject]@{ ItemId = "$($afItem.Id)"; Op = $afOp } } } })',
+      '$afFailPrepared = @($afSpecOps | Where-Object { $_.Op.PrepareFails } | ForEach-Object { "$($_.ItemId)/$($_.Op.Name)" })',
+      '$afFailApplied = @($afSpecOps | Where-Object { $_.Op.AppliedFails } | ForEach-Object { "$($_.ItemId)/$($_.Op.Name)" })',
+      '$afDenied = @{}; foreach ($afSpecOp in $afSpecOps) { if ($afSpecOp.Op.WriteError) { $afDenied["$($afSpecOp.ItemId)/$($afSpecOp.Op.Name)"] = "$($afSpecOp.Op.WriteError)" } }',
+      '# -OptionalUnsupportedPowerSetting 的子操作不在「本机支持的电源设置」里：生产 Invoke-ApplyOp 对 Optional 的它返回「跳过（本机 CPU 无此电源项）：…」附注。',
+      '$afPowerSettings = @($afSpecOps | Where-Object { "$($_.Op.Kind)" -ceq ''pcfg'' -and -not $_.Op.Unsupported } | ForEach-Object { "$($_.ItemId)/$($_.Op.Name)" })',
+      '# 内存假注册表（"路径|值名" -> Kind/Value）。-AtTarget 的子操作预置为目标值：生产 Invoke-ApplyOp 读到已达标，',
+      '# 不写备份、不写系统，直接返回「无需修改：… 已是目标状态」；-HiddenPowerSetting 预置 Attributes=1（隐藏）。',
+      '$script:AFReg = @{}',
+      'foreach ($afSpecOp in $afSpecOps) {',
+      '  if ("$($afSpecOp.Op.Kind)" -ceq ''pcfg'') {',
+      '    if ($afSpecOp.Op.Hidden) { $script:AFReg["$script:PsRoot\$($afSpecOp.ItemId)\$($afSpecOp.Op.Name)|Attributes"] = @{ Kind = ''DWord''; Value = 1 } }',
+      '    if ($afSpecOp.Op.AtTarget) { $script:AFReg["$script:PuRoot\af-fixture-scheme\$($afSpecOp.ItemId)\$($afSpecOp.Op.Name)|ACSettingIndex"] = @{ Kind = ''DWord''; Value = 1 } }',
+      '  } elseif ($afSpecOp.Op.AtTarget) {',
+      '    $script:AFReg["HKLM:\SOFTWARE\AFFixture\$($afSpecOp.ItemId)|$($afSpecOp.Op.Name)"] = @{ Kind = ''DWord''; Value = 1 }',
+      '  }',
+      '}',
+      'function Add-AFRecord([string]$File, [string]$Line) { [IO.File]::AppendAllText((Join-Path $PSScriptRoot $File), "$Line`r`n") }',
+      'function Get-AFRegKey([string]$Path, [string]$Name) { "$($Path.Substring($Path.LastIndexOf([char]92) + 1))/$Name" }',
+      '# 生产的命令行渲染（入口分发里的 elseif ($Apply) 分支；命令行用户与照 SKILL.md 调用的 agent 读的就是它）用 Write-Output',
+      '# 逐行打印结果。子进程收到的请求没有 -Json，这一段本来就在这里真跑，只是真实传输层读走 stdout 后不交给调用方。',
+      '# 这层薄壳把每一行原样记一笔，再交给真正的 Write-Output；第一笔是哨兵，证明记录在生产分发之前已就位。',
+      '# 一次 Write-Output 记一行：内容按 JSON 字符串记下（行内自带的换行被转义——系统 IO 错误的原文以 CRLF 结尾，见 S36），父进程读回时原样还原。',
+      'function Write-Output { param([Parameter(Position = 0, ValueFromPipeline = $true)]$InputObject) process { Add-AFRecord ''af-cli-output.txt'' (ConvertTo-Json -InputObject "$InputObject" -Compress); Microsoft.PowerShell.Utility\Write-Output $InputObject } }',
+      '$null = Write-Output ''af-cli-recorder-armed''',
       'function Enter-EngineMutex { ''af-fixture-mutex'' }',
       'function Exit-EngineMutex($Mutex) { }',
       'function Find-GamePath { $null }',
-      'function Get-ActiveScheme { $null }',
+      'function Get-ActiveScheme { [pscustomobject]@{ Guid = ''af-fixture-scheme''; Name = ''fixture scheme'' } }',
       'function Test-ToolPowerScheme($Scheme) { $false }',
       'function Test-Admin { $true }',
+      '# 最底层系统原语：真实实现直接开 HKLM 注册表键、调 powercfg。',
+      'function Get-RegValueKind([string]$Path, [string]$Name) { $v = $script:AFReg["$Path|$Name"]; if ($v) { $v.Kind } else { $null } }',
+      'function Get-RegValue([string]$Path, [string]$Name) { $v = $script:AFReg["$Path|$Name"]; if ($v) { $v.Value } else { $null } }',
+      'function Set-RegValue([string]$Path, [string]$Name, $Value, [string]$Kind) {',
+      '  $key = Get-AFRegKey $Path $Name',
+      '  if ($afDenied.ContainsKey($key)) { throw $afDenied[$key] }',
+      '  Add-AFRecord ''af-system-writes.txt'' $key',
+      '  $script:AFReg["$Path|$Name"] = @{ Kind = "$Kind"; Value = $Value }',
+      '}',
+      '# 每次询问「本机是否支持该电源设置」记一笔「项Id/子操作名=True|False」：父进程据此锚定「不支持」分支真的被走到。',
+      'function Test-PowerSetting([string]$Sub, [string]$Setting) { $afSupported = $afPowerSettings -ccontains "$Sub/$Setting"; Add-AFRecord ''af-power-probes.txt'' "$Sub/$Setting=$afSupported"; $afSupported }',
+      'function Show-PowerSetting([string]$Sub, [string]$Setting) {',
+      '  $old = Get-RegValue "$script:PsRoot\$Sub\$Setting" ''Attributes''',
+      '  Add-AFRecord ''af-system-writes.txt'' "$Sub/$Setting(unhide)"',
+      '  $script:AFReg["$script:PsRoot\$Sub\$Setting|Attributes"] = @{ Kind = ''DWord''; Value = ([int]$old -band (-bnot 1)) }',
+      '  $old',
+      '}',
+      'function Set-PowerSettingAc([string]$Sub, [string]$Setting, [int]$Value, [string]$SchemeGuid) {',
+      '  if ($afDenied.ContainsKey("$Sub/$Setting")) { throw $afDenied["$Sub/$Setting"] }',
+      '  Add-AFRecord ''af-system-writes.txt'' "$Sub/$Setting"',
+      '  $script:AFReg["$script:PuRoot\af-fixture-scheme\$Sub\$Setting|ACSettingIndex"] = @{ Kind = ''DWord''; Value = $Value }',
+      '}',
       'function Initialize-ProtectedStore { [void][IO.Directory]::CreateDirectory($script:BackupDir) }',
       'function New-BackupDocument([DateTime]$When, [string]$ApplyId) {',
       '  [pscustomobject]@{ BackupId = ''fixture''; ApplyId = $ApplyId; State = ''pending''; Items = @(); Ops = @() }',
       '}',
-      'function Get-BackupOpFields([string]$Kind, [int]$SchemaVersion) { @(''Path'') }',
       'function Assert-BackupOperation($Op, [int]$SchemaVersion, [string]$AllowedLocalAppData) { }',
       'function New-BackupItemRecord($Item) { [pscustomobject]@{ ItemId = "$($Item.Id)"; OpIds = @() } }',
+      '# 上一次成功落盘时文档里撤销记录的摘要：收尾那一次写入不新增、不改动任何撤销记录，摘要与它相同。',
+      '$script:AFLastOpsDigest = $null',
       'function Write-BackupDocumentAtomic([string]$Path, $Document) {',
-      '  if (@($Document.Ops | Where-Object { $afFailPrepared -contains "$($_.Path)" }).Count -gt 0) { throw "$($spec.Real.BackupWriteError)" }',
+      '  $afDigest = ConvertTo-Json -InputObject @($Document.Ops) -Depth 6 -Compress',
+      '  # -CompleteFails（复攻四 N04/N25）：只有收尾那一次写失败（此前的 prepared / applied 都已真落盘）。按语义认这一次——',
+      '  # 它是首次写入之后、不新增也不改动任何撤销记录的写入——而不是看文档的 State：生产收尾漏设 State 时注入照样打在',
+      '  # 收尾写入上，不会因为注入落空而在 S29 冒充「退出码 0」（复攻五 V03；漏设 State 本身由 S17 / S21 核对改名后的文件）。',
+      '  # 同样先抛、不写文件，盘上留下的仍是最后一次成功写入的 pending 文档。命中记一笔「complete:State=<这次要写的 State>」。',
+      '  if ($spec.Real -and $spec.Real.CompleteFails -and $null -ne $script:AFLastOpsDigest -and $afDigest -ceq $script:AFLastOpsDigest) {',
+      '    Add-AFRecord ''af-backup-failures.txt'' "complete:State=$($Document.State)"',
+      '    throw "$($spec.Real.BackupWriteError)"',
+      '  }',
+      '  foreach ($afEntry in @($Document.Ops)) {',
+      '    $afKey = $(if ("$($afEntry.Kind)" -ceq ''pcfg'') { "$($afEntry.Sub)/$($afEntry.Setting)" } else { Get-AFRegKey "$($afEntry.Path)" "$($afEntry.Name)" })',
+      '    if ($afFailPrepared -ccontains $afKey -or ($afFailApplied -ccontains $afKey -and "$($afEntry.Status)" -ceq ''applied'')) {',
+      '      Add-AFRecord ''af-backup-failures.txt'' $afKey',
+      '      throw "$($spec.Real.BackupWriteError)"',
+      '    }',
+      '  }',
       '  [IO.File]::WriteAllText($Path, ($Document | ConvertTo-Json -Depth 6))',
+      '  $script:AFLastOpsDigest = $afDigest',
+      '  # 每次成功落盘记一笔「文件名|State|记录条数」：父进程据此锚定备份文件确实建过、收尾写入确实先于改名落盘。',
+      '  Add-AFRecord ''af-backup-writes.txt'' "$([IO.Path]::GetFileName($Path))|$($Document.State)|$(@($Document.Ops).Count)"',
       '}',
+      '# 生产 Invoke-Apply 按名字调 Invoke-ApplyOp：这层薄壳只记一笔尝试，再把同样四个参数原样交给生产原文。',
       'function Invoke-ApplyOp($Op, $ItemId, [scriptblock]$PrepareBackup, [scriptblock]$MarkApplied) {',
-      '  $token = & $PrepareBackup @{ Kind = ''reg''; Path = "$ItemId/$($Op.Name)" }',
-      '  if ($Op.WriteError) { throw "$($Op.WriteError)" }',
-      '  [IO.File]::AppendAllText((Join-Path $PSScriptRoot ''af-system-writes.txt''), "$ItemId/$($Op.Name)`r`n")',
-      '  & $MarkApplied $token',
-      '  $null',
+      '  Add-AFRecord ''af-op-attempts.txt'' "$ItemId/$(if ("$($Op.Kind)" -ceq ''pcfg'') { $Op.Setting } else { $Op.Name })"',
+      '  Invoke-AFRealApplyOp $Op $ItemId $PrepareBackup $MarkApplied',
       '}',
+      '# 目录与生产 Get-OptItems 同形：每项、每个子操作都是 hashtable。-ScalarOps 的项照生产 gpu-pstate-lock 的写法',
+      '# Ops = $(if (...) { @(@{...}) }) 构造：子表达式把单元素数组展开成一个裸 Hashtable（.Count 是键数，不是 1）。',
+      '# 子操作的 Label 同生产：reg 子操作有的带人话 Label（与值名 Name 不同，如 PowerThrottlingOff / 关闭电源节流），有的不带；',
+      '# pcfg 子操作总带 Label（场景没给时退回子操作名）。Optional 只在场景要求时出现，同生产 power-tuning 的两个大小核调度项。',
       'function Get-OptItems([string]$Exe) {',
-      '  @($spec.Real.Items | ForEach-Object { [pscustomobject]@{ Id = "$($_.Id)"; Name = "$($_.Name)"; Kind = ''reg''; Tier = ''safe''',
-      '    Admin = $true; Default = $true; Reboot = [bool]$_.Reboot; Ops = @($_.Ops) } })',
+      '  @(foreach ($afItem in @($spec.Real.Items)) {',
+      '    $afOps = @(foreach ($afOp in @($afItem.Ops)) {',
+      '      if ("$($afOp.Kind)" -ceq ''pcfg'') {',
+      '        $afH = @{ Kind = ''pcfg''; Sub = "$($afItem.Id)"; Setting = "$($afOp.Name)"; Value = 1; Label = $(if ($afOp.Label) { "$($afOp.Label)" } else { "$($afOp.Name)" }) }',
+      '        if ($afOp.Optional) { $afH.Optional = $true }',
+      '        $afH',
+      '      } else {',
+      '        $afH = @{ Kind = ''reg''; Path = "HKLM:\SOFTWARE\AFFixture\$($afItem.Id)"; Name = "$($afOp.Name)"; Value = 1; Kind2 = ''DWord'' }',
+      '        if ($afOp.Label) { $afH.Label = "$($afOp.Label)" }',
+      '        $afH',
+      '      }',
+      '    })',
+      '    $afRow = @{ Id = "$($afItem.Id)"; Name = "$($afItem.Name)"; Kind = ''multi''; Tier = ''safe''; Admin = $true; Default = $true',
+      '                Reboot = [bool]$afItem.Reboot; Ops = $afOps }',
+      '    if ($afItem.ScalarOps) { $afRow.Ops = $(if ($afOps.Count -gt 0) { @($afOps) }) }',
+      '    # -NoOps（复攻五 V09/V10/V52/V53）：照生产 fso-off / gpu-pref / game-priority 没有游戏路径时的写法，Ops = $null；',
+      '    # -RequiresGame 同生产这三项的标注（生产据此选「未找到游戏路径」还是「本机不满足此项前提」）。',
+      '    if ($afItem.NoOps) { $afRow.Ops = $null }',
+      '    if ($afItem.RequiresGame) { $afRow.RequiresGame = $true }',
+      '    Add-AFRecord ''af-ops-shapes.txt'' "$($afItem.Id)=$(if ($null -eq $afRow.Ops) { ''null'' } else { $afRow.Ops.GetType().Name })"',
+      '    $afRow',
+      '  })',
       '}',
       'if ($null -ne $spec.ProcessExitCode) {',
       '  # 仅 S9：模拟外壳改写进程退出码。引擎自己的 exit 改写不了，这一场景保留手写尾部。',
@@ -611,7 +744,8 @@ Add-Type -AssemblyName WindowsBase
       $row
     }
     function Write-AFEngineScenario {
-      foreach ($leftover in @($afChildSeen, $afEngineResult, $afSystemWrites)) {
+      foreach ($leftover in @($afChildSeen, $afEngineResult, $afSystemWrites, $afOpAttempts, $afOpsShapes, $afBackupFailureHits, $afCliOutput, $afPowerProbes,
+                              $afBackupWrites)) {
         if (Test-Path -LiteralPath $leftover) { Remove-Item -LiteralPath $leftover -Force }
       }
       if (Test-Path -LiteralPath $afBackupDir) { Remove-Item -LiteralPath $afBackupDir -Recurse -Force }
@@ -634,16 +768,44 @@ Add-Type -AssemblyName WindowsBase
     }
     # 真实 Invoke-Apply 场景：只描述目录（每项的子操作、哪个子操作的系统写入失败）和第几次备份落盘开始失败。
     # -PrepareFails：持久化这个子操作的 prepared 备份记录时磁盘写满（此后所有落盘都失败）；WriteError：备份已记下，系统写入被拒。
-    function New-AFRealOp([string]$Name, [string]$WriteError, [switch]$PrepareFails) {
-      [pscustomobject]@{ Name = $Name; WriteError = $WriteError; PrepareFails = [bool]$PrepareFails }
+    # -AppliedFails：prepared 已落盘、系统写入已发生，标 applied 时磁盘写满（此后所有落盘都失败）。
+    # -AtTarget：系统里已是目标值——生产 Invoke-ApplyOp 不写备份、不写系统，返回「无需修改：… 已是目标状态」附注。
+    # -HiddenPowerSetting：隐藏的电源设置（pcfg）——生产 Invoke-ApplyOp 先备份并解除隐藏（Attributes），再备份并写值：
+    # 一个子操作两条备份记录、两次系统写入。
+    # -OptionalUnsupportedPowerSetting（复攻三 X05）：生产 power-tuning 的大小核调度项——Optional 的 pcfg 子操作，本机不支持时
+    # 生产 Invoke-ApplyOp 不写备份、不写系统，返回「跳过（本机 CPU 无此电源项）：<Label>」附注（算尝试过、没失败）。
+    # -Label（复攻三 X04）：子操作带与值名不同的人话 Label，同生产多数 reg 子操作；失败原因必须以它开头。
+    function New-AFRealOp([string]$Name, [string]$WriteError, [switch]$PrepareFails, [switch]$AppliedFails, [switch]$AtTarget,
+                          [switch]$HiddenPowerSetting, [switch]$OptionalUnsupportedPowerSetting, [string]$Label) {
+      Assert-True (-not ($HiddenPowerSetting -and $OptionalUnsupportedPowerSetting)) "fixture problem: sub-operation $Name cannot be both hidden and unsupported"
+      [pscustomobject]@{ Name = $Name; Kind = $(if ($HiddenPowerSetting -or $OptionalUnsupportedPowerSetting) { 'pcfg' } else { 'reg' }); WriteError = $WriteError
+                         PrepareFails = [bool]$PrepareFails; AppliedFails = [bool]$AppliedFails; AtTarget = [bool]$AtTarget
+                         Hidden = [bool]$HiddenPowerSetting; Optional = [bool]$OptionalUnsupportedPowerSetting
+                         Unsupported = [bool]$OptionalUnsupportedPowerSetting; Label = $Label }
     }
-    function New-AFRealItem([string]$Id, [string]$Name, [object[]]$Ops) { [pscustomobject]@{ Id = $Id; Name = $Name; Reboot = $false; Ops = @($Ops) } }
-    function Set-AFEngineRealScenario([object[]]$Items, [string]$BackupWriteError) {
+    # -ScalarOps：子进程目录里这一项的 Ops 按生产 gpu-pstate-lock 的写法构造成一个裸 Hashtable（只允许一个子操作）。
+    # -Reboot（复攻三 X03）：目录里标「需重启」，同生产多数系统项（hags、paging-exec、mpo-off、power-tuning…）。
+    # -NoOps（复攻五）：这一项在本机没有可执行的子操作（子进程目录里 Ops = $null，同生产 fso-off / gpu-pref / game-priority
+    # 没有游戏路径时）；-RequiresGame 同生产这三项的标注。生产通用 Ops 分支对它不尝试任何子操作，给出 Ok=False、Skipped=True 的行。
+    function New-AFRealItem([string]$Id, [string]$Name, [object[]]$Ops, [switch]$ScalarOps, [switch]$Reboot, [switch]$NoOps, [switch]$RequiresGame) {
+      Assert-True (-not $ScalarOps -or @($Ops).Count -eq 1) "fixture problem: -ScalarOps item $Id must have exactly one sub-operation"
+      Assert-True (-not $NoOps -or (@($Ops).Count -eq 0 -and -not $ScalarOps)) "fixture problem: -NoOps item $Id cannot carry sub-operations"
+      [pscustomobject]@{ Id = $Id; Name = $Name; Reboot = [bool]$Reboot; Ops = @($Ops); ScalarOps = [bool]$ScalarOps
+                         NoOps = [bool]$NoOps; RequiresGame = [bool]$RequiresGame }
+    }
+    # -CompleteFails（复攻四 N04/N25）：所有子操作的备份都正常落盘，只有收尾写 complete 状态那一次失败（注入原文同 BackupWriteError）。
+    # -RenameBlocked（复攻五 V56）：收尾的 complete 状态正常落盘，随后把 .pending.json 改名成 backup-fixture.json 时失败——
+    # 夹具在批次开始前就在备份目录里放好一个同名文件，生产的 [IO.File]::Move 真的撞上「目标已存在」，不注入、不桩改名。
+    function Set-AFEngineRealScenario([object[]]$Items, [string]$BackupWriteError, [switch]$CompleteFails, [switch]$RenameBlocked) {
       $script:AFScenario = [pscustomobject]@{
         Data = $null; ProcessExitCode = $null; Throw = $null
-        Real = [pscustomobject]@{ Items = @($Items); BackupWriteError = $BackupWriteError }
+        Real = [pscustomobject]@{ Items = @($Items); BackupWriteError = $BackupWriteError; CompleteFails = [bool]$CompleteFails }
       }
       Write-AFEngineScenario
+      if ($RenameBlocked) {
+        [void][IO.Directory]::CreateDirectory($afBackupDir)
+        [IO.File]::WriteAllText($completeBackup, $afRenameBlocker)
+      }
     }
     function Get-AFEngineResult {
       if (-not (Test-Path -LiteralPath $afEngineResult)) { return $null }
@@ -710,6 +872,962 @@ Add-Type -AssemblyName WindowsBase
          "AllowRisky $($seen.AllowRisky) through the real request file; expected [$($ExpectedElevated -join ',')], " +
          "'$($script:TargetExe)', False")
     }
+
+    # S14–S31（复核 R3「其余已写入」及其四轮复攻），**真实 Invoke-Apply + 真实 Invoke-ApplyOp**：多子项优化项的结果文案必须与实际执行情况一致。
+    # 备份 prepared / applied 状态落不了盘时，子项循环立即停下，后面的子项根本没被尝试；旧判断只拿失败数比子项总数，
+    # 第一个子项就因备份失败停手、什么都没写时，结果里也写「部分子项写入失败（其余已写入）」。
+    # 期望文案里的两个数字对照实际：「未执行」= 目录里该项的子操作数 − 生产 Invoke-Apply 实际调用 Invoke-ApplyOp 的次数（尝试记录），
+    # 「已完成」= 实际尝试的子操作数 − 其中被注入失败的子操作数；尝试记录与系统写入记录本身先按场景逐笔钉死。
+    # 界面侧走生产 Update-ApplyProgress：逐项实时日志「[失败] 项名 — 文案」与汇总失败清单都必须原样带出引擎文案；
+    # 汇总计数（日志与进度区）、备份失败弹窗逐项列出的项名、子进程里生产命令行渲染的逐行结果与汇总也逐字核对。
+    # 复攻三起还核对：失败原因里撞上落盘失败那条的阶段词（prepared / applied）与标签（Label 优先）、界面日志与命令行的
+    # 备份失败告警两句（严重告警、「以下已生效的改动…」名单）、逐行 Reboot 标注与重启提醒（弹窗、界面日志、命令行）。
+    # 93713da 起还核对：部分备份抢救按「真正落过盘的撤销记录」决定（交回 / 删除 .pending.json、盘上记录逐条），
+    # 以及界面日志、弹窗与命令行的「备份已保存 / 已抢救出部分备份」（跨项抢救见 S27）；落盘失败撞在最后一个子操作上的真部分失败文案（S26）。
+    # 复攻四起还核对：真部分失败带两条原因时按尝试顺序全列（S28）；收尾写 complete 状态失败时真实引擎照样上报 BackupError、
+    # 交回 .pending.json（S29，此前只有手写 Data 的 S9）；执行顺序与字母序相反时名单按引擎顺序（S30）；单子操作项撞上
+    # 自己的落盘失败走「失败：…」（S31）；备份完好时 UnrecordedNames 为空；备份失败弹窗除抢救一句外逐段逐字；失败清单的抬头与条目。
+    # 这十八个场景都不注入收尾失败，处理器走完整条收尾（备份失败弹窗、失败清单、界面刷新、重启提醒）。
+    # 放在 S6–S12 之前：同时破坏 S8 文案的引擎变异先在这里、按本组的断言消息红。
+    function Get-AFOpAttempts {
+      if (-not (Test-Path -LiteralPath $afOpAttempts)) { return @() }
+      @([IO.File]::ReadAllLines($afOpAttempts) | Where-Object { $_ })
+    }
+    # 子进程里备份落盘注入每抛一次记一笔「项Id/子操作名」：锚定注入真的打在预定的子操作上。
+    function Get-AFBackupFailureHits {
+      if (-not (Test-Path -LiteralPath $afBackupFailureHits)) { return @() }
+      @([IO.File]::ReadAllLines($afBackupFailureHits) | Where-Object { $_ })
+    }
+    # 子进程目录里每项 Ops 的实际类型（Object[] / Hashtable）：锚定 -ScalarOps 真的造出了生产那种裸 Hashtable。
+    function Get-AFOpsShapes {
+      if (-not (Test-Path -LiteralPath $afOpsShapes)) { return @() }
+      @([IO.File]::ReadAllLines($afOpsShapes) | Where-Object { $_ })
+    }
+    # 子进程里生产命令行渲染逐行打印的内容（第一行是记录器哨兵）：每次 Write-Output 一个元素，行内换行原样还原。
+    function Get-AFCliOutput {
+      if (-not (Test-Path -LiteralPath $afCliOutput)) { return @() }
+      @([IO.File]::ReadAllLines($afCliOutput) | Where-Object { $_ } | ForEach-Object { [string](ConvertFrom-Json $_) } | Where-Object { $_ })
+    }
+    # 弹窗正文按空行（"`n`n"）分段。失败原因的原文可能自带换行（系统 IO 错误的原文以 CRLF 结尾，S36）：先把「失败原因：<原文>」
+    # 里的原文换成占位符再去 CR、分段，最后换回原文，原文里的换行不会把段落切开；原文不在正文里时照常分段（核对随之红在原处）。
+    function Get-AFDialogParagraphs([string]$Message, [string]$BackupError) {
+      $placeholder = '<<af-backup-error>>'
+      $masked = $(if ($BackupError) { $Message.Replace("失败原因：$BackupError", "失败原因：$placeholder") } else { $Message })
+      @(($masked -replace "`r", '') -split "`n`n" | ForEach-Object { $_.Replace($placeholder, $BackupError) })
+    }
+    # 子进程里「本机是否支持该电源设置」的每次询问与回答（「项Id/子操作名=True|False」）。
+    function Get-AFPowerProbes {
+      if (-not (Test-Path -LiteralPath $afPowerProbes)) { return @() }
+      @([IO.File]::ReadAllLines($afPowerProbes) | Where-Object { $_ })
+    }
+    # 子进程里每次成功的备份落盘（「文件名|State|记录条数」，按先后）。
+    function Get-AFBackupWrites {
+      if (-not (Test-Path -LiteralPath $afBackupWrites)) { return @() }
+      @([IO.File]::ReadAllLines($afBackupWrites) | Where-Object { $_ })
+    }
+    # 「把文件改名到一个已存在的文件上」在这台机器、这个系统语言下的原文（复攻五 V56 / S36）：在本进程里照样撞一次
+    # [IO.File]::Move，取最内层 .NET 异常的消息（不手写，随系统语言而变；外层 PowerShell 包装另说，生产用别的改名方式也照样带着它）。
+    function Get-AFRenameCollisionMessage {
+      $probeDir = Join-Path $afRoot 'rename-probe'
+      [void][IO.Directory]::CreateDirectory($probeDir)
+      $probeSource = Join-Path $probeDir 'probe.pending.json'
+      $probeTarget = Join-Path $probeDir 'probe.json'
+      [IO.File]::WriteAllText($probeSource, 'source'); [IO.File]::WriteAllText($probeTarget, 'target')
+      try { [IO.File]::Move($probeSource, $probeTarget); '' }
+      catch { $probeError = $_.Exception; while ($probeError.InnerException) { $probeError = $probeError.InnerException }; "$($probeError.Message)" }
+      finally { Remove-Item -LiteralPath $probeDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    # 一行结果的全部字段（传输层前后逐字段对照用）。
+    function Get-AFRowDigest($Row) {
+      "Id=$($Row.Id);Name=$($Row.Name);Ok=$($Row.Ok);Skipped=$($Row.Skipped);Changed=$($Row.Changed);Attention=$($Row.Attention);Reboot=$($Row.Reboot);Msg=$($Row.Msg)"
+    }
+    # 一轮真实批次的共同锚点：到达引擎、引擎发布了带 Data 的结果且退出码符合、传输层把原样的行交给了处理器、
+    # 行集合符合、尝试 / 系统写入记录与场景逐笔一致，生产 Update-ApplyProgress 对每一行都跑过（界面断言不空转）。
+    function Assert-AFRealBatch([string]$Scenario, [int]$ExpectedExit, [string[]]$ExpectedRowIds,
+                                [string[]]$ExpectedAttempts, [string[]]$ExpectedWrites) {
+      Assert-True ($script:AFApplyCalls -eq 1) "[$Scenario] fixture problem: the elevated engine call was never reached"
+      $published = Assert-AFEnginePublished "[$Scenario] real-engine batch"
+      Assert-True ($null -ne $published.Data -and [int]$published.ExitCode -eq $ExpectedExit) `
+        ("[$Scenario] the real engine published exit $([int]$published.ExitCode) $(if ($null -ne $published.Data) { 'with' } else { 'without' }) Data; " +
+         "expected exit $ExpectedExit with Data (engine error: '$($published.Error)')")
+      Assert-True ($null -eq $script:AFRealEngineError -and $null -ne $script:AFReply) `
+        "[$Scenario] the real transport did not hand the engine's Data back to the Apply handler: $($script:AFRealEngineError)"
+      $rowIds = @($published.Data.Results | ForEach-Object { "$($_.Id)" })
+      Assert-True (($rowIds -join ',') -ceq (@($ExpectedRowIds) -join ',')) `
+        "[$Scenario] the real engine returned rows [$($rowIds -join ',')], expected exactly [$(@($ExpectedRowIds) -join ',')]"
+      # 传输层是生产原文（真 Invoke-ElevatedEngineAction），行在这里被改写是产品回归，不是夹具问题（复攻 R3 msg）。
+      # 逐字段对照（复攻三）：只比 Id=Msg 时，传输层改掉 Changed / Reboot（处理器据此算活动优化集合、弹重启提醒）看不见。
+      $handedRows = (@($script:AFReply.Results | ForEach-Object { Get-AFRowDigest $_ }) -join ' | ')
+      $publishedRows = (@($published.Data.Results | ForEach-Object { Get-AFRowDigest $_ }) -join ' | ')
+      Assert-True ($handedRows -ceq $publishedRows) `
+        "[$Scenario] the real transport handed the Apply handler rows that differ from what the engine published (handler: $handedRows; engine: $publishedRows)"
+      $attempts = @(Get-AFOpAttempts)
+      Assert-True (($attempts -join ',') -ceq (@($ExpectedAttempts) -join ',')) `
+        ("[$Scenario] sub-operations attempted were [$($attempts -join ',')], expected exactly [$(@($ExpectedAttempts) -join ',')] " +
+         "(no sub-operation may be attempted after a backup-write failure)")
+      $writes = @(Get-AFSystemWrites)
+      Assert-True (($writes -join ',') -ceq (@($ExpectedWrites) -join ',')) `
+        "[$Scenario] system writes were [$($writes -join ',')], expected exactly [$(@($ExpectedWrites) -join ',')]"
+      # 夹具锚点：这一轮确实把处理器对 Update-ApplyProgress 的调用转给了生产原文（-RealProgress）。
+      Assert-True ($script:AFLastRealProgress -and $rowIds.Count -gt 0) `
+        "[$Scenario] fixture problem: the scenario did not route Update-ApplyProgress to the production function (-RealProgress) or has no rows"
+      # 产品断言（复攻 R3 msg）：处理器对引擎交回的每一行恰好调一次 Update-ApplyProgress，逐项实时日志才会一行不少。
+      Assert-True ($script:AFProgressCalls -eq $rowIds.Count) `
+        "[$Scenario] the Apply handler ran the production Update-ApplyProgress $($script:AFProgressCalls) time(s) for $($rowIds.Count) engine result row(s); every row needs exactly one per-item log line"
+      $published
+    }
+    # 被备份失败截断的那一项：数字对照实际 → Ok / Changed → 绝不说「其余已写入」→ 头部与两个数字 → 头部后按尝试顺序逐条列出失败子操作的原因。
+    # 失败子操作可以不止一条（复攻 M01/M03/M04）：先有子操作被系统拒绝写入、之后才遇到备份落盘失败时，
+    # 「已完成 = 尝试数 − 1」「只报最后一条错误」「尝试过两个以上就算部分完成」都与正确公式分得开。
+    # 落盘失败恰好撞在最后一个子操作上时（S26，复攻二 / 三的 P5 形态）没有子操作被跳过（NotRun = 0），行走真部分失败 / 全部失败的文案：
+    # 「部分子项写入失败（其余 Done 项已完成）：…」或「失败：…」（93713da）。已完成的子操作不一定写过系统（已达标、本机没有的可选电源项），
+    # 所以「其余已写入」在这里同样不许出现。这两个分支的尾部同样逐条、按尝试顺序核对：真部分失败带两条原因见 S28（复攻四 N01–N03），
+    # 单子操作项走「失败：…」见 S31 与 S11（复攻四 N24）。
+    function Assert-AFCutShortRow([string]$Scenario, $Published, $Item, [int]$Done, [int]$NotRun, [bool]$Changed) {
+      $id = "$($Item.Id)"
+      $injected = "$($script:AFScenario.Real.BackupWriteError)"
+      $specOps = @($Item.Ops)
+      $attempted = @(Get-AFOpAttempts | Where-Object { $_.StartsWith("$id/", [StringComparison]::Ordinal) })
+      # 尝试记录本身已由 Assert-AFRealBatch 按场景逐笔钉死；失败子操作 = 实际尝试过、且场景给它注入了失败的子操作（按尝试顺序）。
+      $failedOps = @($specOps | Where-Object { ($_.PrepareFails -or $_.AppliedFails -or $_.WriteError) -and ($attempted -ccontains "$id/$($_.Name)") })
+      $cutAt = $(if ($failedOps.Count -gt 0) { $failedOps[$failedOps.Count - 1] })
+      $hits = @(Get-AFBackupFailureHits)
+      # 夹具自检：场景确实是「最后一个被尝试的子操作撞上注入的落盘失败」，注入第一次命中的就是它，两个数字与尝试记录相符。
+      Assert-True ($injected -and $NotRun -ge 0 -and $null -ne $cutAt -and ($cutAt.PrepareFails -or $cutAt.AppliedFails) -and
+        $attempted.Count -gt 0 -and $attempted[$attempted.Count - 1] -ceq "$id/$($cutAt.Name)" -and
+        $hits.Count -ge 1 -and $hits[0] -ceq "$id/$($cutAt.Name)" -and
+        ($specOps.Count - $attempted.Count) -eq $NotRun -and ($attempted.Count - $failedOps.Count) -eq $Done) `
+        ("[$Scenario] fixture problem: $id was meant to stop at the injected backup-write failure on its last attempted sub-operation " +
+         "with $Done done and $NotRun not run, but $($attempted.Count) of its $($specOps.Count) sub-operations were attempted " +
+         "[$($attempted -join ',')], $($failedOps.Count) of those were set to fail, and the injection fired on [$($hits -join ',')]")
+      # 产品断言：引擎把注入的落盘错误原样交回为 BackupError（部分备份抢救、UnrecordedNames、界面弹窗都以它为准）。
+      Assert-True ("$($Published.Data.BackupError)" -ceq $injected) `
+        "[$Scenario] the real engine did not report the injected backup-write failure as its BackupError: expected '$injected', got '$($Published.Data.BackupError)'"
+      $rows = @($Published.Data.Results | Where-Object { "$($_.Id)" -ceq $id })
+      Assert-True ($rows.Count -eq 1) "[$Scenario] fixture problem: the engine published $($rows.Count) rows for $id"
+      $row = $rows[0]
+      Assert-True ($row.Ok -eq $false -and $row.Skipped -eq $false -and $row.Changed -eq $Changed -and "$($row.Name)" -ceq "$($Item.Name)") `
+        ("[$Scenario] $id row is Ok=$($row.Ok) Skipped=$($row.Skipped) Changed=$($row.Changed) Name='$($row.Name)'; expected Ok=False Skipped=False " +
+         "Changed=$Changed Name='$($Item.Name)' for an item whose sub-operations were cut short by a backup-write failure")
+      $msg = "$($row.Msg)"
+      # 这一项真正改过系统的子操作（系统写入记录按「项Id/子操作名」记，隐藏电源项的解除隐藏另记一笔「(unhide)」）。
+      $itemWrittenOps = @(@(Get-AFSystemWrites) | Where-Object { $_.StartsWith("$id/", [StringComparison]::Ordinal) } |
+        ForEach-Object { $_ -replace '\(unhide\)$', '' } | Select-Object -Unique)
+      Assert-True (-not $msg.Contains('其余已写入')) $(if ($NotRun -gt 0) {
+          "[$Scenario] $id message claims the remaining sub-operations were written although $NotRun of them never ran: $msg"
+        } else {
+          "[$Scenario] $id message claims the remaining sub-operations were written although $($itemWrittenOps.Count) of its $Done completed sub-operation(s) changed the system: $msg"
+        })
+      $head = $(if ($NotRun -gt 0) {
+                  if ($Done -gt 0) { "部分子项写入失败（$Done 项已完成，其后 $NotRun 项因备份无法落盘未执行）" }
+                  else { "失败（备份无法落盘，其余 $NotRun 项未执行）" }
+                } elseif ($Done -gt 0) { "部分子项写入失败（其余 $Done 项已完成）" }
+                else { '失败' })
+      Assert-True ($msg.StartsWith($head, [StringComparison]::Ordinal) -and
+        ($msg.Length -eq $head.Length -or $msg[$head.Length] -ceq [char]'：')) `
+        "[$Scenario] $id message head is wrong: expected '$head' ($Done done, $NotRun not run), got: $msg"
+      # 头部之后按尝试顺序、以「；」分隔，每个失败子操作恰好一条「子操作标签：原因」，整段逐字比对：
+      # - 标签是用户看得懂的 Label（生产子操作带 Label 时），没有才退回值名 Name（复攻三 X04）；
+      # - 系统拒绝写入的原因逐字是注入的 WriteError；
+      # - 撞上落盘失败的那条逐字是「备份 prepared 状态持久化失败：<注入原文>」或「备份 applied 状态持久化失败：<注入原文>」（复攻三 X01/X02）。
+      #   阶段词是这一条里唯一说明「这个子操作的系统写入有没有发生」的信息：prepared = 还没写系统，applied = 已写系统、回滚记录不全；
+      #   同一场景的系统写入记录（Assert-AFRealBatch 已逐笔钉死）与它必须一致，张冠李戴或合并成一句都要红。
+      $detail = $(if ($msg.Length -gt $head.Length) { $msg.Substring($head.Length + 1) } else { '' })
+      $expectEntries = @($failedOps | ForEach-Object {
+        $shown = $(if ($_.Label) { "$($_.Label)" } else { "$($_.Name)" })
+        if ($_.WriteError) { "$shown：$($_.WriteError)" }
+        elseif ($_.PrepareFails) { "$shown：备份 prepared 状态持久化失败：$injected" }
+        else { "$shown：备份 applied 状态持久化失败：$injected" }
+      })
+      $expectDesc = @($expectEntries | ForEach-Object { "'$_'" }) -join ' ; '
+      Assert-True ($detail.Length -gt 0 -and $detail -ceq ($expectEntries -join '；')) `
+        "[$Scenario] $id message lost the failing sub-operation's detail after the head (expected, in attempt order, exactly $($failedOps.Count) entr$(if ($failedOps.Count -eq 1) { 'y' } else { 'ies' }): $expectDesc): $msg"
+      $row
+    }
+    # 备份落盘失败的批次：引擎交回的 UnrecordedNames（已改动、回滚记录可能不全的项名）逐字对上，
+    # 处理器在确认框之后恰好弹一次「备份写入失败」。两者都是生产行为，不是夹具自检。
+    # 名单一律按引擎顺序（执行顺序）逐字比较：S30 的执行顺序与字母序相反，引擎、界面日志、弹窗或命令行排过序再列都会在那里红；
+    # 其余场景的引擎顺序恰好是字母序，单看它们分不出「按顺序」与「排过序」（复攻四 N30/N31）。
+    # -BackupError：备份失败的原文不是夹具注入的（S36 改名失败，原文由系统给出、先由场景锚定），按它核对弹窗与告警。
+    function Assert-AFBackupFailureSurfaced([string]$Scenario, $Published, [string[]]$ExpectedUnrecorded, [string]$BackupError) {
+      $engineLost = (@($Published.Data.UnrecordedNames | ForEach-Object { "$_" }) -join '|')
+      $wantLost = (@($ExpectedUnrecorded | Where-Object { $_ }) -join '|')
+      Assert-True ($engineLost -ceq $wantLost) `
+        "[$Scenario] the real engine's UnrecordedNames were [$engineLost], expected exactly [$wantLost] (the items it changed before the backup-write failure)"
+      Assert-True ((Get-AFDialogTitles) -ceq 'CONFIRM APPLY|BACKUP WRITE FAILED') `
+        "[$Scenario] the Apply handler did not show exactly the BACKUP WRITE FAILED dialog after the confirmation: dialogs [$(Get-AFDialogTitles)]"
+      # 弹窗正文（复攻二）：「· 项名」逐行列出的就是用户手动回退的全部线索，按引擎顺序逐字核对；一个都没有时写「（无）」，
+      # 并带上注入的落盘错误原文。只核对标题时，弹窗漏列、多列（把没动过系统的项也列进去）都看不见。
+      $bwf = @($script:AFDialogs | Where-Object { "$($_.En)" -ceq 'BACKUP WRITE FAILED' })[0]
+      $listed = @(Get-AFDialogBullets $bwf.Message)
+      $injected = $(if ($BackupError) { $BackupError } else { "$($script:AFScenario.Real.BackupWriteError)" })
+      Assert-True (($listed -join '|') -ceq $wantLost -and ($wantLost.Length -gt 0 -or $bwf.Message.Contains('（无）')) -and
+        $bwf.Message.Contains("失败原因：$injected")) `
+        ("[$Scenario] the BACKUP WRITE FAILED dialog listed [$($listed -join '|')] as changed without a complete backup record; " +
+         "expected exactly [$wantLost]$(if ($wantLost.Length -eq 0) { " shown as '（无）'" }) and the reason '$injected'")
+      # 弹窗其余部分（复攻四 N06）：按空行分段，除「已抢救出部分备份」一句（有无与原文由 Assert-AFSalvageSurfaced 逐字核对）外逐段逐字：
+      # 开头一句必须说「本轮执行已中止」——截断项之后勾选的项目没有结果行、不进计数，界面上说它们没开始的只有这句与日志里的严重告警；
+      # 名单前的说明句（没有它，「· 项名」就看不出是「已生效、备份可能没记全」的项）、失败原因、结尾的手动回退指引，都不许丢、改写或换序。
+      # 收尾写 complete 状态失败（S29）、或 complete 已写而改名失败（S36）时每一项都已执行，「本轮执行已中止」与下面两句「剩余优化项已中止执行」并不属实：
+      # 已知遗留、产品决定本补丁不改，这里同样照现状逐字核对。
+      $paragraphs = @(Get-AFDialogParagraphs "$($bwf.Message)" $injected | Where-Object { -not $_.Contains('抢救') })
+      $listParagraph = "以下改动已经生效、但可能没有完整的备份记录：`n" +
+        $(if ($wantLost.Length -gt 0) { @($ExpectedUnrecorded | Where-Object { $_ } | ForEach-Object { "· $_" }) -join "`n" } else { '（无）' })
+      $wantParagraphs = @('备份文件写入失败，本轮执行已中止。', $listParagraph, "失败原因：$injected",
+        '其余项如需回退，请按上面的项名手动处理，或点「导出诊断报告」发给开发者。')
+      Assert-True (($paragraphs -join ' || ') -ceq ($wantParagraphs -join ' || ')) `
+        ("[$Scenario] the BACKUP WRITE FAILED dialog (salvage sentence aside) read [$(($paragraphs -join ' || ') -replace "`n", ' <LF> ')]; " +
+         "expected paragraph by paragraph [$(($wantParagraphs -join ' || ') -replace "`n", ' <LF> ')] (the opening sentence must say the run was aborted)")
+      Assert-True ("$($bwf.Chip)" -ceq '备份写入失败') "[$Scenario] the BACKUP WRITE FAILED dialog's chip read '$($bwf.Chip)'; expected '备份写入失败'"
+      # 日志与命令行（复攻三 X06–X09、X07）：弹窗点一下就没了，留下来的是界面日志（「导出诊断报告」带走的也是它）和命令行输出。
+      # 两处各两句都逐字核对：
+      # - 严重告警整句恰好一次，含「剩余优化项已中止执行」——截断项之后勾选的项目没有结果行、不进计数，除弹窗开头一句外只有它说它们没开始；
+      # - 「以下已生效的改动可能没有完整的备份记录：…」列的必须恰好是引擎的 UnrecordedNames（按引擎顺序），没有就整句不出现。
+      #   拿失败行顶替会让用户去手动回退一个根本没改过系统的项（S14），或漏掉真改过的成功项（S20）。
+      $namesJoined = (@($ExpectedUnrecorded | Where-Object { $_ }) -join '、')
+      $severeGui = "！！严重：备份文件写入失败（$injected），剩余优化项已中止执行。"
+      Assert-True (@($script:AFLog | Where-Object { $_ -ceq $severeGui }).Count -eq 1) `
+        "[$Scenario] the GUI's severe backup-failure log line was not exactly '$severeGui' once (GUI lines starting with ！！: $(@($script:AFLog | Where-Object { $_.StartsWith('！！', [StringComparison]::Ordinal) }) -join ' || '))"
+      $lostGuiPrefix = '！！以下已生效的改动可能没有完整的备份记录：'
+      $lostGui = @($script:AFLog | Where-Object { $_.StartsWith($lostGuiPrefix, [StringComparison]::Ordinal) })
+      $wantLostGui = @(if ($namesJoined) { "$lostGuiPrefix$namesJoined" })
+      Assert-True (($lostGui -join ' || ') -ceq ($wantLostGui -join ' || ')) `
+        "[$Scenario] the GUI log's backup-failure line naming changes without a complete backup record was [$($lostGui -join ' || ')]; expected [$($wantLostGui -join ' || ')] (exactly the engine's UnrecordedNames)"
+      $cli = @(Get-AFCliOutput)
+      $severeCli = "！！严重警告：备份文件写入失败（$injected），剩余优化项已中止执行。"
+      Assert-True (@($cli | Where-Object { $_ -ceq $severeCli }).Count -eq 1) `
+        "[$Scenario] the engine's CLI -Apply severe backup-failure line was not exactly '$severeCli' once (CLI lines starting with ！！: $(@($cli | Where-Object { $_.StartsWith('！！', [StringComparison]::Ordinal) }) -join ' || '))"
+      $lostCliPrefix = '！！以下已生效的改动可能没有完整的备份记录，如需回退请按项名手动处理：'
+      $lostCli = @($cli | Where-Object { $_.StartsWith($lostCliPrefix, [StringComparison]::Ordinal) })
+      $wantLostCli = @(if ($namesJoined) { "$lostCliPrefix$namesJoined" })
+      Assert-True (($lostCli -join ' || ') -ceq ($wantLostCli -join ' || ')) `
+        "[$Scenario] the engine's CLI -Apply backup-failure line naming changes without a complete backup record was [$($lostCli -join ' || ')]; expected [$($wantLostCli -join ' || ')] (exactly the engine's UnrecordedNames)"
+    }
+    # 部分备份抢救（93713da）：备份落盘失败后，引擎只在至少一条撤销记录**真正落过盘**时才把 .pending.json 作为 Backup 交回；
+    # 一条都没落盘（本轮第一次 prepared 写入就失败，或之前的子操作都已达标、没写过备份）就删掉这个空文件、Backup 为空。
+    # 收尾写 complete 状态失败时（S29，复攻四 N04/N25）走的是另一处 catch：记录全都已落盘（applied），同样必须交回 .pending.json、上报 BackupError。
+    # 交回与否决定四处说法：界面日志「备份已保存：…」、备份失败弹窗「已抢救出部分备份：…」一句、命令行「备份已保存：…」
+    # 与「！！已抢救出的部分备份：…」——什么都没记下却这么说，用户会拿一个空文件去「还原设置」。
+    # $ExpectedRecords 是抢救出的文件里应有的撤销记录（「项Id:Kind:值名或电源设置名=状态」，按落盘顺序），
+    # 由场景按「哪些子操作的 prepared 写成功了、哪些又写成了 applied」逐条写明；为空表示不应交回任何备份。
+    # 盘上的文件是子进程真实落盘的结果（夹具的落盘替身在注入失败时抛错、不写文件，同生产 Write-BytesAtomic）。
+    # 收尾 complete 已写、改名失败（S36）时 -BackupError 给出由场景锚定过的系统原文，其余同注入的落盘失败。
+    function Assert-AFSalvageSurfaced([string]$Scenario, $Published, [string[]]$ExpectedRecords, [string]$BackupError) {
+      $want = @($ExpectedRecords | Where-Object { $_ })
+      $salvaged = $want.Count -gt 0
+      $injected = $(if ($BackupError) { $BackupError } else { "$($script:AFScenario.Real.BackupWriteError)" })
+      Assert-True ($injected -and "$($Published.Data.BackupError)" -ceq $injected) `
+        "[$Scenario] fixture problem: the salvage check only applies to a batch stopped by the injected backup-write failure (engine BackupError '$($Published.Data.BackupError)')"
+      $engineBackup = "$($Published.Data.Backup)"
+      $onDisk = @(if (Test-Path -LiteralPath $afBackupDir) { Get-ChildItem -LiteralPath $afBackupDir -Force | ForEach-Object { $_.Name } })
+      if ($salvaged) {
+        Assert-True ($engineBackup -ceq $pendingBackup) `
+          "[$Scenario] the real engine did not hand back the salvaged partial backup although $($want.Count) undo record(s) reached the disk (expected Backup '$pendingBackup', got '$engineBackup')"
+        $doc = $(if (Test-Path -LiteralPath $pendingBackup) { [IO.File]::ReadAllText($pendingBackup) | ConvertFrom-Json })
+        $records = @(if ($doc) { @($doc.Ops) | ForEach-Object {
+          "$($_.ItemId):$($_.Kind):$(if ("$($_.Kind)" -ceq 'pcfg') { "$($_.Setting)" } else { "$($_.Name)" })=$($_.Status)" } })
+        Assert-True (($onDisk -join ',') -ceq [IO.Path]::GetFileName($pendingBackup) -and ($records -join ',') -ceq ($want -join ',')) `
+          ("[$Scenario] the salvaged backup on disk does not hold exactly the undo records that were persisted before the failure: " +
+           "backup directory [$($onDisk -join ',')], records [$($records -join ',')], expected [$($want -join ',')]")
+      } else {
+        Assert-True ($engineBackup -ceq '') `
+          "[$Scenario] the real engine handed back a backup file although no undo record reached the disk (expected no Backup, got '$engineBackup')"
+        Assert-True ($onDisk.Count -eq 0) `
+          "[$Scenario] the real engine left the empty .pending.json in the backup directory although no undo record reached the disk (backup directory: [$($onDisk -join ',')])"
+      }
+      Assert-True ("$($script:AFReply.Backup)" -ceq $engineBackup) `
+        "[$Scenario] the real transport handed the Apply handler Backup '$($script:AFReply.Backup)' but the engine published '$engineBackup'"
+      # 界面：日志（严重告警在场，证明处理器走到了备份失败的收尾）与弹窗。
+      Assert-True (@($script:AFLog | Where-Object { $_.StartsWith("！！严重：备份文件写入失败（$injected）", [StringComparison]::Ordinal) }).Count -eq 1) `
+        "[$Scenario] the GUI log has no severe backup-failure line, so the Apply handler never reached its backup-failure finalization"
+      $savedGui = @($script:AFLog | Where-Object { $_.Contains('备份已保存') })
+      $wantSavedGui = @(if ($salvaged) { "备份已保存：$pendingBackup" })
+      Assert-True (($savedGui -join ' || ') -ceq ($wantSavedGui -join ' || ')) `
+        "[$Scenario] the GUI log's backup-saved lines were [$($savedGui -join ' || ')]; expected [$($wantSavedGui -join ' || ')]"
+      $bwf = @($script:AFDialogs | Where-Object { "$($_.En)" -ceq 'BACKUP WRITE FAILED' })
+      Assert-True ($bwf.Count -eq 1) "[$Scenario] the Apply handler showed the BACKUP WRITE FAILED dialog $($bwf.Count) time(s); expected once"
+      $salvageGui = @("$($bwf[0].Message)" -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_.Contains('抢救') })
+      $wantSalvageGui = @(if ($salvaged) { "已抢救出部分备份：$([IO.Path]::GetFileName($pendingBackup))，「还原设置」可还原其中已记录的部分。" })
+      Assert-True (($salvageGui -join ' || ') -ceq ($wantSalvageGui -join ' || ')) `
+        "[$Scenario] the BACKUP WRITE FAILED dialog's salvaged-backup sentence was [$($salvageGui -join ' || ')]; expected [$($wantSalvageGui -join ' || ')]"
+      # 抢救一句在弹窗里的位置（复攻五 V07）：Assert-AFBackupFailureSurfaced 的逐段核对把含「抢救」的段落滤掉了，上面只核对它的有无与原文。
+      # 整篇按空行分段：它必须紧跟「失败原因：…」，紧接着就是结尾的「其余项如需回退…」，结尾排在最后——「其余项」说的正是
+      # 抢救备份还原不了的那部分，抢救一句挪到结尾之后，「其余项」就没有了所指。
+      if ($salvaged) {
+        $allParagraphs = @(Get-AFDialogParagraphs "$($bwf[0].Message)" $injected)
+        $salvageAt = @(for ($i = 0; $i -lt $allParagraphs.Count; $i++) { if ($allParagraphs[$i].Contains('抢救')) { $i } })
+        $reasonAt = [array]::IndexOf($allParagraphs, "失败原因：$injected")
+        $closingAt = [array]::IndexOf($allParagraphs, '其余项如需回退，请按上面的项名手动处理，或点「导出诊断报告」发给开发者。')
+        Assert-True ($salvageAt.Count -eq 1 -and $reasonAt -ge 0 -and $salvageAt[0] -eq $reasonAt + 1 -and
+          $closingAt -eq $salvageAt[0] + 1 -and $closingAt -eq $allParagraphs.Count - 1) `
+          ("[$Scenario] the BACKUP WRITE FAILED dialog put the salvaged-backup sentence at paragraph [$($salvageAt -join ',')] of $($allParagraphs.Count) " +
+           "(reason at $reasonAt, closing guidance at $closingAt); expected it right after the reason and right before the closing guidance, which comes last")
+      }
+      # 命令行：记录器已在生产分发之前就位，且备份失败那一段确实打印了（严重警告在场），没有抢救句才说明问题。
+      $cli = @(Get-AFCliOutput)
+      Assert-True ($cli.Count -gt 0 -and $cli[0] -ceq 'af-cli-recorder-armed') `
+        "[$Scenario] fixture problem: the engine child's Write-Output recorder was not armed before the real dispatch (recorded $($cli.Count) line(s))"
+      Assert-True (@($cli | Where-Object { $_.StartsWith("！！严重警告：备份文件写入失败（$injected）", [StringComparison]::Ordinal) }).Count -eq 1) `
+        "[$Scenario] the engine's CLI -Apply output has no severe backup-failure line, so its backup-failure block never ran"
+      $savedCli = @($cli | Where-Object { $_.Contains('备份已保存') -or $_.Contains('抢救') })
+      $wantSavedCli = @(if ($salvaged) { "备份已保存：$pendingBackup（用 -Restore 可一键还原）"; "！！已抢救出的部分备份：$pendingBackup（-Restore 可还原其中已记录的部分）" })
+      Assert-True (($savedCli -join ' || ') -ceq ($wantSavedCli -join ' || ')) `
+        "[$Scenario] the engine's CLI -Apply backup-saved / salvaged lines were [$($savedCli -join ' || ')]; expected [$($wantSavedCli -join ' || ')]"
+    }
+    # 备份完好的批次怎么收尾（复攻五 V01–V06、V54）。此前备份完好的真实批次（S17、S21）完全不看 Backup 与备份目录，
+    # S10 只看界面日志里「备份已保存：…backup-fixture.json」这一行字——盘上有没有这个文件、.pending.json 删没删都不看；
+    # 也没有一个真实批次「一条撤销记录都没写」（每个子操作都已达标）。
+    # 有记录（$ExpectedRecords 非空，按落盘顺序）：Backup 是改名后的 backup-fixture.json；备份目录里恰好只有它（.pending.json 留着，
+    # 还原时会被当成「一次未完成的执行」再列一遍）；它的 State 是 complete；撤销记录逐条是本轮写下的那些（系统写入被拒的停在 prepared）。
+    # 没有记录：不交回 Backup，备份目录为空（空的 .pending.json 删掉，既不留着也不改名成一份空的完整备份）——否则界面与命令行
+    # 会对一个空文件说「备份已保存…可一键还原」，正是 93713da 在备份失败一侧去掉的那句。界面日志与命令行的「备份已保存」照此逐字核对。
+    function Assert-AFCompleteBackupSurfaced([string]$Scenario, $Published, [string[]]$ExpectedRecords) {
+      $want = @($ExpectedRecords | Where-Object { $_ })
+      $hits = @(Get-AFBackupFailureHits)
+      Assert-True (-not $Published.Data.BackupError -and $hits.Count -eq 0) `
+        "[$Scenario] fixture problem: the complete-backup check only applies to a batch whose backup stayed intact (engine BackupError '$($Published.Data.BackupError)'; injected failures [$($hits -join ',')])"
+      # 夹具锚点：引擎确实建过这份 .pending.json（首次落盘、零条记录），下面「目录为空 / 只剩改名后的文件」才不是空转。
+      $pendingName = [IO.Path]::GetFileName($pendingBackup)
+      $completeName = [IO.Path]::GetFileName($completeBackup)
+      $writes = @(Get-AFBackupWrites)
+      Assert-True ($writes.Count -gt 0 -and $writes[0] -ceq "$pendingName|pending|0") `
+        "[$Scenario] fixture problem: the engine's first backup write was not the empty $pendingName (backup writes: [$($writes -join ',')]), so the backup-directory check would prove nothing"
+      $engineBackup = "$($Published.Data.Backup)"
+      $onDisk = @(if (Test-Path -LiteralPath $afBackupDir) { Get-ChildItem -LiteralPath $afBackupDir -Force | ForEach-Object { $_.Name } })
+      if ($want.Count -gt 0) {
+        Assert-True ($engineBackup -ceq $completeBackup) `
+          "[$Scenario] the real engine handed back Backup '$engineBackup' for an intact batch that recorded $($want.Count) undo record(s); expected the renamed complete backup '$completeBackup'"
+        Assert-True (($onDisk -join ',') -ceq $completeName) `
+          "[$Scenario] the intact batch left the backup directory as [$($onDisk -join ',')]; expected exactly [$completeName] (the $pendingName renamed to it, nothing left behind)"
+        $doc = [IO.File]::ReadAllText($completeBackup) | ConvertFrom-Json
+        Assert-True ("$($doc.State)" -ceq 'complete') `
+          "[$Scenario] the intact batch's renamed backup $completeName says State '$($doc.State)'; expected 'complete'"
+        $records = @(@($doc.Ops) | ForEach-Object {
+          "$($_.ItemId):$($_.Kind):$(if ("$($_.Kind)" -ceq 'pcfg') { "$($_.Setting)" } else { "$($_.Name)" })=$($_.Status)" })
+        Assert-True (($records -join ',') -ceq ($want -join ',')) `
+          "[$Scenario] the intact batch's renamed backup $completeName holds the undo records [$($records -join ',')]; expected [$($want -join ',')] (every record this batch wrote, in write order)"
+      } else {
+        Assert-True ($engineBackup -ceq '') `
+          "[$Scenario] the real engine handed back Backup '$engineBackup' for an intact batch that recorded no undo record (every sub-operation was already at target); expected none"
+        Assert-True ($onDisk.Count -eq 0) `
+          "[$Scenario] the intact batch that recorded no undo record left [$($onDisk -join ',')] in the backup directory; expected it empty (the empty $pendingName deleted, neither kept nor renamed)"
+      }
+      Assert-True ("$($script:AFReply.Backup)" -ceq $engineBackup) `
+        "[$Scenario] the real transport handed the Apply handler Backup '$($script:AFReply.Backup)' but the engine published '$engineBackup'"
+      $savedGui = @($script:AFLog | Where-Object { $_.Contains('备份已保存') -or $_.Contains('抢救') })
+      $wantSavedGui = @(if ($want.Count -gt 0) { "备份已保存：$completeBackup" })
+      Assert-True (($savedGui -join ' || ') -ceq ($wantSavedGui -join ' || ')) `
+        "[$Scenario] the GUI log's backup-saved lines for an intact batch were [$($savedGui -join ' || ')]; expected [$($wantSavedGui -join ' || ')]"
+      $cli = @(Get-AFCliOutput)
+      Assert-True ($cli.Count -gt 0 -and $cli[0] -ceq 'af-cli-recorder-armed') `
+        "[$Scenario] fixture problem: the engine child's Write-Output recorder was not armed before the real dispatch (recorded $($cli.Count) line(s))"
+      $savedCli = @($cli | Where-Object { $_.Contains('备份已保存') -or $_.Contains('抢救') })
+      $wantSavedCli = @(if ($want.Count -gt 0) { "备份已保存：$completeBackup（用 -Restore 可一键还原）" })
+      Assert-True (($savedCli -join ' || ') -ceq ($wantSavedCli -join ' || ')) `
+        "[$Scenario] the engine's CLI -Apply backup-saved lines for an intact batch were [$($savedCli -join ' || ')]; expected [$($wantSavedCli -join ' || ')]"
+    }
+    # 备份完好的批次（S17、S21）：界面日志与命令行都不能出现任何「！！」级别的备份告警。
+    # 引擎交回的 UnrecordedNames 也必须为空（复攻四 N05）：界面与命令行只在 BackupError 时才显示它，但引擎 Data 与
+    # 照 SKILL.md 调用的 -Apply -Json 原样带着它——备份完好时还列项名，等于告诉调用方「这些改动可能没有完整备份」。
+    # 这两个批次都有改动过系统的行（下面的夹具锚点），不加 BackupError 守卫地列名单在这里必然非空。
+    function Assert-AFNoBackupFailureSurfaced([string]$Scenario, $Published) {
+      $changedRows = @($Published.Data.Results | Where-Object { $_.Changed -eq $true })
+      Assert-True ($changedRows.Count -gt 0) `
+        "[$Scenario] fixture problem: the intact batch has no row that changed the system, so an empty UnrecordedNames would prove nothing"
+      $engineLost = @($Published.Data.UnrecordedNames | ForEach-Object { "$_" })
+      Assert-True ($engineLost.Count -eq 0) `
+        "[$Scenario] the real engine reported UnrecordedNames [$($engineLost -join '|')] for a batch whose backup was intact; expected none"
+      $cli = @(Get-AFCliOutput)
+      Assert-True ($cli.Count -gt 0 -and $cli[0] -ceq 'af-cli-recorder-armed') `
+        "[$Scenario] fixture problem: the engine child's Write-Output recorder was not armed before the real dispatch (recorded $($cli.Count) line(s))"
+      $guiAlarm = @($script:AFLog | Where-Object { $_.StartsWith('！！', [StringComparison]::Ordinal) })
+      Assert-True ($guiAlarm.Count -eq 0) `
+        "[$Scenario] the GUI log carried backup-failure lines for a batch whose backup was intact: $($guiAlarm -join ' || ')"
+      $cliAlarm = @($cli | Where-Object { $_.StartsWith('！！', [StringComparison]::Ordinal) })
+      Assert-True ($cliAlarm.Count -eq 0) `
+        "[$Scenario] the engine's CLI -Apply output carried backup-failure lines for a batch whose backup was intact: $($cliAlarm -join ' || ')"
+    }
+    # 重启标注如何产生与呈现（复攻三 X03）：引擎只给「成功（Ok）、确有改动（Changed）、非体检、目录标了 Reboot」的行标 Reboot=True——
+    # 被备份失败截断的行 Ok=False，哪怕它改过系统（Changed=True）、哪怕目录标了需重启，也绝不能被当成「成功项」弹重启提醒。
+    # 逐行核对引擎标注；界面的重启弹窗（恰好一次、名单按引擎顺序，或一次都不弹）、界面日志与命令行的「成功项需重启」句都逐字核对。
+    function Assert-AFRebootSurfaced([string]$Scenario, $Published, [string[]]$ExpectedRebootIds) {
+      $wantIds = @($ExpectedRebootIds | Where-Object { $_ })
+      $rebootItems = @(@($script:AFScenario.Real.Items) | Where-Object { $_.Reboot } | ForEach-Object { "$($_.Id)" })
+      $rows = @($Published.Data.Results)
+      $rowsOfRebootItems = @($rows | Where-Object { $rebootItems -ccontains "$($_.Id)" })
+      Assert-True ($rowsOfRebootItems.Count -gt 0 -and @($wantIds | Where-Object { $rebootItems -cnotcontains $_ }).Count -eq 0) `
+        "[$Scenario] fixture problem: the reboot expectation [$($wantIds -join ',')] needs rows of catalog items marked Reboot (marked: [$($rebootItems -join ',')]; rows: [$(@($rows | ForEach-Object { "$($_.Id)" }) -join ',')])"
+      foreach ($row in $rows) {
+        $want = [bool]($wantIds -ccontains "$($row.Id)")
+        Assert-True ($row.Reboot -is [bool] -and $row.Reboot -eq $want) `
+          ("[$Scenario] the real engine flagged $($row.Id) Reboot=$($row.Reboot) (Ok=$($row.Ok) Changed=$($row.Changed), catalog Reboot=$($rebootItems -ccontains "$($row.Id)")); " +
+           "expected Reboot=$($want) because only a successful row that changed the system needs a reboot")
+      }
+      $names = @($rows | Where-Object { $wantIds -ccontains "$($_.Id)" } | ForEach-Object { "$($_.Name)" })
+      $asked = @($script:AFRebootAsked)
+      Assert-True ($(if ($names.Count -gt 0) { $asked.Count -eq 1 -and $asked[0] -ceq ($names -join '|') } else { $asked.Count -eq 0 })) `
+        ("[$Scenario] the GUI's reboot prompt was shown $($asked.Count) time(s) for [$($asked -join ' / ')]; " +
+         "expected $(if ($names.Count -gt 0) { "once for [$($names -join '|')]" } else { 'none' }) (only the rows the engine flagged Reboot)")
+      $guiReboot = @($script:AFLog | Where-Object { $_.Contains('个成功项需重启电脑后完全生效') })
+      $wantGui = @(if ($names.Count -gt 0) { "以下 $($names.Count) 个成功项需重启电脑后完全生效：$($names -join '、')。" })
+      Assert-True (($guiReboot -join ' || ') -ceq ($wantGui -join ' || ')) `
+        "[$Scenario] the GUI log's reboot line was [$($guiReboot -join ' || ')]; expected [$($wantGui -join ' || ')]"
+      $cliReboot = @(Get-AFCliOutput | Where-Object { $_.Contains('个成功项需重启电脑后完全生效') })
+      $wantCli = @(if ($names.Count -gt 0) { "提示：以下 $($names.Count) 个成功项需重启电脑后完全生效——$($names -join '、')。" })
+      Assert-True (($cliReboot -join ' || ') -ceq ($wantCli -join ' || ')) `
+        "[$Scenario] the engine's CLI -Apply reboot hint was [$($cliReboot -join ' || ')]; expected [$($wantCli -join ' || ')]"
+    }
+    # 汇总如何呈现（复攻二 G12）：被截断的行 Ok=False、Changed 可真可假。界面日志的「执行完成：共 N 项 — X 成功、Y 失败、Z 跳过。」、
+    # 进度区最后的完成度文字（带失败项名）、子进程里生产命令行渲染的同一句汇总，都按场景写明的计数逐字核对。
+    # 失败项名按引擎结果顺序（$FailedNames 照场景写明的顺序）：S30 的失败项按顺序不是字母序，排过序再列会在那里红。
+    function Assert-AFSummarySurfaced([string]$Scenario, [int]$Ok, [int]$Fail, [int]$Skip, [string[]]$FailedNames) {
+      $rowCount = @($script:AFReply.Results).Count
+      $failNames = @($FailedNames | Where-Object { $_ })
+      $unmatched = @($failNames | Where-Object { $n = $_; @($script:AFReply.Results | Where-Object { "$($_.Name)" -ceq $n }).Count -ne 1 })
+      Assert-True ($rowCount -gt 0 -and ($Ok + $Fail + $Skip) -eq $rowCount -and $failNames.Count -eq $Fail -and $unmatched.Count -eq 0) `
+        "[$Scenario] fixture problem: the summary expectation ($Ok ok / $Fail failed [$($failNames -join '、')] / $Skip skipped) does not add up to the $rowCount rows the handler received"
+      $line = "执行完成：共 $rowCount 项 — $Ok 成功、$Fail 失败、$Skip 跳过。"
+      Assert-True (@($script:AFLog | Where-Object { $_ -ceq $line }).Count -eq 1) `
+        "[$Scenario] the GUI's completion summary in the log was not exactly '$line' once (summary lines: $(@($script:AFLog | Where-Object { $_.StartsWith('执行完成：', [StringComparison]::Ordinal) }) -join ' || '))"
+      $prog = "执行完成：$Ok 成功 / $Fail 失败 / $Skip 跳过$(if ($Fail -gt 0) { " —— 失败：$($failNames -join '、')" })"
+      Assert-True ("$($script:AFLastProgText)" -ceq $prog) `
+        "[$Scenario] the GUI's progress text after the run was '$($script:AFLastProgText)'; expected '$prog'"
+      # 日志里的失败清单（复攻四 N07）：抬头「以下 N 项失败，…」的 N 是失败行数、恰好一次，紧跟着恰好是这 N 行「  [失败] 项名 — 文案」，
+      # 按引擎结果顺序，之后不再有「  [失败] 」行；没有失败行时抬头与清单都不出现（S29）。
+      $failHeader = "以下 $Fail 项失败，请把日志原文反馈或运行 scripts\diagnose.ps1 排查："
+      $headerAt = @(for ($i = 0; $i -lt $script:AFLog.Count; $i++) {
+        if ($script:AFLog[$i].StartsWith('以下 ', [StringComparison]::Ordinal) -and $script:AFLog[$i].Contains(' 项失败，')) { $i } })
+      $headerLines = @($headerAt | ForEach-Object { $script:AFLog[$_] })
+      $listedAll = @($script:AFLog | Where-Object { $_.StartsWith('  [失败] ', [StringComparison]::Ordinal) })
+      if ($Fail -gt 0) {
+        Assert-True ($headerAt.Count -eq 1 -and $headerLines[0] -ceq $failHeader) `
+          "[$Scenario] the GUI's failure-list header was [$($headerLines -join ' || ')]; expected exactly '$failHeader' once"
+        $wantBlock = @(foreach ($n in $failNames) {
+          "  [失败] $n — $(@($script:AFReply.Results | Where-Object { "$($_.Name)" -ceq $n })[0].Msg)" })
+        $block = @($script:AFLog | Select-Object -Skip ($headerAt[0] + 1) -First $Fail)
+        Assert-True (($block -join ' || ') -ceq ($wantBlock -join ' || ') -and $listedAll.Count -eq $Fail) `
+          ("[$Scenario] the GUI's failure list under the header was [$($block -join ' || ')] ($($listedAll.Count) '  [失败] ' line(s) in the log); " +
+           "expected exactly [$($wantBlock -join ' || ')] in engine order")
+      } else {
+        Assert-True ($headerAt.Count -eq 0 -and $listedAll.Count -eq 0) `
+          "[$Scenario] the GUI logged a failure list although no row failed: [$(@($headerLines + $listedAll) -join ' || ')]"
+      }
+      $cli = @(Get-AFCliOutput)
+      Assert-True (@($cli | Where-Object { $_ -ceq $line }).Count -eq 1) `
+        "[$Scenario] the engine's CLI -Apply summary was not exactly '$line' once (CLI summary lines: $(@($cli | Where-Object { $_.StartsWith('执行完成：', [StringComparison]::Ordinal) }) -join ' || '))"
+      # 逐行结果的先后（复攻四之后补）：界面逐项实时日志「[标签] 项名 — 文案」与命令行逐行结果「  [标签] 项名 — 文案」各自按出现顺序，
+      # 必须恰好是引擎结果行的顺序（每行恰好一次、逐字已由 Assert-AFRowSurfaced 核对）。S30 的引擎顺序不是字母序，按项名排过序再列会在那里红。
+      $rows = @($script:AFReply.Results)
+      $rowNames = @($rows | ForEach-Object { "$($_.Name)" })
+      $wantLive = @($rows | ForEach-Object {
+        "$(if ($_.Attention) { '[提示]' } elseif ($_.Ok) { '[成功]' } elseif ($_.Skipped) { '[跳过]' } else { '[失败]' }) $($_.Name) — $($_.Msg)" })
+      $liveOrder = @($script:AFLog | Where-Object { $wantLive -ccontains $_ } | ForEach-Object { $rowNames[[array]::IndexOf($wantLive, $_)] })
+      Assert-True (($liveOrder -join '|') -ceq ($rowNames -join '|')) `
+        "[$Scenario] the GUI's per-item log listed the rows in the order [$($liveOrder -join '|')]; expected the engine's row order [$($rowNames -join '|')]"
+      $wantCliRows = @($wantLive | ForEach-Object { "  $_" })
+      $cliOrder = @($cli | Where-Object { $wantCliRows -ccontains $_ } | ForEach-Object { $rowNames[[array]::IndexOf($wantCliRows, $_)] })
+      Assert-True (($cliOrder -join '|') -ceq ($rowNames -join '|')) `
+        "[$Scenario] the engine's CLI -Apply listed the rows in the order [$($cliOrder -join '|')]; expected the engine's row order [$($rowNames -join '|')]"
+    }
+    # 界面如何呈现这一行：处理器经生产 Update-ApplyProgress 落一条实时日志，失败行另在汇总的失败清单里再列一次。
+    # 两处都必须逐字是引擎文案（整行 -ceq），界面侧截断或改写都会在这里红。
+    # 标签（复攻五 V52/V53）：体检 [提示]、Ok [成功]、Ok=False 且 Skipped（通用 Ops 分支「本机不满足此项前提 / 未找到游戏路径，已跳过」）[跳过]、
+    # 其余 [失败]——此前只会写 [成功]/[失败]，对跳过行用不上。只有 [失败] 行进汇总的失败清单，其余各行一次都不许出现在里面（复攻五 V09）。
+    function Assert-AFRowSurfaced([string]$Scenario, $Row) {
+      $near = @($script:AFLog | Where-Object { $_.Contains("$($Row.Name) — ") }) -join ' || '
+      $tag = $(if ($Row.Attention) { '[提示]' } elseif ($Row.Ok) { '[成功]' } elseif ($Row.Skipped) { '[跳过]' } else { '[失败]' })
+      $live = "$tag $($Row.Name) — $($Row.Msg)"
+      Assert-True (@($script:AFLog | Where-Object { $_ -ceq $live }).Count -eq 1) `
+        "[$Scenario] the GUI's per-item progress log did not show the engine's row for $($Row.Id) verbatim exactly once (expected '$live'; log: $near)"
+      $listed = "  [失败] $($Row.Name) — $($Row.Msg)"
+      $listedCount = @($script:AFLog | Where-Object { $_ -ceq $listed }).Count
+      if ($tag -ceq '[失败]') {
+        Assert-True ($listedCount -eq 1) `
+          "[$Scenario] the GUI's failure list did not repeat the engine's message for $($Row.Id) verbatim exactly once (expected '$listed'; log: $near)"
+      } else {
+        Assert-True ($listedCount -eq 0) `
+          "[$Scenario] the GUI's failure list listed $($Row.Id) $listedCount time(s) although its row is $tag, not a failure (Ok=$($Row.Ok) Skipped=$($Row.Skipped) Attention=$($Row.Attention); log: $near)"
+      }
+      # 命令行呈现（复攻二 L01）：同一行经引擎入口分发里生产的 elseif ($Apply) 分支打印（真实结果对象，未经 IPC），
+      # 也必须逐字带出引擎文案——截断到第一个「：」会把每条子操作原因连同备份落盘错误一起丢掉。
+      $cli = @(Get-AFCliOutput)
+      Assert-True ($cli.Count -gt 0 -and $cli[0] -ceq 'af-cli-recorder-armed') `
+        "[$Scenario] fixture problem: the engine child's Write-Output recorder was not armed before the real dispatch (recorded $($cli.Count) line(s))"
+      $cliLine = "  $tag $($Row.Name) — $($Row.Msg)"
+      Assert-True (@($cli | Where-Object { $_ -ceq $cliLine }).Count -eq 1) `
+        "[$Scenario] the engine's CLI -Apply output did not show the row for $($Row.Id) verbatim exactly once (expected '$cliLine'; CLI lines: $(@($cli | Where-Object { $_.Contains("$($Row.Name) — ") }) -join ' || '))"
+    }
+
+    # S14：第一项的第一个子操作写 prepared 备份就落盘失败，其后还有两个子操作；第二项整项都不该开始。
+    # 什么都没写（Changed=False），文案必须是「失败（备份无法落盘，其余 2 项未执行）：op1：…」。
+    # 复攻三起，S14–S31 里被截断的项在目录里都标「需重启」（同生产多数系统项）：Reboot 只给成功项，这些行一律 Reboot=False、不弹重启提醒。
+    # 93713da：本轮第一次 prepared 写入就失败，盘上的 .pending.json 一条撤销记录都没有——不交回 Backup、删掉空文件，
+    # 界面与命令行都不能说「备份已保存」「已抢救出部分备份」。文案断言在前：修复前的引擎先按「其余已写入」红。
+    $s14Items = @(
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1' -PrepareFails), (New-AFRealOp 'op2'), (New-AFRealOp 'op3')) -Reboot),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1')) -Reboot)
+    )
+    Set-AFEngineRealScenario $s14Items 'fixture disk full'
+    Invoke-AFApplyClick 'S14' 'none' @('fixture-sys', 'fixture-sys2') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S14' 3 @('fixture-sys') @('fixture-sys/op1') @()
+    $row = Assert-AFCutShortRow 'S14' $pub $s14Items[0] 0 2 $false
+    Assert-AFRowSurfaced 'S14' $row
+    Assert-AFBackupFailureSurfaced 'S14' $pub @()
+    Assert-AFSalvageSurfaced 'S14' $pub @()
+    Assert-AFSummarySurfaced 'S14' 0 1 0 @('fixture system item')
+    Assert-AFRebootSurfaced 'S14' $pub @()
+    Assert-AFRouting 'S14' @('fixture-sys', 'fixture-sys2') @()
+    Assert-AFEngineChildSaw 'S14' @('fixture-sys', 'fixture-sys2')
+
+    # S15：op1 写入并记账，op2 写 prepared 备份时落盘失败，op3 从未尝试——
+    # 「部分子项写入失败（1 项已完成，其后 1 项因备份无法落盘未执行）：op2：…」。
+    $s15Items = @(
+      (New-AFRealItem 'fixture-sys' 'fixture system item' @((New-AFRealOp 'op1'), (New-AFRealOp 'op2' -PrepareFails), (New-AFRealOp 'op3')) -Reboot)
+    )
+    Set-AFEngineRealScenario $s15Items 'fixture disk full'
+    Invoke-AFApplyClick 'S15' 'none' @('fixture-sys') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S15' 3 @('fixture-sys') @('fixture-sys/op1', 'fixture-sys/op2') @('fixture-sys/op1')
+    $row = Assert-AFCutShortRow 'S15' $pub $s15Items[0] 1 1 $true
+    Assert-AFRowSurfaced 'S15' $row
+    Assert-AFBackupFailureSurfaced 'S15' $pub @('fixture system item')
+    # 93713da 的另一面：op1 的撤销记录已经落盘（prepared → applied），抢救出的 .pending.json 必须照常交回并如实告知。
+    Assert-AFSalvageSurfaced 'S15' $pub @('fixture-sys:reg:op1=applied')
+    Assert-AFSummarySurfaced 'S15' 0 1 0 @('fixture system item')
+    # X03：这一行改过系统（Changed=True）、目录标了需重启，但它是失败项——不是「成功项需重启」。
+    Assert-AFRebootSurfaced 'S15' $pub @()
+    Assert-AFRouting 'S15' @('fixture-sys') @()
+    Assert-AFEngineChildSaw 'S15' @('fixture-sys')
+
+    # S16：标 applied 那一次落盘失败——op2 的系统写入已经发生、applied 状态却写不进备份，op3、op4 从未尝试。
+    # op2 按失败计（回滚记录不完整，项名进 UnrecordedNames），所以是「1 项已完成，其后 2 项…未执行」，系统写入是 op1、op2 两笔。
+    $s16Items = @(
+      (New-AFRealItem 'fixture-sys' 'fixture system item' @((New-AFRealOp 'op1'), (New-AFRealOp 'op2' -AppliedFails), (New-AFRealOp 'op3'), (New-AFRealOp 'op4')) -Reboot)
+    )
+    Set-AFEngineRealScenario $s16Items 'fixture disk full'
+    Invoke-AFApplyClick 'S16' 'none' @('fixture-sys') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S16' 3 @('fixture-sys') @('fixture-sys/op1', 'fixture-sys/op2') @('fixture-sys/op1', 'fixture-sys/op2')
+    $row = Assert-AFCutShortRow 'S16' $pub $s16Items[0] 1 2 $true
+    Assert-AFRowSurfaced 'S16' $row
+    Assert-AFBackupFailureSurfaced 'S16' $pub @('fixture system item')
+    # op2 的 prepared 记录已落盘、applied 没写进去：盘上它停在 prepared——正是回滚这笔系统写入要用的那条。
+    Assert-AFSalvageSurfaced 'S16' $pub @('fixture-sys:reg:op1=applied', 'fixture-sys:reg:op2=prepared')
+    Assert-AFSummarySurfaced 'S16' 0 1 0 @('fixture system item')
+    Assert-AFRebootSurfaced 'S16' $pub @()
+    Assert-AFRouting 'S16' @('fixture-sys') @()
+    Assert-AFEngineChildSaw 'S16' @('fixture-sys')
+
+    # S26（复攻二 / 三的 P5 形态，93713da）：落盘失败撞在**最后一个**子操作上——op1 已是目标值（生产 Invoke-ApplyOp 返回
+    # 「无需修改」附注，不写备份、不写系统），op2 写 prepared 时落盘失败；没有子操作被跳过（未执行 0），14920d9 的「未执行」分支不适用。
+    # 真部分失败的文案只能是「部分子项写入失败（其余 1 项已完成）：op2：备份 prepared 状态持久化失败：…」，绝不能说「其余已写入」：
+    # 系统一笔没改（Changed=False、UnrecordedNames 为空、弹窗列「（无）」）。一条撤销记录也没落盘：不交回 Backup、删掉空的 .pending.json。
+    # 放在 S17 之前：只修了抢救、没改真部分失败文案的引擎在这里按「其余已写入」红，而不是先撞上 S17 对照里的新文案。
+    $s26Items = @(
+      (New-AFRealItem 'fixture-sys' 'fixture system item' @((New-AFRealOp 'op1' -AtTarget), (New-AFRealOp 'op2' -PrepareFails)) -Reboot)
+    )
+    Set-AFEngineRealScenario $s26Items 'fixture disk full'
+    Invoke-AFApplyClick 'S26' 'none' @('fixture-sys') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S26' 3 @('fixture-sys') @('fixture-sys/op1', 'fixture-sys/op2') @()
+    $row = Assert-AFCutShortRow 'S26' $pub $s26Items[0] 1 0 $false
+    Assert-AFRowSurfaced 'S26' $row
+    Assert-AFBackupFailureSurfaced 'S26' $pub @()
+    Assert-AFSalvageSurfaced 'S26' $pub @()
+    Assert-AFSummarySurfaced 'S26' 0 1 0 @('fixture system item')
+    Assert-AFRebootSurfaced 'S26' $pub @()
+    Assert-AFRouting 'S26' @('fixture-sys') @()
+    Assert-AFEngineChildSaw 'S26' @('fixture-sys')
+
+    # S17（对照）：备份始终正常，每个子操作都尝试过。真部分失败是「部分子项写入失败（其余 N 项已完成）：…」（93713da 起
+    # 不再说「其余已写入」：已完成的子项可能是已达标或本机没有的可选电源项，见 S26），这里 op1、op3 都写入了，N = 2；
+    # 全部失败是「失败：…」，全部成功是「已写入」。「未执行」按失败数算、尝试数跨项累加之类的计数错误，
+    # 会把这里的真部分失败 / 全成功误报成「因备份无法落盘未执行」。
+    # 重启标注：真部分失败（改过系统）与全部失败两项标了需重启，都不是成功项；全成功的 fixture-sys3 目录没标，也不能被标。
+    $s17Items = @(
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1'), (New-AFRealOp 'op2' 'fixture op2 denied'), (New-AFRealOp 'op3')) -Reboot),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1' 'fixture op1 denied'), (New-AFRealOp 'op2' 'fixture op2 denied')) -Reboot),
+      (New-AFRealItem 'fixture-sys3' 'fixture system item 3' @((New-AFRealOp 'op1'), (New-AFRealOp 'op2')))
+    )
+    Set-AFEngineRealScenario $s17Items $null
+    Invoke-AFApplyClick 'S17' 'none' @('fixture-sys', 'fixture-sys2', 'fixture-sys3') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S17' 2 @('fixture-sys', 'fixture-sys2', 'fixture-sys3') `
+      @('fixture-sys/op1', 'fixture-sys/op2', 'fixture-sys/op3', 'fixture-sys2/op1', 'fixture-sys2/op2', 'fixture-sys3/op1', 'fixture-sys3/op2') `
+      @('fixture-sys/op1', 'fixture-sys/op3', 'fixture-sys3/op1', 'fixture-sys3/op2')
+    Assert-True ((Get-AFDialogTitles) -ceq 'CONFIRM APPLY' -and -not $pub.Data.BackupError) `
+      "[S17] a batch with an intact backup showed dialogs [$(Get-AFDialogTitles)] / engine BackupError '$($pub.Data.BackupError)'; expected only the confirmation and no BackupError"
+    foreach ($want in @(
+        [pscustomobject]@{ Id = 'fixture-sys';  Ok = $false; Changed = $true;  Msg = '部分子项写入失败（其余 2 项已完成）：op2：fixture op2 denied' },
+        [pscustomobject]@{ Id = 'fixture-sys2'; Ok = $false; Changed = $false; Msg = '失败：op1：fixture op1 denied；op2：fixture op2 denied' },
+        [pscustomobject]@{ Id = 'fixture-sys3'; Ok = $true;  Changed = $true;  Msg = '已写入' })) {
+      $row = @($pub.Data.Results | Where-Object { "$($_.Id)" -ceq $want.Id })[0]
+      Assert-True ($row.Ok -eq $want.Ok -and $row.Changed -eq $want.Changed -and $row.Skipped -eq $false -and "$($row.Msg)" -ceq $want.Msg) `
+        ("[S17] $($want.Id) ran every sub-operation with the backup intact, so its row must be Ok=$($want.Ok) Changed=$($want.Changed) " +
+         "'$($want.Msg)'; got Ok=$($row.Ok) Changed=$($row.Changed) Skipped=$($row.Skipped) '$($row.Msg)'")
+      Assert-AFRowSurfaced 'S17' $row
+    }
+    Assert-AFSummarySurfaced 'S17' 1 2 0 @('fixture system item', 'fixture system item 2')
+    Assert-AFNoBackupFailureSurfaced 'S17' $pub
+    # 复攻五 V01–V03、V54：备份完好的批次写 complete、改名、交回 backup-fixture.json。系统写入被拒的子操作，prepared 记录先于写入落盘，停在 prepared。
+    Assert-AFCompleteBackupSurfaced 'S17' $pub @('fixture-sys:reg:op1=applied', 'fixture-sys:reg:op2=prepared', 'fixture-sys:reg:op3=applied',
+      'fixture-sys2:reg:op1=prepared', 'fixture-sys2:reg:op2=prepared', 'fixture-sys3:reg:op1=applied', 'fixture-sys3:reg:op2=applied')
+    Assert-AFRebootSurfaced 'S17' $pub @()
+    Assert-AFRouting 'S17' @('fixture-sys', 'fixture-sys2', 'fixture-sys3') @()
+    Assert-AFEngineChildSaw 'S17' @('fixture-sys', 'fixture-sys2', 'fixture-sys3')
+
+    # S18（复攻 M01/M03/M04）：同一项里先有子操作被系统拒绝写入，之后才遇到备份落盘失败。op1 的 prepared 备份已记下、
+    # 系统写入被拒；op2 写 prepared 时落盘失败；op3 从未尝试。一个子操作都没完成：
+    # 「失败（备份无法落盘，其余 1 项未执行）：op1：fixture op1 denied；op2：…fixture disk full」，两条原因按尝试顺序都在。
+    # S14–S16 每个被截断的项只有一条失败，「已完成 = 尝试数 − 1」「只报最后一条错误」「尝试过两个以上就算部分完成」在那里都与正确公式重合。
+    $s18Items = @(
+      (New-AFRealItem 'fixture-sys' 'fixture system item' @((New-AFRealOp 'op1' 'fixture op1 denied'), (New-AFRealOp 'op2' -PrepareFails), (New-AFRealOp 'op3')) -Reboot)
+    )
+    Set-AFEngineRealScenario $s18Items 'fixture disk full'
+    Invoke-AFApplyClick 'S18' 'none' @('fixture-sys') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S18' 3 @('fixture-sys') @('fixture-sys/op1', 'fixture-sys/op2') @()
+    $row = Assert-AFCutShortRow 'S18' $pub $s18Items[0] 0 1 $false
+    Assert-AFRowSurfaced 'S18' $row
+    Assert-AFBackupFailureSurfaced 'S18' $pub @()
+    # 系统一笔没改，但 op1 的 prepared 记录在系统写入被拒之前已经落盘：按「真正落过盘的记录」判断，照样交回这份备份。
+    Assert-AFSalvageSurfaced 'S18' $pub @('fixture-sys:reg:op1=prepared')
+    Assert-AFSummarySurfaced 'S18' 0 1 0 @('fixture system item')
+    Assert-AFRebootSurfaced 'S18' $pub @()
+    Assert-AFRouting 'S18' @('fixture-sys') @()
+    Assert-AFEngineChildSaw 'S18' @('fixture-sys')
+
+    # S19（复攻 M01/M02）：生产 Invoke-ApplyOp 遇到已是目标值的子操作直接返回「无需修改：…」附注，不写备份也不写系统——
+    # 从这里起「实际尝试的子操作数」与「备份条目数」（$journal.CurrentOpIndex）分叉。op1 已达标、op2 写入、op3 被系统拒绝、
+    # op4 写 prepared 时落盘失败、op5 从未尝试：已完成 2（op1、op2）、未执行 1——
+    # 「部分子项写入失败（2 项已完成，其后 1 项因备份无法落盘未执行）：op3：fixture op3 denied；op4：…」。
+    $s19Items = @(
+      (New-AFRealItem 'fixture-sys' 'fixture system item' @((New-AFRealOp 'op1' -AtTarget), (New-AFRealOp 'op2'),
+        (New-AFRealOp 'op3' 'fixture op3 denied'), (New-AFRealOp 'op4' -PrepareFails), (New-AFRealOp 'op5')) -Reboot)
+    )
+    Set-AFEngineRealScenario $s19Items 'fixture disk full'
+    Invoke-AFApplyClick 'S19' 'none' @('fixture-sys') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S19' 3 @('fixture-sys') @('fixture-sys/op1', 'fixture-sys/op2', 'fixture-sys/op3', 'fixture-sys/op4') @('fixture-sys/op2')
+    $row = Assert-AFCutShortRow 'S19' $pub $s19Items[0] 2 1 $true
+    Assert-AFRowSurfaced 'S19' $row
+    Assert-AFBackupFailureSurfaced 'S19' $pub @('fixture system item')
+    Assert-AFSalvageSurfaced 'S19' $pub @('fixture-sys:reg:op2=applied', 'fixture-sys:reg:op3=prepared')
+    Assert-AFSummarySurfaced 'S19' 0 1 0 @('fixture system item')
+    Assert-AFRebootSurfaced 'S19' $pub @()
+    Assert-AFRouting 'S19' @('fixture-sys') @()
+    Assert-AFEngineChildSaw 'S19' @('fixture-sys')
+
+    # S20（复攻 M02）：隐藏的电源设置一个子操作写两条备份（先备份并解除隐藏的 Attributes，再备份并写值）——备份条目数多于尝试数。
+    # 第一项 op1 已达标、op2 写入，全部成功：文案带生产的附注「已写入（无需修改：op1 已是目标状态）」。
+    # 第二项 op1 是隐藏电源设置（两次系统写入），op2 写 prepared 时落盘失败，op3 从未尝试：
+    # 「部分子项写入失败（1 项已完成，其后 1 项因备份无法落盘未执行）：op2：…」。
+    # 重启标注（复攻三 X03）：两项目录都标需重启——成功且改过系统的 fixture-sys 要弹一次提醒，截断的 fixture-sys2 不能进名单。
+    $s20Items = @(
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1' -AtTarget), (New-AFRealOp 'op2')) -Reboot),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1' -HiddenPowerSetting), (New-AFRealOp 'op2' -PrepareFails), (New-AFRealOp 'op3')) -Reboot)
+    )
+    Set-AFEngineRealScenario $s20Items 'fixture disk full'
+    Invoke-AFApplyClick 'S20' 'none' @('fixture-sys', 'fixture-sys2') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S20' 3 @('fixture-sys', 'fixture-sys2') `
+      @('fixture-sys/op1', 'fixture-sys/op2', 'fixture-sys2/op1', 'fixture-sys2/op2') `
+      @('fixture-sys/op2', 'fixture-sys2/op1(unhide)', 'fixture-sys2/op1')
+    # 夹具锚点：抢救出的 pending 备份里，隐藏电源设置那一个子操作确实留下了两条已生效的记录（Attributes 与值本身）。
+    $s20Salvaged = $(if (Test-Path -LiteralPath $pendingBackup) { [IO.File]::ReadAllText($pendingBackup) | ConvertFrom-Json })
+    $s20Hidden = @($(if ($s20Salvaged) { @($s20Salvaged.Ops) | Where-Object { "$($_.ItemId)" -ceq 'fixture-sys2' -and "$($_.Status)" -ceq 'applied' } }))
+    Assert-True ($s20Hidden.Count -eq 2 -and (@($s20Hidden | ForEach-Object { "$($_.Kind)" }) -join ',') -ceq 'reg,pcfg') `
+      "[S20] fixture problem: the hidden power setting fixture-sys2/op1 did not leave two applied backup records (Attributes, then the value) in the salvaged backup: [$(@($s20Hidden | ForEach-Object { "$($_.Kind):$($_.Name)$($_.Setting)" }) -join ',')]"
+    $s20Ok = @($pub.Data.Results | Where-Object { "$($_.Id)" -ceq 'fixture-sys' })[0]
+    Assert-True ($s20Ok.Ok -eq $true -and $s20Ok.Changed -eq $true -and $s20Ok.Skipped -eq $false -and
+      "$($s20Ok.Msg)" -ceq '已写入（无需修改：op1 已是目标状态）') `
+      ("[S20] fixture-sys ran both sub-operations before the backup failure (op1 already at target, op2 written), so its row must be " +
+       "Ok=True Changed=True '已写入（无需修改：op1 已是目标状态）'; got Ok=$($s20Ok.Ok) Changed=$($s20Ok.Changed) Skipped=$($s20Ok.Skipped) '$($s20Ok.Msg)'")
+    Assert-AFRowSurfaced 'S20' $s20Ok
+    $row = Assert-AFCutShortRow 'S20' $pub $s20Items[1] 1 1 $true
+    Assert-AFRowSurfaced 'S20' $row
+    Assert-AFBackupFailureSurfaced 'S20' $pub @('fixture system item', 'fixture system item 2')
+    Assert-AFSalvageSurfaced 'S20' $pub @('fixture-sys:reg:op2=applied', 'fixture-sys2:reg:Attributes=applied', 'fixture-sys2:pcfg:op1=applied')
+    Assert-AFSummarySurfaced 'S20' 1 1 0 @('fixture system item 2')
+    Assert-AFRebootSurfaced 'S20' $pub @('fixture-sys')
+    Assert-AFRouting 'S20' @('fixture-sys', 'fixture-sys2') @()
+    Assert-AFEngineChildSaw 'S20' @('fixture-sys', 'fixture-sys2')
+
+    # S21（对照，复攻 M02/M05）：备份始终正常，生产目录里另外两种形状。
+    # fixture-sys 的两个子操作都已是目标值：生产 Invoke-ApplyOp 一条备份都不写，整项 Ok、Skipped、「无需修改：所有设置已是目标状态」。
+    # fixture-sys2 / fixture-sys3 的 Ops 照生产 gpu-pstate-lock 的 $(if (…) { @(@{…}) }) 构造，是一个裸 Hashtable
+    # （.Count 是键数 5，@(…).Count 才是 1）：写入成功是「已写入」，系统写入被拒是「失败：op1：…」。
+    # 重启标注（复攻三 X03）：三项目录都标需重启——只有写入成功的 fixture-sys2 进名单；已达标（Ok、没改动）与写入被拒的都不进。
+    $s21Items = @(
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1' -AtTarget), (New-AFRealOp 'op2' -AtTarget)) -Reboot),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1')) -ScalarOps -Reboot),
+      (New-AFRealItem 'fixture-sys3' 'fixture system item 3' @((New-AFRealOp 'op1' 'fixture op1 denied')) -ScalarOps -Reboot)
+    )
+    Set-AFEngineRealScenario $s21Items $null
+    Invoke-AFApplyClick 'S21' 'none' @('fixture-sys', 'fixture-sys2', 'fixture-sys3') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S21' 2 @('fixture-sys', 'fixture-sys2', 'fixture-sys3') `
+      @('fixture-sys/op1', 'fixture-sys/op2', 'fixture-sys2/op1', 'fixture-sys3/op1') @('fixture-sys2/op1')
+    Assert-True ((@(Get-AFOpsShapes) -join ',') -ceq 'fixture-sys=Object[],fixture-sys2=Hashtable,fixture-sys3=Hashtable') `
+      "[S21] fixture problem: the engine child's catalog did not build the production Ops shapes (expected an array, then two bare Hashtables): [$(@(Get-AFOpsShapes) -join ',')]"
+    Assert-True ((Get-AFDialogTitles) -ceq 'CONFIRM APPLY' -and -not $pub.Data.BackupError) `
+      "[S21] a batch with an intact backup showed dialogs [$(Get-AFDialogTitles)] / engine BackupError '$($pub.Data.BackupError)'; expected only the confirmation and no BackupError"
+    foreach ($want in @(
+        [pscustomobject]@{ Id = 'fixture-sys';  Shape = 'two sub-operations already at target'; Ok = $true;  Skipped = $true;  Changed = $false; Msg = '无需修改：所有设置已是目标状态' },
+        [pscustomobject]@{ Id = 'fixture-sys2'; Shape = 'bare-Hashtable Ops, written';           Ok = $true;  Skipped = $false; Changed = $true;  Msg = '已写入' },
+        [pscustomobject]@{ Id = 'fixture-sys3'; Shape = 'bare-Hashtable Ops, write refused';     Ok = $false; Skipped = $false; Changed = $false; Msg = '失败：op1：fixture op1 denied' })) {
+      $row = @($pub.Data.Results | Where-Object { "$($_.Id)" -ceq $want.Id })[0]
+      Assert-True ($row.Ok -eq $want.Ok -and $row.Skipped -eq $want.Skipped -and $row.Changed -eq $want.Changed -and "$($row.Msg)" -ceq $want.Msg) `
+        ("[S21] $($want.Id) ($($want.Shape)) ran every sub-operation with the backup intact, so its row must be Ok=$($want.Ok) " +
+         "Skipped=$($want.Skipped) Changed=$($want.Changed) '$($want.Msg)'; got Ok=$($row.Ok) Skipped=$($row.Skipped) Changed=$($row.Changed) '$($row.Msg)'")
+      Assert-AFRowSurfaced 'S21' $row
+    }
+    # 已达标整项是 Ok=True、Skipped=True：生产汇总按 Ok 计成功（跳过只数 Ok=False 的行）。
+    Assert-AFSummarySurfaced 'S21' 2 1 0 @('fixture system item 3')
+    Assert-AFNoBackupFailureSurfaced 'S21' $pub
+    # 已达标的两个子操作不写备份；裸 Hashtable 的两项各一条（写入成功的 applied、被拒的停在 prepared）。
+    Assert-AFCompleteBackupSurfaced 'S21' $pub @('fixture-sys2:reg:op1=applied', 'fixture-sys3:reg:op1=prepared')
+    Assert-AFRebootSurfaced 'S21' $pub @('fixture-sys2')
+    Assert-AFRouting 'S21' @('fixture-sys', 'fixture-sys2', 'fixture-sys3') @()
+    Assert-AFEngineChildSaw 'S21' @('fixture-sys', 'fixture-sys2', 'fixture-sys3')
+
+    # S22（复攻二 A01/A02）：失败子操作多（4 条系统拒绝 + 最后 1 条备份落盘失败）、名字按尝试顺序排列时**不是**有序的。
+    # 此前每个场景都把子操作按 op1..opN 命名（尝试顺序 = 排序顺序），截断的项最多两条失败：尾部按字母排序 / 去重，
+    # 或只留前 2–3 条原因（恰好丢掉让循环停下的落盘错误），全都照绿。
+    # 尝试顺序 zeta、beta（写入）、alpha、mid、delta、kappa（prepared 落盘失败），omega 从未尝试：已完成 1、未执行 1——
+    # 「部分子项写入失败（1 项已完成，其后 1 项因备份无法落盘未执行）：zeta：…；alpha：…；mid：…；delta：…；kappa：…fixture disk full」。
+    $s22Items = @(
+      (New-AFRealItem 'fixture-sys' 'fixture system item' @((New-AFRealOp 'zeta' 'fixture zeta denied'), (New-AFRealOp 'beta'),
+        (New-AFRealOp 'alpha' 'fixture alpha denied'), (New-AFRealOp 'mid' 'fixture mid denied'), (New-AFRealOp 'delta' 'fixture delta denied'),
+        (New-AFRealOp 'kappa' -PrepareFails), (New-AFRealOp 'omega')) -Reboot)
+    )
+    # 夹具锚点：失败子操作按尝试顺序既不是升序也不是降序，而且至少 5 条、落盘失败排在最后。
+    $s22Failed = @(@($s22Items[0].Ops) | Where-Object { $_.WriteError -or $_.PrepareFails } | ForEach-Object { "$($_.Name)" })
+    Assert-True ($s22Failed.Count -ge 5 -and ($s22Failed -join ',') -cne (@($s22Failed | Sort-Object) -join ',') -and
+      ($s22Failed -join ',') -cne (@($s22Failed | Sort-Object -Descending) -join ',') -and $s22Failed[$s22Failed.Count - 1] -ceq 'kappa') `
+      "[S22] fixture problem: the failing sub-operations [$($s22Failed -join ',')] must be at least 5, in an unsorted attempt order, with the backup failure (kappa) last"
+    Set-AFEngineRealScenario $s22Items 'fixture disk full'
+    Invoke-AFApplyClick 'S22' 'none' @('fixture-sys') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S22' 3 @('fixture-sys') `
+      @('fixture-sys/zeta', 'fixture-sys/beta', 'fixture-sys/alpha', 'fixture-sys/mid', 'fixture-sys/delta', 'fixture-sys/kappa') @('fixture-sys/beta')
+    $row = Assert-AFCutShortRow 'S22' $pub $s22Items[0] 1 1 $true
+    Assert-AFRowSurfaced 'S22' $row
+    Assert-AFBackupFailureSurfaced 'S22' $pub @('fixture system item')
+    Assert-AFSalvageSurfaced 'S22' $pub @('fixture-sys:reg:zeta=prepared', 'fixture-sys:reg:beta=applied', 'fixture-sys:reg:alpha=prepared',
+      'fixture-sys:reg:mid=prepared', 'fixture-sys:reg:delta=prepared')
+    Assert-AFSummarySurfaced 'S22' 0 1 0 @('fixture system item')
+    Assert-AFRebootSurfaced 'S22' $pub @()
+    Assert-AFRouting 'S22' @('fixture-sys') @()
+    Assert-AFEngineChildSaw 'S22' @('fixture-sys')
+
+    # S23（复攻二 A03/A04）：「已完成」与「这一项改动了系统」脱钩——截断前完成的唯一子操作本来就已是目标值（无需修改，
+    # 不写备份也不写系统），op2 写 prepared 时落盘失败，op3 从未尝试。已完成 1、未执行 1，但**系统一笔都没写**：
+    # Changed=False、UnrecordedNames 为空、弹窗列「（无）」。此前凡是 done > 0 的截断项都真写过系统，
+    # 于是「按有没有 applied 记录挑头部」「done > 0 就当改动过」都与正确实现重合。
+    $s23Items = @(
+      (New-AFRealItem 'fixture-sys' 'fixture system item' @((New-AFRealOp 'op1' -AtTarget), (New-AFRealOp 'op2' -PrepareFails), (New-AFRealOp 'op3')) -Reboot)
+    )
+    Set-AFEngineRealScenario $s23Items 'fixture disk full'
+    Invoke-AFApplyClick 'S23' 'none' @('fixture-sys') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S23' 3 @('fixture-sys') @('fixture-sys/op1', 'fixture-sys/op2') @()
+    $row = Assert-AFCutShortRow 'S23' $pub $s23Items[0] 1 1 $false
+    Assert-AFRowSurfaced 'S23' $row
+    Assert-AFBackupFailureSurfaced 'S23' $pub @()
+    # 已达标的 op1 不写备份：一条撤销记录都没落盘，不交回 Backup（93713da）。
+    Assert-AFSalvageSurfaced 'S23' $pub @()
+    Assert-AFSummarySurfaced 'S23' 0 1 0 @('fixture system item')
+    Assert-AFRebootSurfaced 'S23' $pub @()
+    Assert-AFRouting 'S23' @('fixture-sys') @()
+    Assert-AFEngineChildSaw 'S23' @('fixture-sys')
+
+    # S24（复攻二 A03）：反方向脱钩——第一个子操作的系统写入已经发生，标 applied 时落盘失败（按失败计），op2、op3 从未尝试。
+    # 已完成 0、未执行 2，但系统**确实被改了**：Changed=True、项名进 UnrecordedNames。
+    # 「失败（备份无法落盘，其余 2 项未执行）：op1：备份 applied 状态持久化失败：fixture disk full」——绝不能是「0 项已完成」。
+    $s24Items = @(
+      (New-AFRealItem 'fixture-sys' 'fixture system item' @((New-AFRealOp 'op1' -AppliedFails), (New-AFRealOp 'op2'), (New-AFRealOp 'op3')) -Reboot)
+    )
+    Set-AFEngineRealScenario $s24Items 'fixture disk full'
+    Invoke-AFApplyClick 'S24' 'none' @('fixture-sys') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S24' 3 @('fixture-sys') @('fixture-sys/op1') @('fixture-sys/op1')
+    $row = Assert-AFCutShortRow 'S24' $pub $s24Items[0] 0 2 $true
+    Assert-AFRowSurfaced 'S24' $row
+    Assert-AFBackupFailureSurfaced 'S24' $pub @('fixture system item')
+    # 已完成 0，但 op1 的 prepared 记录已落盘、系统也已写入：这份 .pending.json 是回滚 op1 的唯一凭据，必须交回。
+    Assert-AFSalvageSurfaced 'S24' $pub @('fixture-sys:reg:op1=prepared')
+    Assert-AFSummarySurfaced 'S24' 0 1 0 @('fixture system item')
+    Assert-AFRebootSurfaced 'S24' $pub @()
+    Assert-AFRouting 'S24' @('fixture-sys') @()
+    Assert-AFEngineChildSaw 'S24' @('fixture-sys')
+
+    # S25（复攻三 X04/X05）：照生产 power-tuning 的形状——先是一个 Optional 的电源子操作，本机 CPU 不支持
+    # （生产 Invoke-ApplyOp 返回「跳过（本机 CPU 无此电源项）：…」附注，不写备份也不写系统，算尝试过、没失败），
+    # 其后的 reg 子操作都带与值名不同的人话 Label：valB 写入、valE 被系统拒绝、valC 写 prepared 时落盘失败、valD 从未尝试。
+    # 已完成 = 尝试 4 − 失败 2 = 2（跳过的那个也算处理完了：已完成 + 失败 + 未执行 = 5 个子操作一个不少），未执行 1——
+    # 「部分子项写入失败（2 项已完成，其后 1 项因备份无法落盘未执行）：fixture label E：fixture valE denied；fixture label C：备份 prepared 状态持久化失败：fixture disk full」。
+    # 此前没有任何场景返回「跳过」附注（夹具的电源设置一律「本机支持」），reg 子操作也都不带 Label。
+    $s25Items = @(
+      (New-AFRealItem 'fixture-sys' 'fixture system item' @(
+        (New-AFRealOp 'optA' -OptionalUnsupportedPowerSetting -Label 'fixture optional power setting'),
+        (New-AFRealOp 'valB' -Label 'fixture label B'), (New-AFRealOp 'valE' 'fixture valE denied' -Label 'fixture label E'),
+        (New-AFRealOp 'valC' -PrepareFails -Label 'fixture label C'), (New-AFRealOp 'valD' -Label 'fixture label D')) -Reboot)
+    )
+    # 夹具锚点：每个 reg 子操作的 Label 都与值名不同（否则「Label 优先还是 Name 优先」在这里分不出来）。
+    $s25RegOps = @(@($s25Items[0].Ops) | Where-Object { $_.Kind -ceq 'reg' })
+    Assert-True ($s25RegOps.Count -eq 4 -and @($s25RegOps | Where-Object { -not $_.Label -or $_.Label -ceq $_.Name }).Count -eq 0) `
+      "[S25] fixture problem: every reg sub-operation must carry a Label that differs from its value name"
+    Set-AFEngineRealScenario $s25Items 'fixture disk full'
+    Invoke-AFApplyClick 'S25' 'none' @('fixture-sys') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S25' 3 @('fixture-sys') `
+      @('fixture-sys/optA', 'fixture-sys/valB', 'fixture-sys/valE', 'fixture-sys/valC') @('fixture-sys/valB')
+    # 夹具锚点：生产 Invoke-ApplyOp 确实问过「本机是否支持 optA」并得到「不支持」——走的是 Optional 跳过分支，而不是写入分支。
+    Assert-True ((@(Get-AFPowerProbes) -join ',') -ceq 'fixture-sys/optA=False') `
+      "[S25] fixture problem: the optional power setting was not probed exactly once as unsupported: [$(@(Get-AFPowerProbes) -join ',')]"
+    $row = Assert-AFCutShortRow 'S25' $pub $s25Items[0] 2 1 $true
+    Assert-AFRowSurfaced 'S25' $row
+    Assert-AFBackupFailureSurfaced 'S25' $pub @('fixture system item')
+    Assert-AFSalvageSurfaced 'S25' $pub @('fixture-sys:reg:valB=applied', 'fixture-sys:reg:valE=prepared')
+    Assert-AFSummarySurfaced 'S25' 0 1 0 @('fixture system item')
+    Assert-AFRebootSurfaced 'S25' $pub @()
+    Assert-AFRouting 'S25' @('fixture-sys') @()
+    Assert-AFEngineChildSaw 'S25' @('fixture-sys')
+
+    # S27（93713da，跨项抢救）：第一项两个子操作都写入并记账（成功、需重启），第二项第一个子操作写 prepared 时落盘失败、op2 从未尝试。
+    # 失败的这一项自己一条记录都没落盘，但前一项的两条早已在盘上：抢救按整轮真正落过盘的记录判断，必须交回 .pending.json，
+    # 并列出成功项为「已生效、备份可能没记全」。S14 / S26 / S23 里失败项是本轮第一个写备份的，「按当前项是否落过盘」与正确实现在那里重合。
+    $s27Items = @(
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1'), (New-AFRealOp 'op2')) -Reboot),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1' -PrepareFails), (New-AFRealOp 'op2')) -Reboot)
+    )
+    Set-AFEngineRealScenario $s27Items 'fixture disk full'
+    Invoke-AFApplyClick 'S27' 'none' @('fixture-sys', 'fixture-sys2') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S27' 3 @('fixture-sys', 'fixture-sys2') @('fixture-sys/op1', 'fixture-sys/op2', 'fixture-sys2/op1') @('fixture-sys/op1', 'fixture-sys/op2')
+    $s27Ok = @($pub.Data.Results | Where-Object { "$($_.Id)" -ceq 'fixture-sys' })[0]
+    Assert-True ($s27Ok.Ok -eq $true -and $s27Ok.Changed -eq $true -and $s27Ok.Skipped -eq $false -and "$($s27Ok.Msg)" -ceq '已写入') `
+      ("[S27] fixture-sys wrote and recorded both sub-operations before the next item's backup failure, so its row must be " +
+       "Ok=True Changed=True '已写入'; got Ok=$($s27Ok.Ok) Changed=$($s27Ok.Changed) Skipped=$($s27Ok.Skipped) '$($s27Ok.Msg)'")
+    Assert-AFRowSurfaced 'S27' $s27Ok
+    $row = Assert-AFCutShortRow 'S27' $pub $s27Items[1] 0 1 $false
+    Assert-AFRowSurfaced 'S27' $row
+    Assert-AFBackupFailureSurfaced 'S27' $pub @('fixture system item')
+    Assert-AFSalvageSurfaced 'S27' $pub @('fixture-sys:reg:op1=applied', 'fixture-sys:reg:op2=applied')
+    Assert-AFSummarySurfaced 'S27' 1 1 0 @('fixture system item 2')
+    Assert-AFRebootSurfaced 'S27' $pub @('fixture-sys')
+    Assert-AFRouting 'S27' @('fixture-sys', 'fixture-sys2') @()
+    Assert-AFEngineChildSaw 'S27' @('fixture-sys', 'fixture-sys2')
+
+    # S28（复攻四 N01–N03）：真部分失败（没有子操作被跳过、已完成 > 0）带**两条**原因。op1 写入；op3 的系统写入被拒；
+    # 最后一个子操作 op2 写 prepared 时落盘失败。已完成 1、未执行 0——「部分子项写入失败（其余 1 项已完成）：op3：…；op2：…」，
+    # 两条原因按尝试顺序（op3 在前、带阶段词 prepared 的 op2 在后，与字母序相反）。此前走这个分支的场景（S26、S17 的 fixture-sys、S8、S10）
+    # 都只有一条原因：只留最后一条 / 第一条、排序去重都与正确实现重合；只留第一条还会把落盘失败那条连同阶段词一起丢掉。
+    $s28Items = @(
+      (New-AFRealItem 'fixture-sys' 'fixture system item' @((New-AFRealOp 'op1'), (New-AFRealOp 'op3' 'fixture op3 denied'), (New-AFRealOp 'op2' -PrepareFails)) -Reboot)
+    )
+    # 夹具锚点：两条失败按尝试顺序不是字母序，落盘失败排在最后。
+    $s28Failed = @(@($s28Items[0].Ops) | Where-Object { $_.WriteError -or $_.PrepareFails } | ForEach-Object { "$($_.Name)" })
+    Assert-True ($s28Failed.Count -eq 2 -and ($s28Failed -join ',') -cne (@($s28Failed | Sort-Object) -join ',') -and $s28Failed[1] -ceq 'op2') `
+      "[S28] fixture problem: the two failing sub-operations [$($s28Failed -join ',')] must be in a non-alphabetical attempt order with the backup failure (op2) last"
+    Set-AFEngineRealScenario $s28Items 'fixture disk full'
+    Invoke-AFApplyClick 'S28' 'none' @('fixture-sys') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S28' 3 @('fixture-sys') @('fixture-sys/op1', 'fixture-sys/op3', 'fixture-sys/op2') @('fixture-sys/op1')
+    $row = Assert-AFCutShortRow 'S28' $pub $s28Items[0] 1 0 $true
+    Assert-AFRowSurfaced 'S28' $row
+    Assert-AFBackupFailureSurfaced 'S28' $pub @('fixture system item')
+    # op3 的 prepared 记录在系统写入被拒之前已落盘；op2 那条没写进去。
+    Assert-AFSalvageSurfaced 'S28' $pub @('fixture-sys:reg:op1=applied', 'fixture-sys:reg:op3=prepared')
+    Assert-AFSummarySurfaced 'S28' 0 1 0 @('fixture system item')
+    Assert-AFRebootSurfaced 'S28' $pub @()
+    Assert-AFRouting 'S28' @('fixture-sys') @()
+    Assert-AFEngineChildSaw 'S28' @('fixture-sys')
+
+    # S29（复攻四 N04/N25）：每个子操作都写入并记账（备份逐条落盘），收尾把 complete 状态落盘时失败。生产在这一处 catch 里
+    # 记下 BackupError（退出码 3），把仍是 pending、记录全为 applied 的 .pending.json 作为 Backup 交回（不改名为 .json），
+    # 两项都列为「已生效、备份可能没记全」；两行本身都是成功（已写入），需重启的成功项照常提醒重启。
+    # 此前这条路径只有 S9 覆盖，而 S9 的 Data 是手写的：真实引擎在这里不交回备份、或吞掉错误照报 exit 0，都照绿。
+    # 已知遗留（产品决定，本补丁不改）：每一项都已执行完，界面严重告警与命令行严重警告仍说「剩余优化项已中止执行」、
+    # 弹窗开头仍说「本轮执行已中止」。这里照现状逐字钉住（Assert-AFBackupFailureSurfaced），日后改这三句须同步改本场景；
+    # 本批次没有失败行，只按「有没有失败行」改措辞的实现只在这里红。
+    $s29Items = @(
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1')) -Reboot),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1'), (New-AFRealOp 'op2')))
+    )
+    Set-AFEngineRealScenario $s29Items 'fixture complete-state write denied' -CompleteFails
+    Invoke-AFApplyClick 'S29' 'none' @('fixture-sys', 'fixture-sys2') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S29' 3 @('fixture-sys', 'fixture-sys2') @('fixture-sys/op1', 'fixture-sys2/op1', 'fixture-sys2/op2') `
+      @('fixture-sys/op1', 'fixture-sys2/op1', 'fixture-sys2/op2')
+    # 夹具锚点：注入恰好打在收尾那一次写入上（不新增、不改动任何撤销记录的那一次；prepared / applied 写入一次都没失败）。
+    $s29Hits = @(Get-AFBackupFailureHits)
+    Assert-True ($s29Hits.Count -eq 1 -and $s29Hits[0].StartsWith('complete:', [StringComparison]::Ordinal)) `
+      "[S29] fixture problem: the finalization write (the one that adds or changes no undo record) was not injected to fail exactly once: [$($s29Hits -join ',')]"
+    # 产品断言（复攻五 V03 的另一面）：收尾那一次写入带的是 complete 状态（注入不再按 State 认收尾，漏设 State 不会让注入落空）。
+    Assert-True ($s29Hits[0] -ceq 'complete:State=complete') `
+      "[S29] the engine's finalization write carried $($s29Hits[0].Substring('complete:'.Length)); expected State=complete"
+    foreach ($s29Id in @('fixture-sys', 'fixture-sys2')) {
+      $s29Row = @($pub.Data.Results | Where-Object { "$($_.Id)" -ceq $s29Id })[0]
+      Assert-True ($s29Row.Ok -eq $true -and $s29Row.Changed -eq $true -and $s29Row.Skipped -eq $false -and "$($s29Row.Msg)" -ceq '已写入') `
+        ("[S29] $s29Id wrote and recorded every sub-operation before the complete-state write failed, so its row must be " +
+         "Ok=True Changed=True '已写入'; got Ok=$($s29Row.Ok) Changed=$($s29Row.Changed) Skipped=$($s29Row.Skipped) '$($s29Row.Msg)'")
+      Assert-AFRowSurfaced 'S29' $s29Row
+    }
+    Assert-AFBackupFailureSurfaced 'S29' $pub @('fixture system item', 'fixture system item 2')
+    Assert-AFSalvageSurfaced 'S29' $pub @('fixture-sys:reg:op1=applied', 'fixture-sys2:reg:op1=applied', 'fixture-sys2:reg:op2=applied')
+    Assert-AFSummarySurfaced 'S29' 2 0 0 @()
+    Assert-AFRebootSurfaced 'S29' $pub @('fixture-sys')
+    Assert-AFRouting 'S29' @('fixture-sys', 'fixture-sys2') @()
+    Assert-AFEngineChildSaw 'S29' @('fixture-sys', 'fixture-sys2')
+
+    # S30（复攻四 N30/N31）：执行顺序与名字的字母序相反。此前每个场景的引擎顺序都恰好是字母序，「按引擎顺序」逐字核对的
+    # UnrecordedNames、界面日志 / 弹窗 / 命令行名单、失败清单与进度区的失败项名、逐项日志与命令行逐行结果的先后都分不出「按顺序」还是「排过序」。
+    # 目录顺序：fixture-sys3（两个子操作的系统写入都被拒：失败、没改动）、fixture-sys2（写入成功、需重启）、fixture-sys（op1 写入，
+    # op2 写 prepared 时落盘失败，op3 从未尝试）。UnrecordedNames 是「item 2、item」，失败项是「item 3、item」，两者都与字母序相反。
+    # fixture-sys3 的两个子操作按 op2、op1 的顺序尝试：全部失败「失败：…」的尾部也按尝试顺序列（S17 的 fixture-sys2 两条原因恰好是字母序）。
+    $s30Items = @(
+      (New-AFRealItem 'fixture-sys3' 'fixture system item 3' @((New-AFRealOp 'op2' 'fixture op2 denied'), (New-AFRealOp 'op1' 'fixture op1 denied'))),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1')) -Reboot),
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1'), (New-AFRealOp 'op2' -PrepareFails), (New-AFRealOp 'op3')) -Reboot)
+    )
+    $s30Lost = @('fixture system item 2', 'fixture system item')
+    $s30Failed = @('fixture system item 3', 'fixture system item')
+    $s30Sys3Ops = @(@($s30Items[0].Ops) | ForEach-Object { "$($_.Name)" })
+    # 夹具锚点：两份期望名单、fixture-sys3 的尝试顺序都不是字母序（否则顺序断言又会空转）。
+    Assert-True (($s30Lost -join '|') -cne (@($s30Lost | Sort-Object) -join '|') -and ($s30Failed -join '|') -cne (@($s30Failed | Sort-Object) -join '|') -and
+      ($s30Sys3Ops -join '|') -cne (@($s30Sys3Ops | Sort-Object) -join '|')) `
+      '[S30] fixture problem: the expected unrecorded and failed name lists and the attempt order of fixture-sys3 must all differ from their alphabetical order'
+    Set-AFEngineRealScenario $s30Items 'fixture disk full'
+    Invoke-AFApplyClick 'S30' 'none' @('fixture-sys', 'fixture-sys2', 'fixture-sys3') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S30' 3 @('fixture-sys3', 'fixture-sys2', 'fixture-sys') `
+      @('fixture-sys3/op2', 'fixture-sys3/op1', 'fixture-sys2/op1', 'fixture-sys/op1', 'fixture-sys/op2') @('fixture-sys2/op1', 'fixture-sys/op1')
+    foreach ($want in @(
+        [pscustomobject]@{ Id = 'fixture-sys3'; Ok = $false; Changed = $false; Msg = '失败：op2：fixture op2 denied；op1：fixture op1 denied' },
+        [pscustomobject]@{ Id = 'fixture-sys2'; Ok = $true;  Changed = $true;  Msg = '已写入' })) {
+      $row = @($pub.Data.Results | Where-Object { "$($_.Id)" -ceq $want.Id })[0]
+      Assert-True ($row.Ok -eq $want.Ok -and $row.Changed -eq $want.Changed -and $row.Skipped -eq $false -and "$($row.Msg)" -ceq $want.Msg) `
+        ("[S30] $($want.Id) ran every sub-operation before the backup failure, so its row must be Ok=$($want.Ok) Changed=$($want.Changed) " +
+         "'$($want.Msg)'; got Ok=$($row.Ok) Changed=$($row.Changed) Skipped=$($row.Skipped) '$($row.Msg)'")
+      Assert-AFRowSurfaced 'S30' $row
+    }
+    $row = Assert-AFCutShortRow 'S30' $pub $s30Items[2] 1 1 $true
+    Assert-AFRowSurfaced 'S30' $row
+    Assert-AFBackupFailureSurfaced 'S30' $pub $s30Lost
+    Assert-AFSalvageSurfaced 'S30' $pub @('fixture-sys3:reg:op2=prepared', 'fixture-sys3:reg:op1=prepared', 'fixture-sys2:reg:op1=applied',
+      'fixture-sys:reg:op1=applied')
+    Assert-AFSummarySurfaced 'S30' 1 2 0 $s30Failed
+    Assert-AFRebootSurfaced 'S30' $pub @('fixture-sys2')
+    Assert-AFRouting 'S30' @('fixture-sys', 'fixture-sys2', 'fixture-sys3') @()
+    Assert-AFEngineChildSaw 'S30' @('fixture-sys', 'fixture-sys2', 'fixture-sys3')
+
+    # S31（复攻四 N24）：生产里最常见的形状——只有一个子操作的项（照生产 gpu-pstate-lock 的裸 Hashtable Ops），它自己写 prepared 时落盘失败。
+    # 没有子操作被跳过（未执行 0）、也没有完成的（已完成 0）：行走全部失败的文案「失败：op1：备份 prepared 状态持久化失败：…」，
+    # 绝不能说「其余 0 项未执行」。后一项整项不开始；一条撤销记录都没落盘，不交回备份。此前同时走到全部失败分支与备份失败的只有 S11，
+    # 而 S11 注入了收尾失败、从不看这一行的文案。
+    $s31Items = @(
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1' -PrepareFails)) -ScalarOps -Reboot),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1')) -Reboot)
+    )
+    Set-AFEngineRealScenario $s31Items 'fixture disk full'
+    Invoke-AFApplyClick 'S31' 'none' @('fixture-sys', 'fixture-sys2') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S31' 3 @('fixture-sys') @('fixture-sys/op1') @()
+    Assert-True ((@(Get-AFOpsShapes) -join ',') -ceq 'fixture-sys=Hashtable,fixture-sys2=Object[]') `
+      "[S31] fixture problem: the engine child's catalog did not build a bare-Hashtable Ops for the single-op item: [$(@(Get-AFOpsShapes) -join ',')]"
+    $row = Assert-AFCutShortRow 'S31' $pub $s31Items[0] 0 0 $false
+    Assert-AFRowSurfaced 'S31' $row
+    Assert-AFBackupFailureSurfaced 'S31' $pub @()
+    Assert-AFSalvageSurfaced 'S31' $pub @()
+    Assert-AFSummarySurfaced 'S31' 0 1 0 @('fixture system item')
+    Assert-AFRebootSurfaced 'S31' $pub @()
+    Assert-AFRouting 'S31' @('fixture-sys', 'fixture-sys2') @()
+    Assert-AFEngineChildSaw 'S31' @('fixture-sys', 'fixture-sys2')
 
     # S6：exit 2——一项真改动成功（且需重启才完全生效，真实目录里多数系统项如此）、一项失败，
     # 带完整备份；随后本地缓存收尾炸掉。S0–S5 与其余场景都没有 Reboot 行，「有待重启项就不置位」只有这里会红。
@@ -792,6 +1910,7 @@ Add-Type -AssemblyName WindowsBase
     Assert-True ((Get-AFLogCount '备份已保存：') -eq 1 -and (Get-AFLogIndex "备份已保存：$pendingBackup") -ge 0 -and
       (Get-AFLogIndex "备份已保存：$pendingBackup") -lt $failIdx) `
       '[S8] exit-3 batch did not log the salvaged backup exactly once before finalization failed'
+    Assert-AFSalvageSurfaced 'S8' $(Get-AFEngineResult) @('fixture-sys:reg:op1=applied', 'fixture-sys2:reg:op1=applied')
     Assert-AFRouting 'S8' @('fixture-sys', 'fixture-sys2', 'fixture-sys3') @()
     Assert-AFEngineChildSaw 'S8' @('fixture-sys', 'fixture-sys2', 'fixture-sys3')
 
@@ -832,14 +1951,16 @@ Add-Type -AssemblyName WindowsBase
     Assert-AFRouting 'S10' @('fixture-sys') @('fixture-cache')
     Assert-AFEngineChildSaw 'S10' @('fixture-sys')
 
-    # S11（攻击复核 A7、A8），**真实 Invoke-Apply**：exit 3 且什么都没改成——第一项第一个子操作写 prepared 备份就落盘失败，
+    # S11（攻击复核 A7、A8），**真实 Invoke-Apply**：exit 3 且什么都没改成——第一项唯一的子操作写 prepared 备份就落盘失败，
     # 引擎停手不做第二项（Results 只有 1 行），盘上没有任何撤销记录、不交回备份文件，UnrecordedNames 为空。
+    # 那一行没有被跳过的子操作，文案是全部失败的「失败：op1：备份 prepared 状态持久化失败：…」（复攻四 N24；完整呈现见 S31）。
     # 界面收尾抛的是普通脚本错误（RuntimeException）而不是 IOException：生产里 WPF / 界面代码的失败
     # 几乎都是这类，S1–S10 注入的全是 IOException，按异常类型分流的变异只有这里会红。
-    Set-AFEngineRealScenario @(
-        (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1' -PrepareFails))),
-        (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1')))
-      ) 'fixture disk full'
+    $s11Items = @(
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1' -PrepareFails))),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1')))
+    )
+    Set-AFEngineRealScenario $s11Items 'fixture disk full'
     Invoke-AFApplyClick 'S11' 'tail-script' @('fixture-sys', 'fixture-sys2') $true
     $failIdx = Assert-AFFinalizationAfterBatch '[S11] exit-3 nothing-recorded batch' 3 'fixture tail script error'
     Assert-True (@($script:AFReply.Results).Count -eq 1 -and @($script:AFReply.UnrecordedNames).Count -eq 0 -and
@@ -847,9 +1968,12 @@ Add-Type -AssemblyName WindowsBase
       @(Get-AFSystemWrites).Count -eq 0) `
       ("[S11] exit-3 nothing-recorded fixture lost its shape (one failed row, BackupError, no unrecorded names, no system write): " +
        "rows $(@($script:AFReply.Results).Count), unrecorded [$(@($script:AFReply.UnrecordedNames) -join '|')], writes [$(@(Get-AFSystemWrites) -join ',')]")
+    $null = Assert-AFCutShortRow 'S11' (Get-AFEngineResult) $s11Items[0] 0 0 $false
     Assert-True ((Get-AFDialogTitles) -ceq 'CONFIRM APPLY|BACKUP WRITE FAILED|APPLY FINALIZATION FAILED' -and
       $script:AFDialogs[1].Message.Contains('（无）') -and @(Get-AFDialogBullets $script:AFDialogs[1].Message).Count -eq 0) `
       "[S11] exit-3 nothing-recorded batch did not show the backup-write-failed dialog (listing no item) before finalization: [$(Get-AFDialogTitles)]"
+    # 93713da：一条撤销记录都没落盘——不交回 Backup、删掉空的 .pending.json，界面、弹窗与命令行都不提「备份已保存 / 已抢救」。
+    Assert-AFSalvageSurfaced 'S11' $(Get-AFEngineResult) @()
     Assert-True ((Get-AFLogIndex '异常类型：System.Management.Automation.RuntimeException') -gt $failIdx) `
       '[S11] exit-3 nothing-recorded tail failure was not the non-IO script error the fixture intends'
     Assert-AFRouting 'S11' @('fixture-sys', 'fixture-sys2') @()
@@ -884,6 +2008,157 @@ Add-Type -AssemblyName WindowsBase
       '[S12] no-data batch lost the raw engine error in the log, warned about a batch that never ran, or invented a backup'
     Assert-AFRouting 'S12' @('fixture-sys') @()
     Assert-AFEngineChildSaw 'S12' @('fixture-sys')
+
+    # ---------------- 复攻五（R3 msg 最终收尾）：放在全部原有场景之后，原有变异的命中位置与消息不变 ----------------
+    # S32（复攻五 V01/V02/V54，以及全成功行的多条附注）：备份完好、有撤销记录的批次。收尾核对同 S17 / S21（Assert-AFCompleteBackupSurfaced）；
+    # fixture-sys2 的两个已达标子操作夹着一个写入的 op3：全成功文案按尝试顺序带两条「无需修改」附注、以「；」分隔（此前最多一条，见 S20）。
+    $s32Items = @(
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1'), (New-AFRealOp 'op2')) -Reboot),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op2' -AtTarget), (New-AFRealOp 'op3'), (New-AFRealOp 'op1' -AtTarget)))
+    )
+    Set-AFEngineRealScenario $s32Items $null
+    Invoke-AFApplyClick 'S32' 'none' @('fixture-sys', 'fixture-sys2') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S32' 0 @('fixture-sys', 'fixture-sys2') `
+      @('fixture-sys/op1', 'fixture-sys/op2', 'fixture-sys2/op2', 'fixture-sys2/op3', 'fixture-sys2/op1') @('fixture-sys/op1', 'fixture-sys/op2', 'fixture-sys2/op3')
+    Assert-True ((Get-AFDialogTitles) -ceq 'CONFIRM APPLY' -and -not $pub.Data.BackupError) `
+      "[S32] a batch with an intact backup showed dialogs [$(Get-AFDialogTitles)] / engine BackupError '$($pub.Data.BackupError)'; expected only the confirmation and no BackupError"
+    foreach ($want in @(
+        [pscustomobject]@{ Id = 'fixture-sys';  Msg = '已写入' },
+        [pscustomobject]@{ Id = 'fixture-sys2'; Msg = '已写入（无需修改：op2 已是目标状态；无需修改：op1 已是目标状态）' })) {
+      $row = @($pub.Data.Results | Where-Object { "$($_.Id)" -ceq $want.Id })[0]
+      Assert-True ($row.Ok -eq $true -and $row.Changed -eq $true -and $row.Skipped -eq $false -and "$($row.Msg)" -ceq $want.Msg) `
+        ("[S32] $($want.Id) ran every sub-operation with the backup intact, so its row must be Ok=True Changed=True '$($want.Msg)'; " +
+         "got Ok=$($row.Ok) Changed=$($row.Changed) Skipped=$($row.Skipped) '$($row.Msg)'")
+      Assert-AFRowSurfaced 'S32' $row
+    }
+    Assert-AFSummarySurfaced 'S32' 2 0 0 @()
+    Assert-AFNoBackupFailureSurfaced 'S32' $pub
+    Assert-AFCompleteBackupSurfaced 'S32' $pub @('fixture-sys:reg:op1=applied', 'fixture-sys:reg:op2=applied', 'fixture-sys2:reg:op3=applied')
+    Assert-AFRebootSurfaced 'S32' $pub @('fixture-sys')
+    Assert-AFRouting 'S32' @('fixture-sys', 'fixture-sys2') @()
+    Assert-AFEngineChildSaw 'S32' @('fixture-sys', 'fixture-sys2')
+
+    # S33（复攻五 V04–V06）：备份完好、一条撤销记录都没写——每个子操作都已是目标值（用户重复点「执行优化」时最常见的形状）。
+    # 不交回 Backup、删掉空的 .pending.json、不改名成一份空的完整备份；界面与命令行都不能说「备份已保存」，也不能有任何告警或弹窗。
+    $s33Items = @(
+      (New-AFRealItem 'fixture-sys' 'fixture system item' @((New-AFRealOp 'op1' -AtTarget), (New-AFRealOp 'op2' -AtTarget)) -Reboot)
+    )
+    Set-AFEngineRealScenario $s33Items $null
+    Invoke-AFApplyClick 'S33' 'none' @('fixture-sys') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S33' 0 @('fixture-sys') @('fixture-sys/op1', 'fixture-sys/op2') @()
+    $row = @($pub.Data.Results)[0]
+    Assert-True ($row.Ok -eq $true -and $row.Skipped -eq $true -and $row.Changed -eq $false -and $row.Reboot -eq $false -and
+      "$($row.Msg)" -ceq '无需修改：所有设置已是目标状态') `
+      ("[S33] fixture-sys had every sub-operation already at target, so its row must be Ok=True Skipped=True Changed=False Reboot=False " +
+       "'无需修改：所有设置已是目标状态'; got Ok=$($row.Ok) Skipped=$($row.Skipped) Changed=$($row.Changed) Reboot=$($row.Reboot) '$($row.Msg)'")
+    Assert-AFRowSurfaced 'S33' $row
+    Assert-AFSummarySurfaced 'S33' 1 0 0 @()
+    Assert-True (-not $pub.Data.BackupError -and @($pub.Data.UnrecordedNames).Count -eq 0) `
+      "[S33] the real engine reported BackupError '$($pub.Data.BackupError)' / UnrecordedNames [$(@($pub.Data.UnrecordedNames) -join '|')] for a batch that changed nothing; expected neither"
+    $s33Alarms = @(@($script:AFLog) + @(Get-AFCliOutput) | Where-Object { $_.StartsWith('！！', [StringComparison]::Ordinal) })
+    Assert-True ((Get-AFDialogTitles) -ceq 'CONFIRM APPLY' -and $s33Alarms.Count -eq 0) `
+      "[S33] a batch that changed nothing showed dialogs [$(Get-AFDialogTitles)] / alarm lines [$($s33Alarms -join ' || ')]; expected only the confirmation and no alarm"
+    Assert-AFCompleteBackupSurfaced 'S33' $pub @()
+    Assert-AFRebootSurfaced 'S33' $pub @()
+    Assert-AFRouting 'S33' @('fixture-sys') @()
+    Assert-AFEngineChildSaw 'S33' @('fixture-sys')
+
+    # S34（复攻五 V09/V10/V52/V53）：通用 Ops 分支里 Ok=False、Skipped=True 的行——项目在本机没有可执行的子操作（生产 Ops = $null）：
+    # 「本机不满足此项前提，已跳过」，需要游戏路径的项（生产 fso-off / gpu-pref / game-priority，都是默认项）是「未找到游戏路径，已跳过…」。
+    # 此前没有任何场景产生这种行。它们是跳过、不是失败：逐项日志与命令行标 [跳过]，汇总记进跳过、不进失败计数，
+    # 不进失败清单与进度区的失败项名；引擎退出码也不因它们变成 2。两个跳过行夹着成功行，逐行先后照样核对。
+    $s34Items = @(
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @() -NoOps -Reboot),
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1')) -Reboot),
+      (New-AFRealItem 'fixture-sys3' 'fixture system item 3' @() -NoOps -RequiresGame)
+    )
+    Set-AFEngineRealScenario $s34Items $null
+    Invoke-AFApplyClick 'S34' 'none' @('fixture-sys', 'fixture-sys2', 'fixture-sys3') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S34' 0 @('fixture-sys2', 'fixture-sys', 'fixture-sys3') @('fixture-sys/op1') @('fixture-sys/op1')
+    Assert-True ((@(Get-AFOpsShapes) -join ',') -ceq 'fixture-sys2=null,fixture-sys=Object[],fixture-sys3=null') `
+      "[S34] fixture problem: the engine child's catalog did not build Ops = `$null for the two items without sub-operations: [$(@(Get-AFOpsShapes) -join ',')]"
+    foreach ($want in @(
+        [pscustomobject]@{ Id = 'fixture-sys2'; Ok = $false; Skipped = $true;  Changed = $false; Msg = '本机不满足此项前提，已跳过' },
+        [pscustomobject]@{ Id = 'fixture-sys';  Ok = $true;  Skipped = $false; Changed = $true;  Msg = '已写入' },
+        [pscustomobject]@{ Id = 'fixture-sys3'; Ok = $false; Skipped = $true;  Changed = $false; Msg = '未找到游戏路径，已跳过；请用 -GamePath 指定游戏 exe' })) {
+      $row = @($pub.Data.Results | Where-Object { "$($_.Id)" -ceq $want.Id })[0]
+      Assert-True ($row.Ok -eq $want.Ok -and $row.Skipped -eq $want.Skipped -and $row.Changed -eq $want.Changed -and "$($row.Msg)" -ceq $want.Msg) `
+        ("[S34] $($want.Id) must be Ok=$($want.Ok) Skipped=$($want.Skipped) Changed=$($want.Changed) '$($want.Msg)'; " +
+         "got Ok=$($row.Ok) Skipped=$($row.Skipped) Changed=$($row.Changed) '$($row.Msg)'")
+      Assert-AFRowSurfaced 'S34' $row
+    }
+    Assert-AFSummarySurfaced 'S34' 1 0 2 @()
+    Assert-AFNoBackupFailureSurfaced 'S34' $pub
+    Assert-AFCompleteBackupSurfaced 'S34' $pub @('fixture-sys:reg:op1=applied')
+    Assert-AFRebootSurfaced 'S34' $pub @('fixture-sys')
+    Assert-AFRouting 'S34' @('fixture-sys', 'fixture-sys2', 'fixture-sys3') @()
+    Assert-AFEngineChildSaw 'S34' @('fixture-sys', 'fixture-sys2', 'fixture-sys3')
+
+    # S35（复攻五 V26）：只有一个子操作的项（生产最常见的形状，裸 Hashtable Ops），系统写入已发生、标 applied 时落盘失败。
+    # 没有被跳过的子操作、也没有完成的：行走全部失败的「失败：op1：备份 applied 状态持久化失败：…」，但系统**确实被改了**——
+    # Changed=True，项名进 UnrecordedNames（界面与命令行的「以下已生效…」名单、弹窗逐项）；op1 的 prepared 记录已落盘，交回 .pending.json。
+    # 此前全部失败分支上的行都没改过系统（S17 / S30 的系统拒绝、S31 / S11 的 prepared 落盘失败），「全部失败 = 没改动」与正确实现在那里重合。
+    $s35Items = @(
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1' -AppliedFails)) -ScalarOps -Reboot),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1')) -Reboot)
+    )
+    Set-AFEngineRealScenario $s35Items 'fixture disk full'
+    Invoke-AFApplyClick 'S35' 'none' @('fixture-sys', 'fixture-sys2') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S35' 3 @('fixture-sys') @('fixture-sys/op1') @('fixture-sys/op1')
+    Assert-True ((@(Get-AFOpsShapes) -join ',') -ceq 'fixture-sys=Hashtable,fixture-sys2=Object[]') `
+      "[S35] fixture problem: the engine child's catalog did not build a bare-Hashtable Ops for the single-op item: [$(@(Get-AFOpsShapes) -join ',')]"
+    $row = Assert-AFCutShortRow 'S35' $pub $s35Items[0] 0 0 $true
+    Assert-AFRowSurfaced 'S35' $row
+    Assert-AFBackupFailureSurfaced 'S35' $pub @('fixture system item')
+    Assert-AFSalvageSurfaced 'S35' $pub @('fixture-sys:reg:op1=prepared')
+    Assert-AFSummarySurfaced 'S35' 0 1 0 @('fixture system item')
+    Assert-AFRebootSurfaced 'S35' $pub @()
+    Assert-AFRouting 'S35' @('fixture-sys', 'fixture-sys2') @()
+    Assert-AFEngineChildSaw 'S35' @('fixture-sys', 'fixture-sys2')
+
+    # S36（复攻五 V56）：收尾的另一半——complete 状态已经写进 .pending.json，改名（生产 [IO.File]::Move）失败：目标被占住
+    # （生产里是杀毒 / 同步盘的占用锁；夹具在批次前放好同名文件，改名真的失败，不注入）。生产在同一个 catch 里处理：BackupError 是
+    # 改名失败的原文、退出码 3、Data 照常交回，Backup 是仍在原名的 .pending.json（记录全为 applied），两项都列为「已生效、备份可能没记全」，
+    # 界面弹备份失败弹窗。把改名挪出 try（「只有写入会失败」）时异常直接冲出 Invoke-Apply：系统已改、Data 丢失、退出码 1，
+    # 界面走前置失败，不再提醒「请不要重复点击」，也拿不到需手动回退的项名。此前只有 S29 走这一处 catch，失败的是写入、不是改名。
+    # 已知遗留同 S29：每一项都已执行，严重告警与弹窗开头仍说「已中止」，照现状逐字钉住。
+    $s36Collision = Get-AFRenameCollisionMessage
+    Assert-True ($s36Collision.Length -gt 0) `
+      '[S36] fixture problem: moving a file onto an existing file did not fail in this process, so there is no rename error to expect'
+    $s36Items = @(
+      (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1')) -Reboot),
+      (New-AFRealItem 'fixture-sys2' 'fixture system item 2' @((New-AFRealOp 'op1'), (New-AFRealOp 'op2')))
+    )
+    Set-AFEngineRealScenario $s36Items $null -RenameBlocked
+    Invoke-AFApplyClick 'S36' 'none' @('fixture-sys', 'fixture-sys2') $true -RealProgress
+    $pub = Assert-AFRealBatch 'S36' 3 @('fixture-sys', 'fixture-sys2') @('fixture-sys/op1', 'fixture-sys2/op1', 'fixture-sys2/op2') `
+      @('fixture-sys/op1', 'fixture-sys2/op1', 'fixture-sys2/op2')
+    # 夹具锚点：改名目标一直被夹具的文件占着，没有任何落盘注入，complete 状态（三条记录）确实先于改名落了盘——失败的只能是改名。
+    $s36Blocker = $(if (Test-Path -LiteralPath $completeBackup -PathType Leaf) { [IO.File]::ReadAllText($completeBackup) })
+    $s36Writes = @(Get-AFBackupWrites)
+    $s36LastWrite = $(if ($s36Writes.Count -gt 0) { $s36Writes[$s36Writes.Count - 1] })
+    Assert-True ("$s36Blocker" -ceq $afRenameBlocker -and @(Get-AFBackupFailureHits).Count -eq 0 -and
+      "$s36LastWrite" -ceq "$([IO.Path]::GetFileName($pendingBackup))|complete|3") `
+      ("[S36] fixture problem: the rename target was not held by the fixture's file, a backup write was injected to fail, or the complete state " +
+       "never reached the disk before the rename (target content '$s36Blocker', injected [$(@(Get-AFBackupFailureHits) -join ',')], last backup write '$s36LastWrite')")
+    $s36Error = "$($pub.Data.BackupError)"
+    Assert-True ($s36Error.Contains($s36Collision)) `
+      "[S36] the real engine reported BackupError '$s36Error' after renaming the complete backup failed; expected the rename's own error ('$s36Collision')"
+    foreach ($s36Id in @('fixture-sys', 'fixture-sys2')) {
+      $s36Row = @($pub.Data.Results | Where-Object { "$($_.Id)" -ceq $s36Id })[0]
+      Assert-True ($s36Row.Ok -eq $true -and $s36Row.Changed -eq $true -and $s36Row.Skipped -eq $false -and "$($s36Row.Msg)" -ceq '已写入') `
+        ("[S36] $s36Id wrote and recorded every sub-operation before the rename failed, so its row must be Ok=True Changed=True '已写入'; " +
+         "got Ok=$($s36Row.Ok) Changed=$($s36Row.Changed) Skipped=$($s36Row.Skipped) '$($s36Row.Msg)'")
+      Assert-AFRowSurfaced 'S36' $s36Row
+    }
+    Assert-AFBackupFailureSurfaced 'S36' $pub @('fixture system item', 'fixture system item 2') -BackupError $s36Error
+    # 夹具的占位文件已完成使命：移走它，下面的目录核对只看引擎留下了什么。
+    Remove-Item -LiteralPath $completeBackup -Force
+    Assert-AFSalvageSurfaced 'S36' $pub @('fixture-sys:reg:op1=applied', 'fixture-sys2:reg:op1=applied', 'fixture-sys2:reg:op2=applied') -BackupError $s36Error
+    Assert-AFSummarySurfaced 'S36' 2 0 0 @()
+    Assert-AFRebootSurfaced 'S36' $pub @('fixture-sys')
+    Assert-AFRouting 'S36' @('fixture-sys', 'fixture-sys2') @()
+    Assert-AFEngineChildSaw 'S36' @('fixture-sys', 'fixture-sys2')
   } finally {
     $script:AFScenario = $null
     if (Test-Path -LiteralPath $afRoot) { Remove-Item -LiteralPath $afRoot -Recurse -Force -ErrorAction SilentlyContinue }

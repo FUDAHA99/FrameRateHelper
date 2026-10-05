@@ -32,15 +32,14 @@ Assert-True ($installerBuildSource -match "minimumSupportedVersion\s*=\s*'1\.0\.
   "$($releaseManifest.minimumSupportedVersion)" -eq '1.0.0.0') `
   'release manifest version or mandatory-upgrade floor is stale'
 $expectedReleaseNotes = @'
-- 「帧率优化助手」的第一个版本。基于 Leonard8818/-Delta-Force-Graphics-Optimizer（MIT）分支重做。
-- 默认不收集、不上报任何使用数据：上游那整套遥测与匿名上报已删除，界面上也不再有相关开关。
-- 从旧版本升级会迁移你的自存优化方案、性能历史与原始电源方案记录；不在迁移清单内的文件会跳过并在日志里说明，原文件保留在原位置。
-- 修正：关闭鼠标「提高指针精确度」要重新登录后才生效，界面此前写的是「写入后立即生效」。
-- 窗口可以拖动缩放并记住宽度；导出诊断反馈的两组选项新增全选。
+- 修复：勾选「不再提醒此版本」后，软件启动时和运行中仍会自动弹出这个版本的更新提示。
+- 修复：启动日志会记下完整的会话标记，现在只记前 8 位。
+- 修复：备份写入失败时的结果说明与实际不符，例如什么都没写却说「其余已写入」「已抢救出部分备份」。
+- 更正：安装完成页关于管理员确认（UAC）的说明，以及升级后「重要提醒」里的按钮名称。
 '@
 Assert-True (("$($releaseManifest.notes)" -replace "`r`n", "`n") -eq ($expectedReleaseNotes -replace "`r`n", "`n") -and
   $installerBuildSource.Contains("`$manifestNotes = @'")) `
-  'v1.0.0.0 release notes are missing or inconsistent'
+  'v1.0.0.1 release notes are missing or inconsistent'
 Assert-True ($launcherBuildSource.Contains('const string ActiveMarkerName = @"Global\DeltaForceBooster.LaunchSession";') -and
   $launcherBuildSource.Contains('const string InstanceMarkerName = @"Local\DeltaForceBooster.LaunchInstance";') -and
   $launcherBuildSource.Contains('activeMarker = CreateSessionMarker(ActiveMarkerName') -and
