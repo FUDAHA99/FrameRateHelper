@@ -9712,6 +9712,9 @@ $ui.ApplyBtn.Add_Click({
     # 高风险二次确认，确认后才带 AllowRisky 交给引擎
     $riskyIds = @($ui.RiskyPanel.Children | Where-Object { $_.Child.Children[0].IsChecked } |
                   ForEach-Object { $_.Child.Children[0].Tag })
+    # 置忙后复采勾选要对照的是「点击这一刻两张勾选表各自的样子」。$ids / $riskyIds 下面会被确认流程改写
+    # （确认高风险项后 $ids 并入它们，取消时 $riskyIds 清空），拿它们去比，勾了高风险项就必定判成「勾选已变化」
+    $panelIdsAtClick = @($ids); $riskyPanelIdsAtClick = @($riskyIds)
     if ($ids.Count -eq 0 -and $riskyIds.Count -eq 0) {
       Write-Log '未勾选任何优化项。'
       Show-ConfirmDialog '未选择优化项' 'NO ITEMS SELECTED' '请先勾选至少一个优化项目，再点击「执行优化」。' '知道了' -InfoOnly | Out-Null
@@ -9764,8 +9767,8 @@ $ui.ApplyBtn.Add_Click({
                                        ForEach-Object { "$($_.Child.Children[0].Tag)" })
     $riskySnapshot = @($ui.RiskyPanel.Children | Where-Object { $_.Child.Children[0].IsChecked } |
                        ForEach-Object { "$($_.Child.Children[0].Tag)" })
-    if ((@($ids | ForEach-Object { "$_" } | Sort-Object) -join '|') -ne (@($script:ApplySelectionSnapshot | Sort-Object) -join '|') -or
-        (@($riskyIds | ForEach-Object { "$_" } | Sort-Object) -join '|') -ne (@($riskySnapshot | Sort-Object) -join '|')) {
+    if ((@($panelIdsAtClick | ForEach-Object { "$_" } | Sort-Object) -join '|') -ne (@($script:ApplySelectionSnapshot | Sort-Object) -join '|') -or
+        (@($riskyPanelIdsAtClick | ForEach-Object { "$_" } | Sort-Object) -join '|') -ne (@($riskySnapshot | Sort-Object) -join '|')) {
       Set-BusyState $false
       Write-Log '确认过程中勾选发生了变化，本次执行已中止。请核对勾选后重新点「执行优化」。'
       Show-ConfirmDialog '勾选已变化' 'SELECTION CHANGED' `

@@ -184,9 +184,8 @@ Add-Type -AssemblyName WindowsBase
   function Get-OptItems([string]$Exe) {
     # reg 三项（exit 2 需要一成一败；S8 需要「第三项在备份失败后不再执行」）；cache 与 check 都只能走本地 medium 执行器；
     # power-ultimate 用真实 Id（处理器按 Id 走「电源计划风险确认」分支，引擎里它是默认勾选的常见项）；
-    # 高风险项只进 RiskyPanel，本测试里它永远不勾：勾上会撞到一个已报告、尚未修的产品缺陷（确认高风险项后
-    # $ids 并入了 RiskyPanel 的项，再与只采 ItemPanel 的复采快照比对，必然以「勾选已变化」中止）。
-    # 未勾选的高风险行仍在，任何忽略 IsChecked 的读取都会把它带进确认框（复核 B8）。Reboot 同真实目录的标注。
+    # 高风险项只进 RiskyPanel，只有 S37 勾它（确认 / 取消高风险确认之后复采勾选不能误判「勾选已变化」）；
+    # 其余场景里未勾选的高风险行仍在，任何忽略 IsChecked 的读取都会把它带进确认框（复核 B8）。Reboot 同真实目录的标注。
     @([pscustomobject]@{ Id='fixture-sys';    Name='fixture system item';     Kind='reg';   Tier='safe';  Reboot=$true;  Warn=$null; Note='' },
       [pscustomobject]@{ Id='fixture-sys2';   Name='fixture system item 2';   Kind='reg';   Tier='safe';  Reboot=$false; Warn=$null; Note='' },
       [pscustomobject]@{ Id='fixture-sys3';   Name='fixture system item 3';   Kind='reg';   Tier='safe';  Reboot=$false; Warn=$null; Note='' },
@@ -288,15 +287,15 @@ Add-Type -AssemblyName WindowsBase
       ForEach-Object { $_.Substring(2).TrimEnd("`r") })
   }
   function Get-AFDialogTitles { (@($script:AFDialogs | ForEach-Object { "$($_.En)" }) -join '|') }
-  # 确认框消息泵期间改勾选：按 Tag 找行（夹具的勾选表与真实界面一样含未勾选行）。
+  # 确认框消息泵期间改勾选：按 Tag 找行（夹具的勾选表与真实界面一样含未勾选行；高风险项的行在 RiskyPanel）。
   function Set-AFRowChecked([string]$Tag, [bool]$On) {
-    $rows = @(@($ui.ItemPanel.Children) | Where-Object { "$($_.Child.Children[0].Tag)" -ceq $Tag })
-    Assert-True ($rows.Count -eq 1) "fixture has no item-panel row for $Tag"
+    $rows = @(@($ui.ItemPanel.Children) + @($ui.RiskyPanel.Children) | Where-Object { "$($_.Child.Children[0].Tag)" -ceq $Tag })
+    Assert-True ($rows.Count -eq 1) "fixture has no checklist row for $Tag"
     $rows[0].Child.Children[0].IsChecked = $On
   }
   function Invoke-AFApplyClick([string]$Scenario, [string]$FailAt, [string[]]$Tags, [bool]$WithBackup, [switch]$ClickAgainDuringBatch,
                                [string]$Decline, [scriptblock]$DuringConfirm, [string]$NoWorkBecause, [switch]$TuningActive,
-                               [switch]$RebootNow, [switch]$RealProgress) {
+                               [switch]$RebootNow, [switch]$RealProgress, [string[]]$ConfirmTags) {
     $script:AFLog = @(); $script:AFDialogs = @(); $script:AFApplyCalls = 0
     $script:AFRealProgress = [bool]$RealProgress; $script:AFProgressCalls = 0; $script:AFLastRealProgress = [bool]$RealProgress
     $script:AFLastProgText = $null
@@ -336,10 +335,11 @@ Add-Type -AssemblyName WindowsBase
       $script:AFLastProgText = "$($ui.ProgText.Text)"
     }
     # 唯一的同意框必须逐项列出本次勾选（攻击复核 B2/B8）：列表空着、或把未勾选的行也列进去，
-    # 用户是在没看到/看错清单的情况下同意写系统。
+    # 用户是在没看到/看错清单的情况下同意写系统。-ConfirmTags：取消高风险确认后，同意框只列其余勾选项（S37）。
     $confirmDialogs = @($script:AFDialogs | Where-Object { $_.Chip -ceq '确认执行' })
     if ($confirmDialogs.Count -gt 0) {
-      $expectedNames = @($catalog | Where-Object { @($Tags) -contains $_.Id } | ForEach-Object { "$($_.Name)" })
+      $listedTags = $(if ($PSBoundParameters.ContainsKey('ConfirmTags')) { @($ConfirmTags) } else { @($Tags) })
+      $expectedNames = @($catalog | Where-Object { $listedTags -contains $_.Id } | ForEach-Object { "$($_.Name)" })
       $listedNames = @(Get-AFDialogBullets $confirmDialogs[0].Message)
       $announced = $(if ($confirmDialogs[0].Message -match '将执行以下 (\d+) 项优化') { [int]$Matches[1] } else { -1 })
       Assert-True ($expectedNames.Count -gt 0 -and $announced -eq $expectedNames.Count -and
@@ -356,6 +356,10 @@ Add-Type -AssemblyName WindowsBase
       Assert-True (-not $script:Busy) "[$Scenario] Apply handler left the busy state set after $NoWorkBecause"
       return
     }
+    # 本该执行的场景（确认期间没人改勾选）不许以「勾选已变化」中止：先于下面的「没到达引擎」判定，消息指向根因。
+    Assert-True (@($script:AFDialogs | Where-Object { $_.En -ceq 'SELECTION CHANGED' }).Count -eq 0) `
+      ("[$Scenario] Apply aborted with SELECTION CHANGED although the user did not change the selection during the confirmation " +
+       "(dialogs [$(Get-AFDialogTitles)]; log: $($script:AFLog -join ' / '))")
     # 闸门探针先于忙碌记录判定：闸门失守时嵌套的第二轮会在自己的 finally 里提前放开忙碌锁，
     # 外层随后的记录也会变成 False——那是后果，根因是闸门没挡住，消息要指向根因。
     if ($ClickAgainDuringBatch) {
@@ -383,7 +387,8 @@ Add-Type -AssemblyName WindowsBase
   # 路由断言（独立复核 F4）：高 IL 引擎只收系统项（cache/check 都不行）、原样拿到游戏路径、没有高风险
   # 确认就不带 AllowRisky；cache/check 只走本地（medium）执行器。按集合比较（排序后逐项 -ceq），
   # 不钉顺序；期望集合非空（锚点），两边都退化成空集也对不上。
-  function Assert-AFRouting([string]$Scenario, [string[]]$ExpectedElevated, [string[]]$ExpectedLocal) {
+  # -AllowRisky：用户刚通过了高风险二次确认（S37），引擎必须带 AllowRisky 收到请求。
+  function Assert-AFRouting([string]$Scenario, [string[]]$ExpectedElevated, [string[]]$ExpectedLocal, [switch]$AllowRisky) {
     $expElevated = @($ExpectedElevated | Where-Object { $_ })
     $expLocal = @($ExpectedLocal | Where-Object { $_ })
     Assert-True (($expElevated.Count + $expLocal.Count) -gt 0) "[$Scenario] routing expectation is vacuous"
@@ -395,7 +400,9 @@ Add-Type -AssemblyName WindowsBase
         (@($req.ItemIds | Sort-Object) -join '|') -ceq (@($expElevated | Sort-Object) -join '|')) `
         "[$Scenario] elevated engine received [$(@($req.ItemIds) -join ',')], expected only system items [$($expElevated -join ',')]"
       Assert-True ($req.GamePath -ceq $script:TargetExe) "[$Scenario] elevated engine did not receive the selected game path: $($req.GamePath)"
-      Assert-True ($req.AllowRisky -eq $false) "[$Scenario] elevated engine got AllowRisky without a high-risk confirmation"
+      Assert-True ($req.AllowRisky -eq [bool]$AllowRisky) $(if ($AllowRisky) {
+        "[$Scenario] the user confirmed the HIGH RISK ITEMS dialog but the elevated engine did not get AllowRisky"
+      } else { "[$Scenario] elevated engine got AllowRisky without a high-risk confirmation" })
     } else {
       Assert-True ($requests.Count -eq 0) "[$Scenario] no system item selected but the elevated engine was called"
     }
@@ -524,6 +531,50 @@ Add-Type -AssemblyName WindowsBase
   Assert-True ((Get-AFDialogTitles) -ceq 'APPLY NOT COMPLETED' -and $d.Message.Contains('自动调优实验期间已锁定配置') -and
     (Get-AFLogIndex '执行失败：自动调优实验期间已锁定配置') -ge 0) `
     "[S13-tuning] Apply during an active auto-tuning experiment was not refused with the experiment-lock message before any confirmation: [$(Get-AFDialogTitles)]"
+
+  # S37：勾了 RiskyPanel 里的高风险项。处理器先弹「高风险项确认」：确认后 $ids 并入高风险项，取消时 $riskyIds 清空、
+  # 高风险行仍勾着。置忙后复采勾选曾直接拿这两个被改写过的清单去比两张勾选表，于是确认必定以「勾选已变化」中止
+  # （用户什么都没改，却永远执行不了高风险项），取消也一样中止（其余勾选项同样执行不了）。复采要对照的是点击那一刻两张表各自的样子。
+  # 锚点：HIGH RISK ITEMS 弹窗真的出现、列的正是勾上的那一个高风险项——处理器确实把 RiskyPanel 的勾选读成了已勾。
+  function Assert-AFRiskyDialog([string]$Scenario) {
+    $risky = @($script:AFDialogs | Where-Object { $_.Chip -ceq '高风险项确认' })
+    Assert-True ($risky.Count -eq 1 -and $risky[0].En -ceq 'HIGH RISK ITEMS' -and
+      (@(Get-AFDialogBullets $risky[0].Message) -join '|') -ceq 'fixture high-risk item' -and $risky[0].Message.Contains('fixture warning')) `
+      "[$Scenario] fixture problem: the checked high-risk row did not produce exactly one HIGH RISK ITEMS dialog listing only it: [$(Get-AFDialogTitles)]"
+  }
+  Invoke-AFApplyClick 'S37-confirm' 'none' @('fixture-sys', 'fixture-risky', 'fixture-cache') $true
+  Assert-AFRiskyDialog 'S37-confirm'
+  Assert-True ((Get-AFDialogTitles) -ceq 'HIGH RISK ITEMS|CONFIRM APPLY' -and (Get-AFLogIndex '确认过程中勾选发生了变化') -lt 0) `
+    ("[S37-confirm] the user confirmed the high-risk item and changed nothing, but Apply aborted or showed another notice: [$(Get-AFDialogTitles)]; " +
+     "log: $($script:AFLog -join ' / ')")
+  Assert-True ((Get-AFLogIndex '执行完成：共 3 项 — 3 成功') -ge 0) '[S37-confirm] the confirmed high-risk batch did not complete all three items'
+  Assert-AFRouting 'S37-confirm' @('fixture-sys', 'fixture-risky') @('fixture-cache') -AllowRisky
+  Invoke-AFApplyClick 'S37-risky-only' 'none' @('fixture-risky') $true
+  Assert-AFRiskyDialog 'S37-risky-only'
+  Assert-True ((Get-AFDialogTitles) -ceq 'HIGH RISK ITEMS|CONFIRM APPLY' -and (Get-AFLogIndex '执行完成：共 1 项 — 1 成功') -ge 0) `
+    "[S37-risky-only] a confirmed Apply of only a high-risk item did not run to completion: [$(Get-AFDialogTitles)]; log: $($script:AFLog -join ' / ')"
+  Assert-AFRouting 'S37-risky-only' @('fixture-risky') @() -AllowRisky
+  Invoke-AFApplyClick 'S37-decline' 'none' @('fixture-sys', 'fixture-risky', 'fixture-cache') $true -Decline '高风险项确认' `
+    -ConfirmTags @('fixture-sys', 'fixture-cache')
+  Assert-AFRiskyDialog 'S37-decline'
+  Assert-True ((Get-AFDialogTitles) -ceq 'HIGH RISK ITEMS|CONFIRM APPLY' -and (Get-AFLogIndex '已取消 1 个高风险项，本次不执行它们。') -ge 0 -and
+    (Get-AFLogIndex '执行完成：共 2 项 — 2 成功') -ge 0) `
+    ("[S37-decline] after the user declined only the high-risk item, the remaining selection did not run (or the high-risk item ran): " +
+     "[$(Get-AFDialogTitles)]; log: $($script:AFLog -join ' / ')")
+  Assert-AFRouting 'S37-decline' @('fixture-sys') @('fixture-cache')
+  # 对照：复采仍然看两张表。确认期间取消已确认的高风险项、或勾上一个点击时没勾的高风险项，都必须中止——
+  # 只比 ItemPanel、或干脆不再复采 RiskyPanel 的「修法」在这两条上红。
+  Invoke-AFApplyClick 'S37-uncheck-risky' 'none' @('fixture-sys', 'fixture-risky') $true `
+    -NoWorkBecause 'the confirmed high-risk item was unchecked during the Apply confirmation' `
+    -DuringConfirm { Set-AFRowChecked 'fixture-risky' $false }
+  Assert-AFRiskyDialog 'S37-uncheck-risky'
+  Assert-True ((Get-AFDialogTitles) -ceq 'HIGH RISK ITEMS|CONFIRM APPLY|SELECTION CHANGED') `
+    "[S37-uncheck-risky] unchecking the confirmed high-risk item during the confirmation did not abort with the SELECTION CHANGED notice: [$(Get-AFDialogTitles)]"
+  Invoke-AFApplyClick 'S37-check-risky' 'none' @('fixture-sys') $true `
+    -NoWorkBecause 'a high-risk item was checked during the Apply confirmation' `
+    -DuringConfirm { Set-AFRowChecked 'fixture-risky' $true }
+  Assert-True ((Get-AFDialogTitles) -ceq 'CONFIRM APPLY|SELECTION CHANGED') `
+    "[S37-check-risky] checking a high-risk item during the confirmation did not abort with the SELECTION CHANGED notice: [$(Get-AFDialogTitles)]"
 
   # S6–S11：批次**已经返回、带着 Data**，但引擎退出码不是 0（delta-booster.ps1 Get-ApplyExitCode：
   # 2 = 有项目失败，3 = 备份写入失败）。「已返回」不等于「全部成功」：把置位改成只在
