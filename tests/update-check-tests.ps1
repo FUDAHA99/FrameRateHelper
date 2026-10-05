@@ -1065,6 +1065,13 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
   }
 
   function Get-FixtureLogCount([string]$Needle) { @($script:FxLog | Where-Object { $_.Contains($Needle) }).Count }
+  # 自动检查检出新版本时的那一行日志（生产 Show-DetectedUpdateDialog -Detected 写）：v$Version 恰好一条，去向如实——
+  # $Expect 是「正在显示更新详情」时对话框当场弹出；其余是压下的原因，这一行就不许说「正在显示」
+  function Assert-FixtureDetectionLog([string]$Tag, [string]$Version, [string]$Expect) {
+    $lines = @($script:FxLog | Where-Object { $_.Contains("检测到新版本 v$Version-display") })
+    Assert-Soft ($lines.Count -eq 1 -and $lines[0].Contains($Expect) -and ($Expect -ceq '正在显示更新详情' -or -not $lines[0].Contains('正在显示'))) `
+      "[$Tag.detection-log] 检出 v$Version 时日志应恰好一条「检测到新版本」并如实写「$Expect」（实际：$($lines -join ' / ')）"
+  }
   function Get-FixtureSkipRecord { "$((Get-BoosterUpdateConfig).SkippedVersion)" }
   # 场景前提「跳过记录已经是 $Version」：用生产的 Set-BoosterSkipVersion 写、按读回的记录核对。
   # 它的返回值是产品行为（界面据此写如实日志），由 H0.save-reports-success / V.save-reports-failure 单独断言，
@@ -1216,6 +1223,7 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
     Assert-Soft ("$($ui.UpdateBtn.ToolTip)".Contains("$x-display")) "[B.tooltip] 更新入口提示没有写显示版本 $x-display：[$($ui.UpdateBtn.ToolTip)]"
     Assert-Soft ($null -ne $script:UpdateInfo -and "$($script:UpdateInfo.Version)" -ceq $x) "[B.updateinfo] `$script:UpdateInfo 应为 v$x（实际 [$($script:UpdateInfo.Version)]）"
     Assert-Soft ((Get-FixtureLogCount '检测到新版本') -eq 1) "[B.log] 发现 v$x 应记一条「检测到新版本」（实际 $(Get-FixtureLogCount '检测到新版本') 条）"
+    Assert-FixtureDetectionLog 'B' $x '正在显示更新详情'
     Assert-Soft ((Get-FixtureSkipRecord) -ceq $y) "[B.record] 用户没勾「不再提醒」，跳过记录却从 $y 变成了 [$(Get-FixtureSkipRecord)]"
 
     # 用户选了「稍后再说」；30 分钟后的周期复查又见到同一个 v$x：不再弹、不再记「检测到新版本」，入口保持点亮
@@ -1472,6 +1480,8 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
     Assert-Soft ($script:FxDialogCalls.Count -eq 0) "[K0.no-dialog-while-busy] 执行优化/还原期间检出 v$x，不该当场弹窗打断（弹了 $($script:FxDialogCalls.Count) 次）"
     Assert-Soft ("$($ui.UpdateBtn.Visibility)" -ceq 'Visible' -and $null -ne $script:UpdateInfo -and "$($script:UpdateInfo.Version)" -ceq $x) `
       "[K0.lit-while-busy] 忙碌中检出 v$x，入口应点亮、`$script:UpdateInfo 应为 v$x（入口 $($ui.UpdateBtn.Visibility)，UpdateInfo [$($script:UpdateInfo.Version)]）"
+    # 对话框没弹：日志不能说「正在显示更新详情」
+    Assert-FixtureDetectionLog 'K0' $x '当前操作结束后再显示更新详情'
     Invoke-FixtureSetBusyState $false
     Wait-FixtureDispatcherQueue
     Assert-FixtureDialogsHealthy 'K0 busy end'
@@ -1577,6 +1587,7 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
        "（嵌套：$($script:FxNestedDialogs -join ' / ')；顶层弹窗 $($script:FxDialogCalls.Count - $before) 次）")
     Assert-Soft ($d.ClosedWith -ceq 'LaterBtn' -and -not $d.UserProblem -and $d.ShowDialogResult -eq $false) `
       "[$Tag.outer-closes] v$x 的对话框没能用它自己的「稍后再说」正常关掉（$(Format-FixtureClose $d)；$($d.UserProblem)）"
+    Assert-FixtureDetectionLog $Tag $y '已有更新对话框开着'
     Assert-Soft ($null -ne $script:UpdateInfo -and "$($script:UpdateInfo.Version)" -ceq $y -and "$($ui.UpdateBtn.Visibility)" -ceq 'Visible') `
       "[$Tag.newer-pending] 压下的 v$y 应留在标题栏入口上（UpdateInfo [$($script:UpdateInfo.Version)]，入口 $($ui.UpdateBtn.Visibility)）"
     Assert-Soft ((Get-FixtureSkipRecord) -ceq '') "[$Tag.record-unchanged] 用户没勾「不再提醒」，跳过记录却成了 [$(Get-FixtureSkipRecord)]"
@@ -1589,6 +1600,29 @@ public sealed class DfbUpdateCheckManifestResponse : WebResponse {
 
   Invoke-Scenario 'X1 title-bar dialog open, periodic check finds a newer version' { Invoke-NewerWhileOpenScenario 'X1' 27 'title-bar' }
   Invoke-Scenario 'X2 manual-check dialog open, periodic check finds a newer version' { Invoke-NewerWhileOpenScenario 'X2' 55 'manual' }
+
+  # ---------- Y：自动调优实验进行中检出新版本 —— 不弹窗、日志如实说；实验结束后的下一次忙碌结束时补弹 ----------
+  # 「检测到新版本 …，正在显示更新详情」原来由检查回调在调 Show-DetectedUpdateDialog 之前写死，忙碌、已有更新对话框开着、
+  # 自动调优实验进行中时对话框都没出来，日志照样说正在显示（K0 / X1 / X2 / Y 各核对一种；B 是当场弹出的对照）
+  Invoke-Scenario 'Y new version found during an auto-tuning experiment' {
+    $x = New-FixtureVersion 73
+    Initialize-FixtureScenario 'Y'
+    $script:ManifestFake.Body = New-FixtureManifestJson $x "$x-display" $script:GuiVersion
+    [void](Invoke-FixtureManifestProbe $x $false)
+    # 实验进行与否只看 status（生产 Test-TuningExperimentActive 原文判定）
+    $script:ActiveTuningExperiment = [pscustomobject]@{ status = 'running' }
+    Assert-Fixture (Test-TuningExperimentActive) '实验状态设成 running 后 Test-TuningExperimentActive 仍判为没有实验'
+    Invoke-FixtureUpdateCheck 'startup'
+    Assert-Soft ($script:FxDialogCalls.Count -eq 0) "[Y.no-dialog] 自动调优实验进行中检出 v$x，不该弹更新对话框（弹了 $($script:FxDialogCalls.Count) 次）"
+    Assert-Soft ("$($ui.UpdateBtn.Visibility)" -ceq 'Visible' -and "$($script:UpdateInfo.Version)" -ceq $x) `
+      "[Y.lit] 实验中检出 v$x，入口应点亮、`$script:UpdateInfo 应为 v$x（入口 $($ui.UpdateBtn.Visibility)，UpdateInfo [$($script:UpdateInfo.Version)]）"
+    Assert-FixtureDetectionLog 'Y' $x '自动调优实验进行中'
+    # 实验结束后的下一次执行优化/还原：这个版本还没提示过，收尾时补弹
+    $script:ActiveTuningExperiment = $null
+    Invoke-FixtureBusyCycle
+    Assert-Soft ($script:FxDialogCalls.Count -eq 1 -and (Get-FixtureDialogCall 0).Version -ceq $x) `
+      "[Y.prompted-after] 实验中压下的 v$x，实验结束后的下一次忙碌结束时应补弹一次（实际 $($script:FxDialogCalls.Count) 次）"
+  }
 
   # ---------- N：清单不满足内置更新（退回浏览器下载）—— 对话框同样要给「不再提醒此版本」 ----------
 

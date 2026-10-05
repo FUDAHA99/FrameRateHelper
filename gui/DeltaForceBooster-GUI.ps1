@@ -8966,13 +8966,23 @@ function Show-UpdateDialog($UpdInfo) {
 
 # 自动检查发现新版时的统一弹窗出口。同一版本每次程序运行只自动弹一次；用户选了
 # 「稍后再说」仍可点标题栏入口重看，勾「不再提醒」则后续启动也不再自动提示。
-function Show-DetectedUpdateDialog {
-  if (-not $script:UpdateInfo -or $script:Busy -or $script:UpdateDialogOpen -or (Test-TuningExperimentActive)) { return }
+# -Detected：检查回调刚检出新版本时带上。「检测到新版本」那一行日志由这里按实际去向写：当场弹出详情，
+# 还是先压下（正在执行优化/还原、已有更新对话框开着、自动调优实验进行中）——不能说「正在显示」而对话框没出来。
+function Show-DetectedUpdateDialog([switch]$Detected) {
+  if (-not $script:UpdateInfo) { return }
   $ver = "$($script:UpdateInfo.Version)"
   if (-not $ver -or "$script:UpdatePromptedVersion" -eq $ver) { return }
   # 自动弹窗的每个入口（检查回调、忙碌结束时的补弹）都走这里，跳过判断必须放在这里：
   # 手动检查会把 $script:UpdateInfo 设成用户跳过的版本，只在检查回调里过滤，忙碌结束时照样补弹
   if (Test-BoosterUpdateSkipped $script:UpdateInfo) { return }
+  # 当场弹不了的三种情形都不记 UpdatePromptedVersion：忙碌结束时 Set-BusyState 会再走一遍这里
+  $held = $(if ($script:Busy) { '当前操作结束后再显示更新详情' }
+            elseif ($script:UpdateDialogOpen) { '已有更新对话框开着，这次先不弹出' }
+            elseif (Test-TuningExperimentActive) { '自动调优实验进行中，这次先不弹出' })
+  if ($Detected) {
+    Write-Log "检测到新版本 v$($script:UpdateInfo.DisplayVersion)（当前 v$script:DisplayVersion），$(if ($held) { $held } else { '正在显示更新详情' })。"
+  }
+  if ($held) { return }
   $script:UpdatePromptedVersion = $ver
   $script:UpdateDialogOpen = $true
   try {
@@ -9118,10 +9128,8 @@ function Start-UpdateCheck {
           $script:UpdateInfo = $found
           $ui.UpdateBtn.ToolTip = "新版本 v$($found.DisplayVersion) 可用（当前 v$script:DisplayVersion），点击查看详情"
           $ui.UpdateBtn.Visibility = 'Visible'
-          if ($isNew) {
-            Write-Log "检测到新版本 v$($found.DisplayVersion)（当前 v$script:DisplayVersion），正在显示更新详情。"
-            Show-DetectedUpdateDialog
-          }
+          # 「检测到新版本」的日志交给 Show-DetectedUpdateDialog 写：当场弹不弹由它决定
+          if ($isNew) { Show-DetectedUpdateDialog -Detected }
         }
       } catch {} finally { $script:UpdateJob.Dispose(); $script:UpdateCheckBusy = $false }
     })
