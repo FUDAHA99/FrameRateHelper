@@ -52,8 +52,14 @@ Assert-True ($failureHelpers.Count -eq 1) 'Apply failure context helper missing 
   $failedBackup = Get-ApplyFailureContext $postError $true ([pscustomobject]@{
     Backup = $backup; BackupError = 'fixture disk full'; UnrecordedNames = @('item A', '', 'item B') })
   Assert-True ($failedBackup.BackupError -ceq 'fixture disk full' -and (@($failedBackup.UnrecordedNames) -join '|') -ceq 'item A|item B' -and
-    $failedBackup.BackupPath -ceq $backup) `
+    $failedBackup.BackupPath -ceq $backup -and $failedBackup.BackupFailedAfterAllItems -eq $false) `
     "post-admin failure lost the batch's backup error or unrecorded names (error '$($failedBackup.BackupError)', names [$(@($failedBackup.UnrecordedNames) -join '|')])"
+  # 备份在收尾时才失败（独立复核遗留 4）：每一项都已执行，catch 补告警时同样不能说「已中止」
+  $failedAtEnd = Get-ApplyFailureContext $postError $true ([pscustomobject]@{
+    Backup = $backup; BackupError = 'fixture rename denied'; UnrecordedNames = @('item A'); BackupFailedAfterAllItems = $true })
+  Assert-True ($failedAtEnd.BackupFailedAfterAllItems -eq $true -and $post.BackupFailedAfterAllItems -eq $false -and
+    $preflight.BackupFailedAfterAllItems -eq $false) `
+    'post-admin failure did not carry whether the backup failed only after every item ran'
 } $failureHelpers[0].Extent.Text
 
 # 真实点击路径：不再在源码文本里 IndexOf '$adminBatchReturned = $true'——那行被注释掉后
@@ -814,11 +820,13 @@ Add-Type -AssemblyName WindowsBase
       [IO.File]::WriteAllText((Join-Path $afRoot 'scripts\af-scenario.json'),
         ($script:AFScenario | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding($false)))
     }
-    function Set-AFEngineScenario([object[]]$Rows, $Backup, $BackupError, [string[]]$Unrecorded, $ProcessExitCode) {
+    # -AfterAllItems：手写 Data 的 BackupFailedAfterAllItems（同真实引擎：备份在收尾时才失败、每一项都已执行，S9）。
+    function Set-AFEngineScenario([object[]]$Rows, $Backup, $BackupError, [string[]]$Unrecorded, $ProcessExitCode, [switch]$AfterAllItems) {
       $script:AFScenario = [pscustomobject]@{
         Data = [pscustomobject]@{
           ApplyId = [guid]::NewGuid().ToString('D'); Results = @($Rows); Backup = $Backup
           BackupError = $BackupError; UnrecordedNames = @($Unrecorded | Where-Object { $_ })
+          BackupFailedAfterAllItems = [bool]$AfterAllItems
         }
         ProcessExitCode = $ProcessExitCode; Throw = $null; Real = $null
       }
@@ -1125,12 +1133,17 @@ Add-Type -AssemblyName WindowsBase
     # 其余场景的引擎顺序恰好是字母序，单看它们分不出「按顺序」与「排过序」（复攻四 N30/N31）。
     # -BackupError：备份失败的原文不是夹具注入的（S36 改名失败，原文由系统给出、先由场景锚定），按它核对弹窗与告警。
     # -Titles：收尾失败的场景（S38）在备份失败弹窗之后还有 APPLY FINALIZATION FAILED。
+    # -AfterAllItems：备份在收尾（写 complete 状态 S29 / 改名 S36）时才失败，每一项都已执行——引擎交回 BackupFailedAfterAllItems，
+    # 严重告警（界面与命令行）与弹窗开头不许说「剩余优化项已中止执行 / 本轮执行已中止」（独立复核遗留 4）。
     function Assert-AFBackupFailureSurfaced([string]$Scenario, $Published, [string[]]$ExpectedUnrecorded, [string]$BackupError,
-                                            [string]$Titles = 'CONFIRM APPLY|BACKUP WRITE FAILED') {
+                                            [string]$Titles = 'CONFIRM APPLY|BACKUP WRITE FAILED', [switch]$AfterAllItems) {
       $engineLost = (@($Published.Data.UnrecordedNames | ForEach-Object { "$_" }) -join '|')
       $wantLost = (@($ExpectedUnrecorded | Where-Object { $_ }) -join '|')
       Assert-True ($engineLost -ceq $wantLost) `
         "[$Scenario] the real engine's UnrecordedNames were [$engineLost], expected exactly [$wantLost] (the items it changed before the backup-write failure)"
+      Assert-True ($Published.Data.BackupFailedAfterAllItems -is [bool] -and $Published.Data.BackupFailedAfterAllItems -eq [bool]$AfterAllItems) `
+        ("[$Scenario] the real engine published BackupFailedAfterAllItems [$($Published.Data.BackupFailedAfterAllItems)]; expected $([bool]$AfterAllItems) " +
+         "($(if ($AfterAllItems) { 'every item ran, only the final backup save failed' } else { 'the backup failure stopped the run' }))")
       Assert-True ((Get-AFDialogTitles) -ceq $Titles) `
         "[$Scenario] the Apply handler did not show exactly the BACKUP WRITE FAILED dialog after the confirmation: dialogs [$(Get-AFDialogTitles)], expected [$Titles]"
       # 弹窗正文（复攻二）：「· 项名」逐行列出的就是用户手动回退的全部线索，按引擎顺序逐字核对；一个都没有时写「（无）」，
@@ -1144,25 +1157,28 @@ Add-Type -AssemblyName WindowsBase
          "expected exactly [$wantLost]$(if ($wantLost.Length -eq 0) { " shown as '（无）'" }) and the reason '$injected'")
       # 弹窗其余部分（复攻四 N06）：按空行分段，除「已抢救出部分备份」一句（有无与原文由 Assert-AFSalvageSurfaced 逐字核对）外逐段逐字：
       # 开头一句必须说「本轮执行已中止」——截断项之后勾选的项目没有结果行、不进计数，界面上说它们没开始的只有这句与日志里的严重告警；
+      # -AfterAllItems 时开头一句反过来必须说都已执行完、失败的是最后一步保存备份（每一项都有结果行，不能让用户以为后面的项没跑）。
       # 名单前的说明句（没有它，「· 项名」就看不出是「已生效、备份可能没记全」的项）、失败原因、结尾的手动回退指引，都不许丢、改写或换序。
-      # 收尾写 complete 状态失败（S29）、或 complete 已写而改名失败（S36）时每一项都已执行，「本轮执行已中止」与下面两句「剩余优化项已中止执行」并不属实：
-      # 已知遗留、产品决定本补丁不改，这里同样照现状逐字核对。
       $paragraphs = @(Get-AFDialogParagraphs "$($bwf.Message)" $injected | Where-Object { -not $_.Contains('抢救') })
       $listParagraph = "以下改动已经生效、但可能没有完整的备份记录：`n" +
         $(if ($wantLost.Length -gt 0) { @($ExpectedUnrecorded | Where-Object { $_ } | ForEach-Object { "· $_" }) -join "`n" } else { '（无）' })
-      $wantParagraphs = @('备份文件写入失败，本轮执行已中止。', $listParagraph, "失败原因：$injected",
+      $opening = $(if ($AfterAllItems) { '本轮的优化项都已执行完，但最后一步保存备份时写入失败。' } else { '备份文件写入失败，本轮执行已中止。' })
+      $wantParagraphs = @($opening, $listParagraph, "失败原因：$injected",
         '其余项如需回退，请按上面的项名手动处理，或点「导出诊断报告」发给开发者。')
       Assert-True (($paragraphs -join ' || ') -ceq ($wantParagraphs -join ' || ')) `
         ("[$Scenario] the BACKUP WRITE FAILED dialog (salvage sentence aside) read [$(($paragraphs -join ' || ') -replace "`n", ' <LF> ')]; " +
-         "expected paragraph by paragraph [$(($wantParagraphs -join ' || ') -replace "`n", ' <LF> ')] (the opening sentence must say the run was aborted)")
+         "expected paragraph by paragraph [$(($wantParagraphs -join ' || ') -replace "`n", ' <LF> ')] " +
+         "$(if ($AfterAllItems) { '(every item ran: the opening sentence must not say the run was aborted)' } else { '(the opening sentence must say the run was aborted)' })")
       Assert-True ("$($bwf.Chip)" -ceq '备份写入失败') "[$Scenario] the BACKUP WRITE FAILED dialog's chip read '$($bwf.Chip)'; expected '备份写入失败'"
       # 日志与命令行（复攻三 X06–X09、X07）：弹窗点一下就没了，留下来的是界面日志（「导出诊断报告」带走的也是它）和命令行输出。
       # 两处各两句都逐字核对：
       # - 严重告警整句恰好一次，含「剩余优化项已中止执行」——截断项之后勾选的项目没有结果行、不进计数，除弹窗开头一句外只有它说它们没开始；
+      #   -AfterAllItems 时整句改说「本轮的优化项都已执行完，失败的是最后一步保存备份」；
       # - 「以下已生效的改动可能没有完整的备份记录：…」列的必须恰好是引擎的 UnrecordedNames（按引擎顺序），没有就整句不出现。
       #   拿失败行顶替会让用户去手动回退一个根本没改过系统的项（S14），或漏掉真改过的成功项（S20）。
       $namesJoined = (@($ExpectedUnrecorded | Where-Object { $_ }) -join '、')
-      $severeGui = "！！严重：备份文件写入失败（$injected），剩余优化项已中止执行。"
+      $severeTail = $(if ($AfterAllItems) { '。本轮的优化项都已执行完，失败的是最后一步保存备份。' } else { '，剩余优化项已中止执行。' })
+      $severeGui = "！！严重：备份文件写入失败（$injected）$severeTail"
       Assert-True (@($script:AFLog | Where-Object { $_ -ceq $severeGui }).Count -eq 1) `
         "[$Scenario] the GUI's severe backup-failure log line was not exactly '$severeGui' once (GUI lines starting with ！！: $(@($script:AFLog | Where-Object { $_.StartsWith('！！', [StringComparison]::Ordinal) }) -join ' || '))"
       $lostGuiPrefix = '！！以下已生效的改动可能没有完整的备份记录：'
@@ -1171,7 +1187,7 @@ Add-Type -AssemblyName WindowsBase
       Assert-True (($lostGui -join ' || ') -ceq ($wantLostGui -join ' || ')) `
         "[$Scenario] the GUI log's backup-failure line naming changes without a complete backup record was [$($lostGui -join ' || ')]; expected [$($wantLostGui -join ' || ')] (exactly the engine's UnrecordedNames)"
       $cli = @(Get-AFCliOutput)
-      $severeCli = "！！严重警告：备份文件写入失败（$injected），剩余优化项已中止执行。"
+      $severeCli = "！！严重警告：备份文件写入失败（$injected）$severeTail"
       Assert-True (@($cli | Where-Object { $_ -ceq $severeCli }).Count -eq 1) `
         "[$Scenario] the engine's CLI -Apply severe backup-failure line was not exactly '$severeCli' once (CLI lines starting with ！！: $(@($cli | Where-Object { $_.StartsWith('！！', [StringComparison]::Ordinal) }) -join ' || '))"
       $lostCliPrefix = '！！以下已生效的改动可能没有完整的备份记录，如需回退请按项名手动处理：'
@@ -1812,8 +1828,8 @@ Add-Type -AssemblyName WindowsBase
     # 记下 BackupError（退出码 3），把仍是 pending、记录全为 applied 的 .pending.json 作为 Backup 交回（不改名为 .json），
     # 两项都列为「已生效、备份可能没记全」；两行本身都是成功（已写入），需重启的成功项照常提醒重启。
     # 此前这条路径只有 S9 覆盖，而 S9 的 Data 是手写的：真实引擎在这里不交回备份、或吞掉错误照报 exit 0，都照绿。
-    # 已知遗留（产品决定，本补丁不改）：每一项都已执行完，界面严重告警与命令行严重警告仍说「剩余优化项已中止执行」、
-    # 弹窗开头仍说「本轮执行已中止」。这里照现状逐字钉住（Assert-AFBackupFailureSurfaced），日后改这三句须同步改本场景；
+    # 每一项都已执行完（独立复核遗留 4）：引擎交回 BackupFailedAfterAllItems，界面严重告警、命令行严重警告与弹窗开头都说
+    # 「本轮的优化项都已执行完」，不再说「剩余优化项已中止执行 / 本轮执行已中止」（Assert-AFBackupFailureSurfaced -AfterAllItems 逐字核对）；
     # 本批次没有失败行，只按「有没有失败行」改措辞的实现只在这里红。
     $s29Items = @(
       (New-AFRealItem 'fixture-sys'  'fixture system item'   @((New-AFRealOp 'op1')) -Reboot),
@@ -1837,7 +1853,7 @@ Add-Type -AssemblyName WindowsBase
          "Ok=True Changed=True '已写入'; got Ok=$($s29Row.Ok) Changed=$($s29Row.Changed) Skipped=$($s29Row.Skipped) '$($s29Row.Msg)'")
       Assert-AFRowSurfaced 'S29' $s29Row
     }
-    Assert-AFBackupFailureSurfaced 'S29' $pub @('fixture system item', 'fixture system item 2')
+    Assert-AFBackupFailureSurfaced 'S29' $pub @('fixture system item', 'fixture system item 2') -AfterAllItems
     Assert-AFSalvageSurfaced 'S29' $pub @('fixture-sys:reg:op1=applied', 'fixture-sys2:reg:op1=applied', 'fixture-sys2:reg:op2=applied')
     Assert-AFSummarySurfaced 'S29' 2 0 0 @()
     Assert-AFRebootSurfaced 'S29' $pub @('fixture-sys')
@@ -1996,9 +2012,17 @@ Add-Type -AssemblyName WindowsBase
     Set-AFEngineScenario @(
         (New-AFEngineRow 'fixture-sys'  'fixture system item'   $true $true '已写入'),
         (New-AFEngineRow 'fixture-sys2' 'fixture system item 2' $true $true '已写入')
-      ) $pendingBackup 'fixture complete-state rename denied' @('fixture system item', 'fixture system item 2') 1
+      ) $pendingBackup 'fixture complete-state rename denied' @('fixture system item', 'fixture system item 2') 1 -AfterAllItems
     Invoke-AFApplyClick 'S9' 'local' @('fixture-sys', 'fixture-sys2', 'fixture-cache') $true
     $failIdx = Assert-AFFinalizationAfterBatch '[S9] exit-3 all-ok batch with a rewritten process exit code' 3 'fixture cache cleanup exploded'
+    # 告警是收尾失败的 catch 补出来的（遗留 2），措辞同样要跟引擎的 BackupFailedAfterAllItems 走（遗留 4）：每一项都已执行，不许说「已中止」。
+    $s9Severe = '！！严重：备份文件写入失败（fixture complete-state rename denied）。本轮的优化项都已执行完，失败的是最后一步保存备份。'
+    $s9Bwf = @($script:AFDialogs | Where-Object { "$($_.En)" -ceq 'BACKUP WRITE FAILED' })
+    Assert-True (@($script:AFLog | Where-Object { $_ -ceq $s9Severe }).Count -eq 1 -and $s9Bwf.Count -eq 1 -and
+      "$($s9Bwf[0].Message)".StartsWith("本轮的优化项都已执行完，但最后一步保存备份时写入失败。`n`n", [StringComparison]::Ordinal)) `
+      ("[S9] every item ran before the complete-state backup write failed, but the alarm raised on the finalization-failure path still said the run was aborted " +
+       "(severe lines: $(@($script:AFLog | Where-Object { $_.StartsWith('！！严重', [StringComparison]::Ordinal) }) -join ' || '); " +
+       "dialog opening: $(if ($s9Bwf.Count -gt 0) { ("$($s9Bwf[0].Message)" -split "`n")[0] }))")
     Assert-True ($script:AFReply.EngineExitCodeMismatch -eq $true -and
       (Get-AFLogIndex '管理员引擎退出码(1)与结果文件(3)不一致') -ge 0) `
       '[S9] rewritten process exit code did not go through the production result-file-wins path'
@@ -2221,7 +2245,7 @@ Add-Type -AssemblyName WindowsBase
     # 改名失败的原文、退出码 3、Data 照常交回，Backup 是仍在原名的 .pending.json（记录全为 applied），两项都列为「已生效、备份可能没记全」，
     # 界面弹备份失败弹窗。把改名挪出 try（「只有写入会失败」）时异常直接冲出 Invoke-Apply：系统已改、Data 丢失、退出码 1，
     # 界面走前置失败，不再提醒「请不要重复点击」，也拿不到需手动回退的项名。此前只有 S29 走这一处 catch，失败的是写入、不是改名。
-    # 已知遗留同 S29：每一项都已执行，严重告警与弹窗开头仍说「已中止」，照现状逐字钉住。
+    # 同 S29：每一项都已执行，严重告警与弹窗开头说「都已执行完」，不说「已中止」。
     $s36Collision = Get-AFRenameCollisionMessage
     Assert-True ($s36Collision.Length -gt 0) `
       '[S36] fixture problem: moving a file onto an existing file did not fail in this process, so there is no rename error to expect'
@@ -2251,7 +2275,7 @@ Add-Type -AssemblyName WindowsBase
          "got Ok=$($s36Row.Ok) Changed=$($s36Row.Changed) Skipped=$($s36Row.Skipped) '$($s36Row.Msg)'")
       Assert-AFRowSurfaced 'S36' $s36Row
     }
-    Assert-AFBackupFailureSurfaced 'S36' $pub @('fixture system item', 'fixture system item 2') -BackupError $s36Error
+    Assert-AFBackupFailureSurfaced 'S36' $pub @('fixture system item', 'fixture system item 2') -BackupError $s36Error -AfterAllItems
     # 夹具的占位文件已完成使命：移走它，下面的目录核对只看引擎留下了什么。
     Remove-Item -LiteralPath $completeBackup -Force
     Assert-AFSalvageSurfaced 'S36' $pub @('fixture-sys:reg:op1=applied', 'fixture-sys2:reg:op1=applied', 'fixture-sys2:reg:op2=applied') -BackupError $s36Error

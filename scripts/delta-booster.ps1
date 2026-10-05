@@ -3969,7 +3969,9 @@ function Invoke-Apply([string[]]$ItemIds, [string]$GamePath, [bool]$AllowRisky, 
   $applyId = [guid]::NewGuid().ToString('D')
   # PersistedOps：真正落过盘的撤销记录条数。写失败的那一条只在内存里（Write-BytesAtomic 抛错时
   # 盘上的文件原样不动），收尾判断「有没有抢救出备份」只能看它，不能看内存里的 Ops
-  $journal = [pscustomobject]@{ Document = $null; Path = $null; Error = $null; CurrentItem = $null; CurrentOpIndex = 0; PersistedOps = 0 }
+  # FailedAtCompletion：备份是在收尾（写 complete 状态 / 改名）时才失败的——每一项都已执行，没有项目被中止
+  $journal = [pscustomobject]@{ Document = $null; Path = $null; Error = $null; CurrentItem = $null; CurrentOpIndex = 0; PersistedOps = 0
+                                FailedAtCompletion = $false }
   if ($needsJournal) {
     try {
       Initialize-ProtectedStore
@@ -4175,6 +4177,8 @@ function Invoke-Apply([string[]]$ItemIds, [string]$GamePath, [bool]$AllowRisky, 
       [IO.File]::Move($journal.Path, $bf)
     } catch {
       $journal.Error = $_.Exception.Message
+      # 逐项循环只在备份落盘失败时提前停下；走到收尾说明每一项都执行过了
+      $journal.FailedAtCompletion = $true
       $journal.Document.State = 'pending'
       $bf = $journal.Path
     }
@@ -4189,7 +4193,9 @@ function Invoke-Apply([string[]]$ItemIds, [string]$GamePath, [bool]$AllowRisky, 
       $_.Changed -and -not $_.Attention -and $_.Msg -notlike '纯检测：*'
     } | ForEach-Object { $_.Name })
   }
-  [pscustomobject]@{ ApplyId = $applyId; Results = $results; Backup = $bf; BackupError = $journal.Error; UnrecordedNames = $unrecorded }
+  # BackupFailedAfterAllItems：调用方据此区分「剩余优化项已中止」与「都执行完了、只是最后保存备份失败」
+  [pscustomobject]@{ ApplyId = $applyId; Results = $results; Backup = $bf; BackupError = $journal.Error; UnrecordedNames = $unrecorded
+                     BackupFailedAfterAllItems = [bool]$journal.FailedAtCompletion }
   } finally { Exit-EngineMutex $engineMutex }
 }
 
@@ -5882,7 +5888,8 @@ elseif ($Apply) {
     if ($r.Backup) { Write-Output "备份已保存：$($r.Backup)（用 -Restore 可一键还原）" }
     # 备份写盘失败是最高级别的告警：系统已经改了、备份却没记全，必须当场把线索给全
     if ($r.BackupError) {
-      Write-Output "！！严重警告：备份文件写入失败（$($r.BackupError)），剩余优化项已中止执行。"
+      Write-Output $(if ($r.BackupFailedAfterAllItems) { "！！严重警告：备份文件写入失败（$($r.BackupError)）。本轮的优化项都已执行完，失败的是最后一步保存备份。" }
+                     else { "！！严重警告：备份文件写入失败（$($r.BackupError)），剩余优化项已中止执行。" })
       if (@($r.UnrecordedNames).Count -gt 0) {
         Write-Output "！！以下已生效的改动可能没有完整的备份记录，如需回退请按项名手动处理：$(@($r.UnrecordedNames) -join '、')"
       }
