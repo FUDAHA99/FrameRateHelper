@@ -1,10 +1,10 @@
 {
-    "version":  "1.0.0.0",
-    "displayVersion":  "1.0.0.0",
+    "version":  "1.0.0.1",
+    "displayVersion":  "1.0.0.1",
     "minimumSupportedVersion":  "1.0.0.0",
-    "notes":  "- 「帧率优化助手」的第一个版本。基于 Leonard8818/-Delta-Force-Graphics-Optimizer（MIT）分支重做。\r\n- 默认不收集、不上报任何使用数据：上游那整套遥测与匿名上报已删除，界面上也不再有相关开关。\r\n- 从旧版本升级会迁移你的自存优化方案、性能历史与原始电源方案记录；不在迁移清单内的文件会跳过并在日志里说明，原文件保留在原位置。\r\n- 修正：关闭鼠标「提高指针精确度」要重新登录后才生效，界面此前写的是「写入后立即生效」。\r\n- 窗口可以拖动缩放并记住宽度；导出诊断反馈的两组选项新增全选。",
+    "notes":  "- 修复：勾选「不再提醒此版本」后，软件启动时和运行中仍会自动弹出这个版本的更新提示。\r\n- 修复：启动日志会记下完整的会话标记，现在只记前 8 位。\r\n- 修复：备份写入失败时的结果说明与实际不符，例如什么都没写却说「其余已写入」「已抢救出部分备份」。\r\n- 更正：安装完成页关于管理员确认（UAC）的说明，以及升级后「重要提醒」里的按钮名称。",
     "url":  "https://github.com/FUDAHA99/FrameRateHelper/releases/latest",
-    "setupUrl":  "https://github.com/FUDAHA99/FrameRateHelper/releases/download/v1.0.0.0/DeltaForceBooster-Setup.exe",
-    "sha256":  "2c4848f10d6eb0361bfc75563a0af7452cdcf256dd28276cdf69d7bb1a9e2464",
-    "size":  985600
+    "setupUrl":  "https://github.com/FUDAHA99/FrameRateHelper/releases/download/v1.0.0.1/DeltaForceBooster-Setup.exe",
+    "sha256":  "47f5c2497da23a6e5d5122a463c928724a18f8f6a1d58d629d9b28d004dc4fd7",
+    "size":  989184
 }
