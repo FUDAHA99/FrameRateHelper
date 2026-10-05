@@ -15,8 +15,8 @@
 | `update-manifest.json` | 更新清单。内置更新会读它，并强制校验下面的 SHA256 与文件大小 |
 
 ```
-SHA256  2c4848f10d6eb0361bfc75563a0af7452cdcf256dd28276cdf69d7bb1a9e2464
-大小    985600 字节
+SHA256  47f5c2497da23a6e5d5122a463c928724a18f8f6a1d58d629d9b28d004dc4fd7
+大小    989184 字节
 ```
 
 Windows 下核对：
